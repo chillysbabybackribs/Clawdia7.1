@@ -268,6 +268,8 @@ function formatWorkflowStage(stage?: WorkflowStage): string | null {
     executing: 'Executing',
     reviewing: 'Reviewing',
     completed: 'Completed',
+    failed: 'Failed',
+    cancelled: 'Cancelled',
   }[stage] || stage;
 }
 

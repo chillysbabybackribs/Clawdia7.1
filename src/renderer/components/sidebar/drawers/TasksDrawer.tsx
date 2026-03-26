@@ -322,7 +322,7 @@ function TaskRow({
           )}
           {latestRunLabel && (
             <div className="flex items-center gap-1.5 mt-1.5 min-w-0">
-              <RunDot status={runningNow ? 'running' : latestRun.status} />
+              <RunDot status={runningNow ? 'running' : (latestRun?.status ?? 'completed')} />
               <span className="text-muted text-[9px] font-mono whitespace-nowrap">
                 {latestRunLabel}
               </span>

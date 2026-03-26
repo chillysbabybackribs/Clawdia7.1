@@ -26,6 +26,8 @@ declare global {
       refresh: () => Promise<any>;
       setBounds: (bounds: any) => Promise<any>;
       getExecutionMode: () => Promise<string>;
+      listSessions: () => Promise<string[]>;
+      clearSession: (domain: string) => Promise<any>;
       onUrlChanged: (cb: (url: string) => void) => () => void;
       onTitleChanged: (cb: (title: string) => void) => () => void;
       onLoading: (cb: (loading: boolean) => void) => () => void;
