@@ -102,4 +102,40 @@ describe('runClaudeCode', () => {
     mockChild.emit('close', 1);
     await expect(promise).rejects.toThrow();
   });
+
+  it('falls back to result text when no assistant message produced text', async () => {
+    const chunks: string[] = [];
+    const promise = runClaudeCode({
+      conversationId: 'conv-1',
+      prompt: 'hello',
+      onText: (t) => chunks.push(t),
+    });
+
+    const resultLine = JSON.stringify({
+      type: 'result',
+      session_id: 'sess-xyz',
+      result: 'Fallback response text',
+    });
+    mockStdout.emit('data', Buffer.from(resultLine + '\n'));
+    mockChild.emit('close', 0);
+    await promise;
+
+    expect(chunks).toContain('Fallback response text');
+  });
+
+  it('returns finalText and sessionId in the result', async () => {
+    const promise = runClaudeCode({ conversationId: 'conv-1', prompt: 'hello', onText: () => {} });
+
+    const assistantLine = JSON.stringify({
+      type: 'assistant',
+      message: { content: [{ type: 'text', text: 'The answer' }], stop_reason: 'end_turn' },
+    });
+    const resultLine = JSON.stringify({ type: 'result', session_id: 'sess-ret', result: '' });
+    mockStdout.emit('data', Buffer.from(assistantLine + '\n' + resultLine + '\n'));
+    mockChild.emit('close', 0);
+    const result = await promise;
+
+    expect(result.finalText).toBe('The answer');
+    expect(result.sessionId).toBe('sess-ret');
+  });
 });
