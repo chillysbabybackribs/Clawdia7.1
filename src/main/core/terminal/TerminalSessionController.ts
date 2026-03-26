@@ -217,11 +217,9 @@ export class TerminalSessionController extends EventEmitter {
   appendOutput(id: string, data: string): boolean {
     const session = this.sessions.get(id);
     if (!session) return false;
-    if (session.kind === 'live') {
-      session.output += data;
-      if (session.output.length > MAX_OUTPUT_BUFFER) {
-        session.output = session.output.slice(session.output.length - MAX_OUTPUT_BUFFER);
-      }
+    session.output += data;
+    if (session.output.length > MAX_OUTPUT_BUFFER) {
+      session.output = session.output.slice(session.output.length - MAX_OUTPUT_BUFFER);
     }
     this.emit('data', { id, data });
     return true;
