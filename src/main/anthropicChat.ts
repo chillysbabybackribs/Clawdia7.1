@@ -152,10 +152,16 @@ export async function streamAnthropicChat({
       model: apiModelId,
       max_tokens: 8192,
       messages: messagesForRequest,
-      system: `You have access to a local CLI environment. Use the native bash tool to execute shell commands and explore the system. Use the native str_replace_based_edit_tool tool to read and edit files. Use these tools efficiently to accomplish the user's tasks. Do not wait for user permission to use these tools unless it involves a destructive system change.`,
+      system: [
+        {
+          type: 'text' as const,
+          text: `You have access to a local CLI environment. Use the native bash tool to execute shell commands and explore the system. Use the native str_replace_based_edit_tool tool to read and edit files. Use these tools efficiently to accomplish the user's tasks. Do not wait for user permission to use these tools unless it involves a destructive system change.`,
+          cache_control: { type: 'ephemeral' as const },
+        },
+      ] as any,
       tools: [
         { type: 'bash_20250124', name: 'bash' } as any,
-        { type: 'text_editor_20250728', name: 'str_replace_based_edit_tool' } as any
+        { type: 'text_editor_20250728', name: 'str_replace_based_edit_tool', cache_control: { type: 'ephemeral' as const } } as any
       ],
     };
 
@@ -201,7 +207,11 @@ export async function streamAnthropicChat({
       model: apiModelId,
       max_tokens: 8192,
       messages,
-      tools: BROWSER_TOOLS,
+      tools: BROWSER_TOOLS.map((t, i) =>
+        i === BROWSER_TOOLS.length - 1
+          ? { ...t, cache_control: { type: 'ephemeral' as const } }
+          : t
+      ) as any,
     };
     return client.messages.create(body, { signal });
   };
