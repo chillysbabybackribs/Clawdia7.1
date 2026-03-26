@@ -6,7 +6,7 @@ import type { MessageAttachment } from '../shared/types';
 import { BROWSER_TOOLS, executeBrowserTool } from './core/cli/browserTools';
 import type { BrowserService } from './core/browser/BrowserService';
 import { truncateBrowserResult } from './core/cli/truncate';
-import { SHARED_SYSTEM_PROMPT } from './core/cli/systemPrompt';
+import { SHARED_SYSTEM_PROMPT, ANTHROPIC_STREAM_SYSTEM_PROMPT } from './core/cli/systemPrompt';
 
 /** Anthropic API accepts the same model ids as the in-app registry (e.g. claude-sonnet-4-6). */
 export function resolveAnthropicModelId(registryId: string): string {
@@ -156,7 +156,7 @@ export async function streamAnthropicChat({
       system: [
         {
           type: 'text' as const,
-          text: SHARED_SYSTEM_PROMPT,
+          text: ANTHROPIC_STREAM_SYSTEM_PROMPT,
           cache_control: { type: 'ephemeral' as const },
         },
       ] as any,
