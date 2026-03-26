@@ -113,6 +113,8 @@ export class TerminalSessionController extends EventEmitter {
     });
 
     proc.onExit(({ exitCode, signal }) => {
+      // Only archive if this session is still the current one (guard against re-spawn race)
+      if (this.sessions.get(id) !== session) return;
       const archived: ArchivedSession = {
         kind: 'archived',
         sessionId: id,
@@ -125,6 +127,12 @@ export class TerminalSessionController extends EventEmitter {
         signal,
       };
       this.sessions.set(id, archived);
+      // Evict oldest archived sessions when archive grows too large
+      const MAX_ARCHIVED = 50;
+      const archived_entries = Array.from(this.sessions.entries()).filter(([, s]) => s.kind === 'archived');
+      if (archived_entries.length > MAX_ARCHIVED) {
+        this.sessions.delete(archived_entries[0][0]);
+      }
       this.emit('exit', { id, code: exitCode ?? 0, signal });
       this.emit('sessionState', this._toState(archived));
     });
