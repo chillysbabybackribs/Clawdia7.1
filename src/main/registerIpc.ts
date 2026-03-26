@@ -199,6 +199,7 @@ export function registerIpc(browserService: ElectronBrowserService): void {
       attachments,
       sessionMessages,
       signal: chatAbort.signal,
+      browserService,
     });
   });
 
