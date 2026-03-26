@@ -42,7 +42,7 @@ contextBridge.exposeInMainWorld('clawdia', {
     setMode: (id: string, mode: string) => ipcRenderer.invoke(IPC.CHAT_SET_MODE, id, mode),
     getActiveTerminalSession: (_conversationId?: string | null) =>
       ipcRenderer.invoke(IPC.CHAT_GET_ACTIVE_TERMINAL_SESSION),
-    delete: (_id: string) => ipcRenderer.invoke(IPC.CHAT_DELETE),
+    delete: (id: string) => ipcRenderer.invoke(IPC.CHAT_DELETE, id),
     onStreamText: (cb: (text: string) => void) => onEvent<string>(IPC_EVENTS.CHAT_STREAM_TEXT, cb),
     onStreamEnd: (cb: (data: any) => void) => onEvent(IPC_EVENTS.CHAT_STREAM_END, cb),
     onWorkflowPlanReset: (cb: () => void) => onEvent(IPC_EVENTS.CHAT_WORKFLOW_PLAN_RESET, cb),
@@ -121,17 +121,17 @@ contextBridge.exposeInMainWorld('clawdia', {
   },
 
   agent: {
-    list: () => Promise.resolve([]),
-    get: (_id: string) => Promise.resolve(null),
-    create: (_input: any) => Promise.resolve(null),
-    compile: (_input: any) => Promise.resolve({ ok: false, definition: null, error: 'stub' }),
-    update: (_id: string, _patch: any) => Promise.resolve(null),
-    delete: (_id: string) => Promise.resolve({ ok: false }),
-    run: (_id: string) => Promise.resolve({ ok: false }),
-    runOnCurrentPage: (_id: string) => Promise.resolve({ ok: false }),
-    runOnUrls: (_id: string, _urls: string[]) => Promise.resolve({ ok: false }),
-    history: (_id: string) => Promise.resolve([]),
-    test: (_id: string) => Promise.resolve({ ok: false }),
+    list: () => ipcRenderer.invoke(IPC.AGENT_LIST),
+    get: (id: string) => ipcRenderer.invoke(IPC.AGENT_GET, id),
+    create: (input: any) => ipcRenderer.invoke(IPC.AGENT_CREATE, input),
+    compile: (input: any) => ipcRenderer.invoke(IPC.AGENT_COMPILE, input),
+    update: (id: string, patch: any) => ipcRenderer.invoke(IPC.AGENT_UPDATE, id, patch),
+    delete: (id: string) => ipcRenderer.invoke(IPC.AGENT_DELETE, id),
+    run: (id: string) => ipcRenderer.invoke(IPC.AGENT_RUN, id),
+    runOnCurrentPage: (id: string) => ipcRenderer.invoke(IPC.AGENT_RUN_CURRENT_PAGE, id),
+    runOnUrls: (id: string, urls: string[]) => ipcRenderer.invoke(IPC.AGENT_RUN_URLS, id, urls),
+    history: (id: string) => ipcRenderer.invoke(IPC.AGENT_HISTORY, id),
+    test: (id: string) => ipcRenderer.invoke(IPC.AGENT_TEST, id),
   },
 
   calendar: {

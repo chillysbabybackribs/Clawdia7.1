@@ -20,6 +20,13 @@ import {
   getRunEvents,
 } from './db';
 import { listPolicyProfiles } from './db/policies';
+import {
+  createAgent,
+  getAgent,
+  listAgents,
+  updateAgent,
+  deleteAgent,
+} from './db/agents';
 import { evaluatePolicy } from './agent/policy-engine';
 import { a11yListApps } from './core/desktop/a11y';
 import { smartFocus } from './core/desktop/smartFocus';
@@ -413,5 +420,76 @@ export function registerIpc(browserService: ElectronBrowserService): void {
   // ── Spending ────────────────────────────────────────────────────────────────
   ipcMain.handle(IPC.WALLET_GET_REMAINING_BUDGETS, () => {
     return getRemainingBudgets();
+  });
+
+  // ── Agents ──────────────────────────────────────────────────────────────────
+  ipcMain.handle(IPC.AGENT_LIST, () => {
+    return listAgents();
+  });
+
+  ipcMain.handle(IPC.AGENT_GET, (_e, id: string) => {
+    return getAgent(id);
+  });
+
+  ipcMain.handle(IPC.AGENT_CREATE, (_e, input: Partial<import('../shared/types').AgentDefinition> & { goal: string }) => {
+    const now = new Date().toISOString();
+    const agent: import('../shared/types').AgentDefinition = {
+      id: `agent-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+      name: input.name || 'Untitled Agent',
+      description: input.description || '',
+      agentType: input.agentType || 'general',
+      status: 'draft',
+      goal: input.goal,
+      blueprint: input.blueprint,
+      successDescription: input.successDescription,
+      resourceScope: input.resourceScope || {},
+      operationMode: input.operationMode || 'read_only',
+      mutationPolicy: input.mutationPolicy || 'no_mutation',
+      approvalPolicy: input.approvalPolicy || 'always_ask',
+      launchModes: input.launchModes || ['manual'],
+      defaultLaunchMode: input.defaultLaunchMode || 'manual',
+      config: input.config || {},
+      outputMode: input.outputMode || 'chat_message',
+      outputTarget: input.outputTarget,
+      schedule: input.schedule || null,
+      lastTestStatus: 'untested',
+      createdAt: now,
+      updatedAt: now,
+    };
+    createAgent(agent);
+    return agent;
+  });
+
+  ipcMain.handle(IPC.AGENT_UPDATE, (_e, id: string, patch: Partial<import('../shared/types').AgentDefinition>) => {
+    return updateAgent(id, patch);
+  });
+
+  ipcMain.handle(IPC.AGENT_DELETE, (_e, id: string) => {
+    deleteAgent(id);
+    return { ok: true };
+  });
+
+  ipcMain.handle(IPC.AGENT_HISTORY, (_e, _agentId: string) => {
+    return [];
+  });
+
+  ipcMain.handle(IPC.AGENT_RUN, () => {
+    return { ok: false, error: 'Agent execution not yet implemented' };
+  });
+
+  ipcMain.handle(IPC.AGENT_RUN_CURRENT_PAGE, () => {
+    return { ok: false, error: 'Agent execution not yet implemented' };
+  });
+
+  ipcMain.handle(IPC.AGENT_RUN_URLS, () => {
+    return { ok: false, error: 'Agent execution not yet implemented' };
+  });
+
+  ipcMain.handle(IPC.AGENT_TEST, () => {
+    return { ok: false, error: 'Agent testing not yet implemented' };
+  });
+
+  ipcMain.handle(IPC.AGENT_COMPILE, () => {
+    return { ok: false, definition: null, error: 'Agent compilation not yet implemented' };
   });
 }
