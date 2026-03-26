@@ -16,14 +16,7 @@ export default function AppChrome() {
 
       <div
         className="text-[11px] font-medium uppercase tracking-[0.16em]"
-        style={{
-          color: '#6e6e82',
-          border: '1px solid rgba(255,255,255,0.10)',
-          padding: '3px 12px',
-          borderRadius: '4px',
-          background: 'rgba(255,255,255,0.02)',
-          boxShadow: 'inset 0 1px 0 rgba(255,255,255,0.04), 0 1px 4px rgba(0,0,0,0.4)',
-        }}
+        style={{ color: '#e8d98a' }}
       >
         Clawdia Workspace
       </div>
