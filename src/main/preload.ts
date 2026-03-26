@@ -235,4 +235,38 @@ contextBridge.exposeInMainWorld('clawdia', {
     onRunStarted: (_cb: (payload: any) => void) => noop,
     onRunComplete: (_cb: (payload: any) => void) => noop,
   },
+
+  videoExtractor: {
+    checkYtdlp: () => ipcRenderer.invoke('check-ytdlp'),
+    installYtdlp: () => ipcRenderer.invoke('install-ytdlp'),
+    openFolderDialog: () => ipcRenderer.invoke('open-folder-dialog'),
+    getHomeDir: () => ipcRenderer.invoke('get-home-dir'),
+    startDownload: (opts: {
+      url: string;
+      outputDir: string;
+      quality: string;
+      format: string;
+      audio: string;
+    }) => ipcRenderer.invoke('start-download', opts),
+    onProgress: (cb: (data: { percent: number | null; line: string }) => void) => {
+      const handler = (_: any, data: any) => cb(data);
+      ipcRenderer.on('download-progress', handler);
+      return () => ipcRenderer.removeListener('download-progress', handler);
+    },
+    onComplete: (cb: (data: { filePath: string }) => void) => {
+      const handler = (_: any, data: any) => cb(data);
+      ipcRenderer.on('download-complete', handler);
+      return () => ipcRenderer.removeListener('download-complete', handler);
+    },
+    onError: (cb: (data: { message: string }) => void) => {
+      const handler = (_: any, data: any) => cb(data);
+      ipcRenderer.on('download-error', handler);
+      return () => ipcRenderer.removeListener('download-error', handler);
+    },
+    onInstallProgress: (cb: (data: { line: string }) => void) => {
+      const handler = (_: any, data: any) => cb(data);
+      ipcRenderer.on('install-ytdlp-progress', handler);
+      return () => ipcRenderer.removeListener('install-ytdlp-progress', handler);
+    },
+  },
 });
