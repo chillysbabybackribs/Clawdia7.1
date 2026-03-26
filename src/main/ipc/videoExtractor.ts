@@ -2,27 +2,34 @@
 import { ipcMain, dialog, BrowserWindow } from 'electron';
 import { spawn, exec } from 'child_process';
 import * as os from 'os';
+import * as path from 'path';
 
 export function registerVideoExtractorIpc(win: BrowserWindow): void {
 
   // Check if yt-dlp is installed
-  ipcMain.handle('check-ytdlp', async () => {
+  ipcMain.removeHandler('check-ytdlp');
+  ipcMain.handle('check-ytdlp', () => {
     return new Promise<{ installed: boolean }>((resolve) => {
-      exec('which yt-dlp', (err) => {
+      exec('yt-dlp --version', (err) => {
         resolve({ installed: !err });
       });
     });
   });
 
   // Install yt-dlp via pip
+  ipcMain.removeHandler('install-ytdlp');
   ipcMain.handle('install-ytdlp', async () => {
     return new Promise<{ success: boolean; error?: string }>((resolve) => {
-      const pip = spawn('pip3', ['install', 'yt-dlp'], { shell: true });
+      const pip = spawn('pip3', ['install', 'yt-dlp'], { shell: false });
       pip.stdout.on('data', (data: Buffer) => {
-        win.webContents.send('install-ytdlp-progress', { line: data.toString() });
+        if (!win.isDestroyed()) {
+          win.webContents.send('install-ytdlp-progress', { line: data.toString() });
+        }
       });
       pip.stderr.on('data', (data: Buffer) => {
-        win.webContents.send('install-ytdlp-progress', { line: data.toString() });
+        if (!win.isDestroyed()) {
+          win.webContents.send('install-ytdlp-progress', { line: data.toString() });
+        }
       });
       pip.on('close', (code) => {
         if (code === 0) resolve({ success: true });
@@ -32,6 +39,7 @@ export function registerVideoExtractorIpc(win: BrowserWindow): void {
   });
 
   // Open folder picker dialog
+  ipcMain.removeHandler('open-folder-dialog');
   ipcMain.handle('open-folder-dialog', async () => {
     const result = await dialog.showOpenDialog(win, {
       properties: ['openDirectory'],
@@ -41,6 +49,7 @@ export function registerVideoExtractorIpc(win: BrowserWindow): void {
   });
 
   // Start a yt-dlp download
+  ipcMain.removeHandler('start-download');
   ipcMain.handle('start-download', async (_event, {
     url,
     outputDir,
@@ -57,32 +66,39 @@ export function registerVideoExtractorIpc(win: BrowserWindow): void {
     const args = buildYtdlpArgs(url, outputDir, quality, format, audio);
     const proc = spawn('yt-dlp', args, { shell: false });
 
+    let lastFile = '';
+
+    // Single stdout listener handles both progress streaming and filename tracking
     proc.stdout.on('data', (data: Buffer) => {
       const line = data.toString();
       const percentMatch = line.match(/(\d+\.\d+)%/);
       const percent = percentMatch ? parseFloat(percentMatch[1]) : null;
-      win.webContents.send('download-progress', { percent, line: line.trim() });
+      if (!win.isDestroyed()) {
+        win.webContents.send('download-progress', { percent, line: line.trim() });
+      }
+      const destMatch = line.match(/Destination:\s+(.+)/);
+      if (destMatch) lastFile = destMatch[1].trim();
+      const mergeMatch = line.match(/Merging formats into "(.+?)"/);
+      if (mergeMatch) lastFile = mergeMatch[1].trim();
     });
 
     proc.stderr.on('data', (data: Buffer) => {
-      win.webContents.send('download-progress', { percent: null, line: data.toString().trim() });
+      if (!win.isDestroyed()) {
+        win.webContents.send('download-progress', { percent: null, line: data.toString().trim() });
+      }
     });
 
     return new Promise<{ success: boolean; filePath?: string; error?: string }>((resolve) => {
-      let lastFile = '';
-      proc.stdout.on('data', (data: Buffer) => {
-        const line = data.toString();
-        const destMatch = line.match(/Destination:\s+(.+)/);
-        if (destMatch) lastFile = destMatch[1].trim();
-        const mergeMatch = line.match(/Merging formats into "(.+?)"/);
-        if (mergeMatch) lastFile = mergeMatch[1].trim();
-      });
       proc.on('close', (code) => {
         if (code === 0) {
-          win.webContents.send('download-complete', { filePath: lastFile || outputDir });
+          if (!win.isDestroyed()) {
+            win.webContents.send('download-complete', { filePath: lastFile || outputDir });
+          }
           resolve({ success: true, filePath: lastFile || outputDir });
         } else {
-          win.webContents.send('download-error', { message: `yt-dlp exited with code ${code}` });
+          if (!win.isDestroyed()) {
+            win.webContents.send('download-error', { message: `yt-dlp exited with code ${code}` });
+          }
           resolve({ success: false, error: `yt-dlp exited with code ${code}` });
         }
       });
@@ -90,14 +106,14 @@ export function registerVideoExtractorIpc(win: BrowserWindow): void {
   });
 }
 
-function buildYtdlpArgs(
+export function buildYtdlpArgs(
   url: string,
   outputDir: string,
   quality: string,
   format: string,
   audio: string,
 ): string[] {
-  const output = `${outputDir}/%(title)s.%(ext)s`;
+  const output = path.join(outputDir, '%(title)s.%(ext)s');
   const args: string[] = [url, '-o', output, '--newline'];
 
   const isAudioOnly = audio !== 'Video';
