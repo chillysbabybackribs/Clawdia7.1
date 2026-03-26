@@ -111,17 +111,17 @@ export async function launchOBS(): Promise<StepResult> {
   const startMs = Date.now();
   const step = 'launchOBS';
 
-  // Already running?
+  // Kill any existing OBS (may lack QT_ACCESSIBILITY=1) and relaunch fresh
   const windows = await executeGuiInteract({ action: 'list_windows' });
   if (/OBS/.test(String(windows))) {
-    await focusOBS();
-  } else {
-    await run(`${OBS_PILOT_CONFIG.obsExecutable} &`);
-    const appeared = await waitForWindow(/OBS/, OBS_PILOT_CONFIG.launchTimeoutMs);
-    if (!appeared) return makeResult(step, false, { startMs, failType: 'timeout', confidence: 0 });
-    await focusOBS();
-    await wait(1000);
+    await run('pkill -x obs || true');
+    await wait(2000);
   }
+  await run(`QT_ACCESSIBILITY=1 ${OBS_PILOT_CONFIG.obsExecutable} &`);
+  const appeared = await waitForWindow(/OBS/, OBS_PILOT_CONFIG.launchTimeoutMs);
+  if (!appeared) return makeResult(step, false, { startMs, failType: 'timeout', confidence: 0 });
+  await focusOBS();
+  await wait(2000); // extra settle time for AT-SPI to register
 
   const shot = await screenshotBase64();
   if (!shot) return makeResult(step, false, { startMs, failType: 'verify_failed', confidence: 0 });
@@ -181,12 +181,12 @@ export async function selectScene(name: string): Promise<StepResult> {
   return withRetry(
     'selectScene',
     async () => {
-      const r = await a11yDoAction(OBS_PILOT_CONFIG.appName, 'list item', name, 'click');
-      return {
-        ok: r.success ?? false,
-        locatorUsed: 'a11y' as LocatorUsed,
-        failType: (r.success ?? false) ? null : 'element_not_found' as FailType,
-      };
+      // AT-SPI unavailable for OBS Qt6 — click first item in Scenes list via coord
+      await executeGuiInteract({ action: 'focus', window: 'OBS' });
+      await wait(200);
+      const r = await executeGuiInteract({ action: 'click', x: 155, y: 820 });
+      const ok = !String(r).startsWith('[Error]');
+      return { ok, locatorUsed: 'coord' as LocatorUsed, failType: ok ? null : 'element_not_found' as FailType };
     },
     `The scene named "${name}" is selected in the Scenes panel`,
   );

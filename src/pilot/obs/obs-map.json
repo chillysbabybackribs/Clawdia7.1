@@ -1,6 +1,6 @@
 {
   "app": "obs-studio",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "updated": "2026-03-26",
   "screens": {
     "main": {
@@ -80,18 +80,18 @@
     }
   },
   "controls": {
-    "sceneAddBtn":    { "a11yRole": "push button", "a11yName": "Add",      "region": "scenes",          "ocrFallback": "+" },
-    "sceneRemoveBtn": { "a11yRole": "push button", "a11yName": "Remove",   "region": "scenes",          "ocrFallback": "-" },
-    "sourceAddBtn":   { "a11yRole": "push button", "a11yName": "Add",      "region": "sources",         "ocrFallback": "+" },
-    "sourceRemoveBtn":{ "a11yRole": "push button", "a11yName": "Remove",   "region": "sources",         "ocrFallback": "-" },
-    "micMuteBtn":     { "a11yRole": "push button", "a11yName": "Mute",     "region": "mixer",           "ocrFallback": "Mute",     "toggleState": true },
-    "desktopMuteBtn": { "a11yRole": "push button", "a11yName": "Mute",     "region": "mixer",           "ocrFallback": "Mute",     "toggleState": true },
-    "transitionCombo":{ "a11yRole": "combo box",   "a11yName": null,       "region": "transitions",     "ocrFallback": "Fade",     "knownValues": ["Cut","Fade","Swipe","Slide","Stinger","Luma Wipe"] },
-    "settingsBtn":    { "a11yRole": "push button", "a11yName": "Settings", "region": "controls",        "ocrFallback": "Settings" },
-    "settingsOkBtn":  { "a11yRole": "push button", "a11yName": "OK",       "region": "settingsButtons", "ocrFallback": "OK" },
-    "settingsCloseBtn":{ "a11yRole": "push button","a11yName": "Close",    "region": "settingsButtons", "ocrFallback": "Close" },
-    "sceneNameInput": { "a11yRole": "text",        "a11yName": null,       "region": "addScene",        "ocrFallback": "" },
-    "sourceTypeList": { "a11yRole": "list",        "a11yName": null,       "region": "addSource",       "ocrFallback": "" }
+    "sceneAddBtn":     { "a11yRole": "push button", "a11yName": "Add",      "region": "scenes",          "ocrFallback": "+",        "coord": [22,  1033] },
+    "sceneRemoveBtn":  { "a11yRole": "push button", "a11yName": "Remove",   "region": "scenes",          "ocrFallback": "-",        "coord": [50,  1033] },
+    "sourceAddBtn":    { "a11yRole": "push button", "a11yName": "Add",      "region": "sources",         "ocrFallback": "+",        "coord": [330, 1028] },
+    "sourceRemoveBtn": { "a11yRole": "push button", "a11yName": "Remove",   "region": "sources",         "ocrFallback": "-",        "coord": [358, 1028] },
+    "micMuteBtn":      { "a11yRole": "push button", "a11yName": "Mute",     "region": "mixer",           "ocrFallback": "Mute",     "coord": [980, 917],  "toggleState": true },
+    "desktopMuteBtn":  { "a11yRole": "push button", "a11yName": "Mute",     "region": "mixer",           "ocrFallback": "Mute",     "coord": [980, 855],  "toggleState": true },
+    "transitionCombo": { "a11yRole": "combo box",   "a11yName": null,       "region": "transitions",     "ocrFallback": "Fade",     "coord": [1110, 883], "knownValues": ["Cut","Fade","Swipe","Slide","Stinger","Luma Wipe"] },
+    "settingsBtn":     { "a11yRole": "push button", "a11yName": "Settings", "region": "controls",        "ocrFallback": "Settings", "coord": [1421, 955] },
+    "settingsOkBtn":   { "a11yRole": "push button", "a11yName": "OK",       "region": "settingsButtons", "ocrFallback": "OK" },
+    "settingsCloseBtn":{ "a11yRole": "push button", "a11yName": "Close",    "region": "settingsButtons", "ocrFallback": "Close" },
+    "sceneNameInput":  { "a11yRole": "text",        "a11yName": null,       "region": "addScene",        "ocrFallback": "" },
+    "sourceTypeList":  { "a11yRole": "list",        "a11yName": null,       "region": "addSource",       "ocrFallback": "" }
   },
   "locatorStrategy": ["a11y", "ocr", "coordFallback"],
   "confidence": { "initial": 0.5, "successIncrement": 0.1, "failureDecrement": 0.2 }

@@ -40,19 +40,27 @@ export async function clickControl(
 
   if (ctrl.ocrFallback) {
     const { path: imgPath, error: capErr } = await captureScreen({});
-    if (capErr || !imgPath) return { ok: false, strategy: 'ocr', error: capErr ?? 'screenshot failed' };
-    const ocr = await runOcr(imgPath, 'OBS');
-    if (ocr) {
-      const target = ocr.targets.find(
-        (t) => t.label.toLowerCase().includes(ctrl.ocrFallback.toLowerCase()),
-      );
-      if (target) {
-        await executeGuiInteract({ action: 'click', x: target.x, y: target.y });
-        await wait(OBS_PILOT_CONFIG.actionDelayMs);
-        return { ok: true, strategy: 'ocr' };
+    if (!capErr && imgPath) {
+      const ocr = await runOcr(imgPath, 'OBS');
+      if (ocr) {
+        const target = ocr.targets.find(
+          (t) => t.label.toLowerCase().includes(ctrl.ocrFallback.toLowerCase()),
+        );
+        if (target) {
+          await executeGuiInteract({ action: 'click', x: target.x, y: target.y });
+          await wait(OBS_PILOT_CONFIG.actionDelayMs);
+          return { ok: true, strategy: 'ocr' };
+        }
       }
     }
-    return { ok: false, strategy: 'ocr', error: `OCR: label "${ctrl.ocrFallback}" not found` };
+    // OCR did not find the label — fall through to coord
+  }
+
+  if (ctrl.coord) {
+    const [x, y] = ctrl.coord;
+    await executeGuiInteract({ action: 'click', x, y });
+    await wait(OBS_PILOT_CONFIG.actionDelayMs);
+    return { ok: true, strategy: 'coord' };
   }
 
   return { ok: false, strategy: 'none', error: 'No click strategy available' };
