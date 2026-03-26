@@ -3,45 +3,72 @@ import * as path from 'path';
 import * as os from 'os';
 import * as fs from 'fs';
 import { initMemory } from './db/memory';
+import { initPolicies } from './db/policies';
+import { initSpending } from './db/spending';
+import { initAgents } from './db/agents';
 
-// Row types — plain data shapes matching the SQL schema exactly
+// ── Row Types ───────────────────────────────────────────────────────────────
+// Matching the actual Clawdia 7.0 SQLite schema
+
 export interface ConversationRow {
   id: string;
   title: string;
   mode: string;
-  created_at: number;
-  updated_at: number;
+  created_at: string;
+  updated_at: string;
+  claude_terminal_session_id?: string | null;
+  claude_terminal_status?: string;
+  claude_terminal_last_activity?: string;
 }
 
 export interface MessageRow {
   id: string;
   conversation_id: string;
   role: string;
-  content: string; // JSON-serialized Message
-  created_at: number;
+  content: string;
+  tool_calls?: string | null;
+  created_at: string;
+  attachments_json?: string;
+  file_refs_json?: string;
+  link_previews_json?: string;
 }
 
 export interface RunRow {
   id: string;
   conversation_id: string;
+  title: string;
+  goal: string;
   status: string;
-  provider: string;
-  model: string;
-  started_at: number;
-  completed_at?: number;
-  total_tokens?: number;
+  started_at: string;
+  updated_at: string;
+  completed_at?: string | null;
+  tool_call_count: number;
+  error?: string | null;
+  was_detached: number;
+  provider?: string | null;
+  model?: string | null;
+  workflow_stage: string;
+  scenario_id?: string | null;
+  tool_completed_count?: number;
+  tool_failed_count?: number;
+  total_tokens?: number; // mapped to DB if needed, or handled separately
   estimated_cost_usd?: number;
 }
 
 export interface RunEventRow {
-  id: string;
+  id?: number;
   run_id: string;
-  type: string;
-  payload: string; // JSON
-  created_at: number;
+  seq: number;
+  ts: string;
+  kind: string;
+  phase?: string | null;
+  surface?: string | null;
+  tool_name?: string | null;
+  payload_json: string;
 }
 
-// Allow test override of DB path via env variable
+// ── Database Initialization ───────────────────────────────────────────────
+
 function resolveDbPath(): string {
   if (process.env.CLAWDIA_DB_PATH_OVERRIDE) {
     return process.env.CLAWDIA_DB_PATH_OVERRIDE;
@@ -65,45 +92,68 @@ export function initDb(): void {
     db.pragma('journal_mode = WAL');
     db.pragma('foreign_keys = ON');
 
+    // Ensure core 7.0 tables exist with correct columns. 
+    // We use "IF NOT EXISTS" but note that it won't add columns to existing tables.
     db.exec(`
       CREATE TABLE IF NOT EXISTS conversations (
-        id         TEXT PRIMARY KEY,
-        title      TEXT NOT NULL,
-        mode       TEXT NOT NULL DEFAULT 'chat',
-        created_at INTEGER NOT NULL,
-        updated_at INTEGER NOT NULL
+        id                TEXT PRIMARY KEY,
+        title             TEXT NOT NULL DEFAULT 'New Chat',
+        created_at        TEXT NOT NULL DEFAULT (datetime('now')),
+        updated_at        TEXT NOT NULL DEFAULT (datetime('now')),
+        mode              TEXT NOT NULL DEFAULT 'chat',
+        claude_terminal_session_id TEXT,
+        claude_terminal_status TEXT NOT NULL DEFAULT 'idle',
+        claude_terminal_last_activity TEXT
       );
 
       CREATE TABLE IF NOT EXISTS messages (
         id                TEXT PRIMARY KEY,
         conversation_id   TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
-        role              TEXT NOT NULL,
-        content           TEXT NOT NULL,
-        created_at        INTEGER NOT NULL
+        role              TEXT NOT NULL CHECK(role IN ('user', 'assistant')),
+        content           TEXT NOT NULL DEFAULT '',
+        tool_calls        TEXT,
+        created_at        TEXT NOT NULL DEFAULT (datetime('now')),
+        attachments_json  TEXT,
+        file_refs_json    TEXT,
+        link_previews_json TEXT
       );
       CREATE INDEX IF NOT EXISTS idx_messages_conversation ON messages(conversation_id, created_at);
 
       CREATE TABLE IF NOT EXISTS runs (
         id                  TEXT PRIMARY KEY,
         conversation_id     TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
-        status              TEXT NOT NULL,
-        provider            TEXT NOT NULL,
-        model               TEXT NOT NULL,
-        started_at          INTEGER NOT NULL,
-        completed_at        INTEGER,
-        total_tokens        INTEGER,
-        estimated_cost_usd  REAL
+        title               TEXT NOT NULL DEFAULT '',
+        goal                TEXT NOT NULL DEFAULT '',
+        status              TEXT NOT NULL CHECK(status IN ('running', 'awaiting_approval', 'needs_human', 'completed', 'failed', 'cancelled')),
+        started_at          TEXT NOT NULL,
+        updated_at          TEXT NOT NULL,
+        completed_at        TEXT,
+        tool_call_count     INTEGER NOT NULL DEFAULT 0,
+        error               TEXT,
+        was_detached        INTEGER NOT NULL DEFAULT 0,
+        provider            TEXT,
+        model               TEXT,
+        workflow_stage      TEXT NOT NULL DEFAULT 'starting',
+        scenario_id         TEXT,
+        tool_completed_count INTEGER NOT NULL DEFAULT 0,
+        tool_failed_count   INTEGER NOT NULL DEFAULT 0,
+        estimated_cost_usd  REAL,
+        total_tokens        INTEGER
       );
-      CREATE INDEX IF NOT EXISTS idx_runs_conversation ON runs(conversation_id, started_at);
+      CREATE INDEX IF NOT EXISTS idx_runs_conversation ON runs(conversation_id, updated_at DESC);
 
       CREATE TABLE IF NOT EXISTS run_events (
-        id          TEXT PRIMARY KEY,
-        run_id      TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
-        type        TEXT NOT NULL,
-        payload     TEXT NOT NULL,
-        created_at  INTEGER NOT NULL
+        id            INTEGER PRIMARY KEY AUTOINCREMENT,
+        run_id        TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+        seq           INTEGER NOT NULL,
+        ts            TEXT NOT NULL,
+        kind          TEXT NOT NULL,
+        phase         TEXT,
+        surface       TEXT,
+        tool_name     TEXT,
+        payload_json  TEXT NOT NULL DEFAULT '{}'
       );
-      CREATE INDEX IF NOT EXISTS idx_run_events_run ON run_events(run_id, created_at);
+      CREATE INDEX IF NOT EXISTS idx_run_events_run_seq ON run_events(run_id, seq ASC);
 
       CREATE TABLE IF NOT EXISTS user_memory (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -139,29 +189,37 @@ export function initDb(): void {
         content_rowid=rowid
       );
 
-      CREATE TRIGGER IF NOT EXISTS messages_ai AFTER INSERT ON messages BEGIN
+      CREATE TRIGGER IF NOT EXISTS messages_sync_ai AFTER INSERT ON messages BEGIN
         INSERT INTO messages_fts(rowid, content) VALUES (new.rowid, new.content);
       END;
-      CREATE TRIGGER IF NOT EXISTS messages_ad AFTER DELETE ON messages BEGIN
+      CREATE TRIGGER IF NOT EXISTS messages_sync_ad AFTER DELETE ON messages BEGIN
         INSERT INTO messages_fts(messages_fts, rowid, content) VALUES ('delete', old.rowid, old.content);
       END;
-      CREATE TRIGGER IF NOT EXISTS messages_au AFTER UPDATE ON messages BEGIN
+      CREATE TRIGGER IF NOT EXISTS messages_sync_au AFTER UPDATE ON messages BEGIN
         INSERT INTO messages_fts(messages_fts, rowid, content) VALUES ('delete', old.rowid, old.content);
         INSERT INTO messages_fts(rowid, content) VALUES (new.rowid, new.content);
       END;
-
-      INSERT OR IGNORE INTO messages_fts(rowid, content)
-        SELECT rowid, content FROM messages;
     `);
+
+    // Evolution: Add token tracking to runs if missing
+    try {
+      db.prepare(`ALTER TABLE runs ADD COLUMN total_tokens INTEGER`).run();
+    } catch { }
+    try {
+      db.prepare(`ALTER TABLE runs ADD COLUMN estimated_cost_usd REAL`).run();
+    } catch { }
 
     // Mark orphaned runs as failed (app was killed mid-run)
     db.prepare(`UPDATE runs SET status = 'failed' WHERE status = 'running'`).run();
 
-    // Wire memory module after all tables exist
+    // Wire extensions
     initMemory(db);
+    initPolicies(db);
+    initSpending(db);
+    initAgents(db);
   } catch (err) {
     console.error('[db] Failed to initialize database:', err);
-    db = null; // degrade to in-memory-only mode
+    db = null;
   }
 }
 
@@ -224,8 +282,8 @@ export function deleteConversation(id: string): void {
 export function addMessage(msg: MessageRow): void {
   try {
     getDb()
-      .prepare(`INSERT INTO messages (id, conversation_id, role, content, created_at) VALUES (?, ?, ?, ?, ?)`)
-      .run(msg.id, msg.conversation_id, msg.role, msg.content, msg.created_at);
+      .prepare(`INSERT INTO messages (id, conversation_id, role, content, tool_calls, created_at, attachments_json, file_refs_json, link_previews_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+      .run(msg.id, msg.conversation_id, msg.role, msg.content, msg.tool_calls ?? null, msg.created_at, msg.attachments_json ?? null, msg.file_refs_json ?? null, msg.link_previews_json ?? null);
   } catch (err) {
     console.error('[db] addMessage failed:', err);
   }
@@ -248,26 +306,36 @@ export function createRun(run: RunRow): void {
   try {
     getDb()
       .prepare(
-        `INSERT INTO runs (id, conversation_id, status, provider, model, started_at, completed_at, total_tokens, estimated_cost_usd)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+        `INSERT INTO runs (id, conversation_id, title, goal, status, started_at, updated_at, completed_at, tool_call_count, error, was_detached, provider, model, workflow_stage, scenario_id, tool_completed_count, tool_failed_count, estimated_cost_usd, total_tokens)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
       )
       .run(
         run.id,
         run.conversation_id,
+        run.title,
+        run.goal,
         run.status,
-        run.provider,
-        run.model,
         run.started_at,
+        run.updated_at,
         run.completed_at ?? null,
-        run.total_tokens ?? null,
+        run.tool_call_count,
+        run.error ?? null,
+        run.was_detached,
+        run.provider ?? null,
+        run.model ?? null,
+        run.workflow_stage,
+        run.scenario_id ?? null,
+        run.tool_completed_count ?? 0,
+        run.tool_failed_count ?? 0,
         run.estimated_cost_usd ?? null,
+        run.total_tokens ?? null,
       );
   } catch (err) {
     console.error('[db] createRun failed:', err);
   }
 }
 
-const RUN_COLUMNS = new Set<string>(['status', 'provider', 'model', 'started_at', 'completed_at', 'total_tokens', 'estimated_cost_usd']);
+const RUN_COLUMNS = new Set<string>(['status', 'title', 'goal', 'updated_at', 'completed_at', 'tool_call_count', 'error', 'was_detached', 'provider', 'model', 'workflow_stage', 'tool_completed_count', 'tool_failed_count', 'estimated_cost_usd', 'total_tokens']);
 
 export function updateRun(id: string, patch: Partial<RunRow>): void {
   try {
@@ -297,8 +365,8 @@ export function getRuns(conversationId: string): RunRow[] {
 export function appendRunEvent(event: RunEventRow): void {
   try {
     getDb()
-      .prepare(`INSERT INTO run_events (id, run_id, type, payload, created_at) VALUES (?, ?, ?, ?, ?)`)
-      .run(event.id, event.run_id, event.type, event.payload, event.created_at);
+      .prepare(`INSERT INTO run_events (run_id, seq, ts, kind, phase, surface, tool_name, payload_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`)
+      .run(event.run_id, event.seq, event.ts, event.kind, event.phase ?? null, event.surface ?? null, event.tool_name ?? null, event.payload_json);
   } catch (err) {
     console.error('[db] appendRunEvent failed:', err);
   }
@@ -307,7 +375,7 @@ export function appendRunEvent(event: RunEventRow): void {
 export function getRunEvents(runId: string): RunEventRow[] {
   try {
     return getDb()
-      .prepare(`SELECT * FROM run_events WHERE run_id = ? ORDER BY created_at ASC`)
+      .prepare(`SELECT * FROM run_events WHERE run_id = ? ORDER BY seq ASC`)
       .all(runId) as RunEventRow[];
   } catch (err) {
     console.error('[db] getRunEvents failed:', err);
