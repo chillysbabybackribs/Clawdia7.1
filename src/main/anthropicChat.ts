@@ -5,6 +5,7 @@ import { IPC_EVENTS } from './ipc-channels';
 import type { MessageAttachment } from '../shared/types';
 import { BROWSER_TOOLS, executeBrowserTool } from './core/cli/browserTools';
 import type { BrowserService } from './core/browser/BrowserService';
+import { truncateBrowserResult } from './core/cli/truncate';
 
 /** Anthropic API accepts the same model ids as the in-app registry (e.g. claude-sonnet-4-6). */
 export function resolveAnthropicModelId(registryId: string): string {
@@ -232,7 +233,7 @@ export async function streamAnthropicChat({
       results.push({
         type: 'tool_result',
         tool_use_id: block.id,
-        content: JSON.stringify(output),
+        content: truncateBrowserResult(JSON.stringify(output)),
       });
     }
     return results;

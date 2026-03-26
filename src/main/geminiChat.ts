@@ -6,6 +6,7 @@ import type { MessageAttachment } from '../shared/types';
 import { executeShellTool } from './core/cli/shellTools';
 import { BROWSER_TOOLS, executeBrowserTool } from './core/cli/browserTools';
 import type { BrowserService } from './core/browser/BrowserService';
+import { truncateBrowserResult } from './core/cli/truncate';
 
 type StreamParams = {
     webContents: WebContents;
@@ -205,7 +206,7 @@ export async function streamGeminiChat({
                 let resultStr: string;
                 if (fc.name.startsWith('browser_') && browserService) {
                     const output = await executeBrowserTool(fc.name, fc.args as Record<string, unknown>, browserService);
-                    resultStr = JSON.stringify(output);
+                    resultStr = truncateBrowserResult(JSON.stringify(output));
                 } else {
                     resultStr = await executeShellTool(fc.name, fc.args as Record<string, unknown>);
                 }
