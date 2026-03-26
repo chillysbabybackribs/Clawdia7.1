@@ -145,12 +145,14 @@ export function getConversation(id: string): ConversationRow | null {
   }
 }
 
+const CONVERSATION_COLUMNS = new Set<string>(['title', 'mode', 'created_at', 'updated_at']);
+
 export function updateConversation(id: string, patch: Partial<ConversationRow>): void {
   try {
-    const fields = Object.keys(patch)
-      .map((k) => `${k} = ?`)
-      .join(', ');
-    const values = [...Object.values(patch), id];
+    const keys = Object.keys(patch).filter((k) => CONVERSATION_COLUMNS.has(k));
+    if (keys.length === 0) return;
+    const fields = keys.map((k) => `${k} = ?`).join(', ');
+    const values = [...keys.map((k) => (patch as Record<string, unknown>)[k]), id];
     getDb().prepare(`UPDATE conversations SET ${fields} WHERE id = ?`).run(...values);
   } catch (err) {
     console.error('[db] updateConversation failed:', err);
@@ -193,19 +195,34 @@ export function getMessages(conversationId: string): MessageRow[] {
 export function createRun(run: RunRow): void {
   try {
     getDb()
-      .prepare(`INSERT INTO runs (id, conversation_id, status, provider, model, started_at) VALUES (?, ?, ?, ?, ?, ?)`)
-      .run(run.id, run.conversation_id, run.status, run.provider, run.model, run.started_at);
+      .prepare(
+        `INSERT INTO runs (id, conversation_id, status, provider, model, started_at, completed_at, total_tokens, estimated_cost_usd)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      )
+      .run(
+        run.id,
+        run.conversation_id,
+        run.status,
+        run.provider,
+        run.model,
+        run.started_at,
+        run.completed_at ?? null,
+        run.total_tokens ?? null,
+        run.estimated_cost_usd ?? null,
+      );
   } catch (err) {
     console.error('[db] createRun failed:', err);
   }
 }
 
+const RUN_COLUMNS = new Set<string>(['status', 'provider', 'model', 'started_at', 'completed_at', 'total_tokens', 'estimated_cost_usd']);
+
 export function updateRun(id: string, patch: Partial<RunRow>): void {
   try {
-    const fields = Object.keys(patch)
-      .map((k) => `${k} = ?`)
-      .join(', ');
-    const values = [...Object.values(patch), id];
+    const keys = Object.keys(patch).filter((k) => RUN_COLUMNS.has(k));
+    if (keys.length === 0) return;
+    const fields = keys.map((k) => `${k} = ?`).join(', ');
+    const values = [...keys.map((k) => (patch as Record<string, unknown>)[k]), id];
     getDb().prepare(`UPDATE runs SET ${fields} WHERE id = ?`).run(...values);
   } catch (err) {
     console.error('[db] updateRun failed:', err);
