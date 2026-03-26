@@ -15,6 +15,7 @@ import { type ToolStreamMap } from './ToolActivity';
 import MarkdownRenderer from './MarkdownRenderer';
 import SwarmPanel from './SwarmPanel';
 import TabStrip from './TabStrip';
+import PipelineBlock from './PipelineBlock';
 interface ChatPanelProps {
   browserVisible: boolean;
   onToggleBrowser: () => void;
@@ -687,7 +688,18 @@ export default function ChatPanel({
     });
   }, []);
 
-  const handleStreamEndEvent = useCallback(() => {
+  const handleStreamEndEvent = useCallback((data?: any) => {
+    if (data?.isPipelineStart && data?.pipelineMessageId) {
+      const pipelineMsg: Message = {
+        id: data.pipelineMessageId,
+        role: 'assistant',
+        type: 'pipeline',
+        content: '',
+        timestamp: new Date().toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' }),
+      };
+      setMessages(prev => [...prev, pipelineMsg]);
+      return;
+    }
     if (rafRef.current) { cancelAnimationFrame(rafRef.current); rafRef.current = null; }
     flushStreamUpdate();
     if (assistantMsgIdRef.current) {
@@ -1140,7 +1152,9 @@ export default function ChatPanel({
       <div ref={scrollRef} onScroll={handleScroll} className="flex-1 overflow-y-auto overflow-x-hidden scroll-smooth">
         <div className="flex flex-col gap-4 px-4 pt-5 pb-8 max-w-[720px]">
           {messages.map(msg =>
-            msg.role === 'assistant'
+            msg.type === 'pipeline'
+              ? <PipelineBlock key={msg.id} />
+              : msg.role === 'assistant'
               ? <AssistantMessage key={msg.id} message={msg} shimmerText={msg.isStreaming ? shimmerText : undefined} />
               : <UserMessage key={msg.id} message={msg} />
           )}
