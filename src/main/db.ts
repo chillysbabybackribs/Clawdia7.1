@@ -53,6 +53,7 @@ export interface RunRow {
   tool_failed_count?: number;
   total_tokens?: number; // mapped to DB if needed, or handled separately
   estimated_cost_usd?: number;
+  parent_run_id?: string | null;
 }
 
 export interface RunEventRow {
@@ -138,7 +139,8 @@ export function initDb(): void {
         tool_completed_count INTEGER NOT NULL DEFAULT 0,
         tool_failed_count   INTEGER NOT NULL DEFAULT 0,
         estimated_cost_usd  REAL,
-        total_tokens        INTEGER
+        total_tokens        INTEGER,
+        parent_run_id       TEXT REFERENCES runs(id) ON DELETE CASCADE
       );
       CREATE INDEX IF NOT EXISTS idx_runs_conversation ON runs(conversation_id, updated_at DESC);
 
@@ -306,8 +308,8 @@ export function createRun(run: RunRow): void {
   try {
     getDb()
       .prepare(
-        `INSERT INTO runs (id, conversation_id, title, goal, status, started_at, updated_at, completed_at, tool_call_count, error, was_detached, provider, model, workflow_stage, scenario_id, tool_completed_count, tool_failed_count, estimated_cost_usd, total_tokens)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+        `INSERT INTO runs (id, conversation_id, title, goal, status, started_at, updated_at, completed_at, tool_call_count, error, was_detached, provider, model, workflow_stage, scenario_id, tool_completed_count, tool_failed_count, estimated_cost_usd, total_tokens, parent_run_id)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
       )
       .run(
         run.id,
@@ -329,6 +331,7 @@ export function createRun(run: RunRow): void {
         run.tool_failed_count ?? 0,
         run.estimated_cost_usd ?? null,
         run.total_tokens ?? null,
+        run.parent_run_id ?? null,
       );
   } catch (err) {
     console.error('[db] createRun failed:', err);
