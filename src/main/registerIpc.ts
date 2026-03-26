@@ -6,6 +6,7 @@ import { DEFAULT_MODEL_BY_PROVIDER } from '../shared/model-registry';
 import type { Message } from '../shared/types';
 import type { MessageAttachment } from '../shared/types';
 import { agentLoop } from './agent/agentLoop';
+import { PipelineOrchestrator } from './core/PipelineOrchestrator';
 import { cancelLoop, pauseLoop, resumeLoop, addContext } from './agent/loopControl';
 import { loadSettings, patchSettings, type AppSettings } from './settingsStore';
 import {
@@ -293,52 +294,109 @@ export function registerIpc(browserService: ElectronBrowserService): void {
     chatAbort?.abort();
     chatAbort = new AbortController();
 
-    const runId = `run-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
-    activeRunId = runId;
+    const settings_provider = settings.provider as 'anthropic' | 'openai' | 'gemini';
+
+    // Check if this goal warrants a multi-agent pipeline
+    const usePipeline = await PipelineOrchestrator.classifyIntent(text, {
+      provider: settings_provider,
+      apiKey,
+      model,
+      signal: chatAbort!.signal,
+    });
 
     let result: { response: string; error?: string };
-    try {
-      const response = await agentLoop(text, sessionMessages, {
-        provider: settings.provider as 'anthropic' | 'openai' | 'gemini',
-        apiKey,
-        model,
-        runId,
-        signal: chatAbort!.signal,
-        unrestrictedMode: settings.unrestrictedMode,
-        browserService,
-        onText: (delta) => {
-          if (!event.sender.isDestroyed()) event.sender.send(IPC_EVENTS.CHAT_STREAM_TEXT, delta);
-        },
-        onThinking: (t) => {
-          if (!event.sender.isDestroyed()) event.sender.send(IPC_EVENTS.CHAT_THINKING, t);
-        },
-        onToolActivity: (activity) => {
-          if (!event.sender.isDestroyed()) event.sender.send(IPC_EVENTS.CHAT_TOOL_ACTIVITY, activity);
-        },
-      });
-      result = { response };
-      if (!event.sender.isDestroyed()) event.sender.send(IPC_EVENTS.CHAT_STREAM_END, { ok: true });
-    } catch (e: unknown) {
-      const err = e instanceof Error ? e : new Error(String(e));
-      if (err.name === 'AbortError' || err.message === 'AbortError') {
-        result = { response: '', error: 'Stopped' };
-        if (!event.sender.isDestroyed()) event.sender.send(IPC_EVENTS.CHAT_STREAM_END, { ok: false, cancelled: true });
-      } else {
+
+    if (usePipeline) {
+      // ── Multi-agent pipeline path ─────────────────────────────────────────
+      // Insert a synthetic pipeline message into the conversation so PipelineBlock renders
+      const pipelineMsgId = `msg-pipe-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+      const pipelineMsgTs = new Date().toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+      if (!event.sender.isDestroyed()) event.sender.send(IPC_EVENTS.CHAT_STREAM_END, { ok: true, pipelineMessageId: pipelineMsgId, isPipelineStart: true });
+
+      try {
+        const response = await PipelineOrchestrator.run(text, {
+          provider: settings_provider,
+          apiKey,
+          model,
+          conversationId: id,
+          signal: chatAbort!.signal,
+          browserService,
+          unrestrictedMode: settings.unrestrictedMode,
+          onStateChanged: (state) => {
+            if (!event.sender.isDestroyed()) event.sender.send(IPC_EVENTS.SWARM_STATE_CHANGED, state);
+          },
+          onText: (delta) => {
+            if (!event.sender.isDestroyed()) event.sender.send(IPC_EVENTS.CHAT_STREAM_TEXT, delta);
+          },
+        });
+
+        result = { response };
+        if (!event.sender.isDestroyed()) event.sender.send(IPC_EVENTS.CHAT_STREAM_END, { ok: true });
+
+        // Persist synthesizer output as assistant message
+        if (response) {
+          const assistantMsgId = `msg-a-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+          const assistantMsgTs = new Date().toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+          const assistantMsg: Message = { id: assistantMsgId, role: 'assistant', content: response, timestamp: assistantMsgTs };
+          const nowStr = new Date().toISOString();
+          addMessage({ id: assistantMsgId, conversation_id: id, role: 'assistant', content: JSON.stringify(assistantMsg), created_at: nowStr });
+          updateConversation(id, { updated_at: nowStr, title: text.slice(0, 60) || 'New conversation' });
+        }
+      } catch (e: unknown) {
+        const err = e instanceof Error ? e : new Error(String(e));
         result = { response: '', error: err.message };
         if (!event.sender.isDestroyed()) event.sender.send(IPC_EVENTS.CHAT_STREAM_END, { ok: false, error: err.message });
+      } finally {
+        activeRunId = null;
       }
-    } finally {
-      activeRunId = null;
-    }
+    } else {
+      // ── Single agent path (unchanged) ────────────────────────────────────
+      const runId = `run-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+      activeRunId = runId;
 
-    // Persist assistant message after streaming completes
-    if (result.response && !result.error) {
-      const assistantMsgId = `msg-a-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
-      const assistantMsgTs = new Date().toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
-      const assistantMsg: Message = { id: assistantMsgId, role: 'assistant', content: result.response, timestamp: assistantMsgTs };
-      const now = new Date().toISOString();
-      addMessage({ id: assistantMsgId, conversation_id: id, role: 'assistant', content: JSON.stringify(assistantMsg), created_at: now });
-      updateConversation(id, { updated_at: now, title: text.slice(0, 60) || 'New conversation' });
+      try {
+        const response = await agentLoop(text, sessionMessages, {
+          provider: settings_provider,
+          apiKey,
+          model,
+          runId,
+          signal: chatAbort!.signal,
+          unrestrictedMode: settings.unrestrictedMode,
+          browserService,
+          onText: (delta) => {
+            if (!event.sender.isDestroyed()) event.sender.send(IPC_EVENTS.CHAT_STREAM_TEXT, delta);
+          },
+          onThinking: (t) => {
+            if (!event.sender.isDestroyed()) event.sender.send(IPC_EVENTS.CHAT_THINKING, t);
+          },
+          onToolActivity: (activity) => {
+            if (!event.sender.isDestroyed()) event.sender.send(IPC_EVENTS.CHAT_TOOL_ACTIVITY, activity);
+          },
+        });
+        result = { response };
+        if (!event.sender.isDestroyed()) event.sender.send(IPC_EVENTS.CHAT_STREAM_END, { ok: true });
+      } catch (e: unknown) {
+        const err = e instanceof Error ? e : new Error(String(e));
+        if (err.name === 'AbortError' || err.message === 'AbortError') {
+          result = { response: '', error: 'Stopped' };
+          if (!event.sender.isDestroyed()) event.sender.send(IPC_EVENTS.CHAT_STREAM_END, { ok: false, cancelled: true });
+        } else {
+          result = { response: '', error: err.message };
+          if (!event.sender.isDestroyed()) event.sender.send(IPC_EVENTS.CHAT_STREAM_END, { ok: false, error: err.message });
+        }
+      } finally {
+        activeRunId = null;
+      }
+
+      // Persist assistant message
+      if (result.response && !result.error) {
+        const assistantMsgId = `msg-a-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+        const assistantMsgTs = new Date().toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+        const assistantMsg: Message = { id: assistantMsgId, role: 'assistant', content: result.response, timestamp: assistantMsgTs };
+        const nowStr = new Date().toISOString();
+        addMessage({ id: assistantMsgId, conversation_id: id, role: 'assistant', content: JSON.stringify(assistantMsg), created_at: nowStr });
+        updateConversation(id, { updated_at: nowStr, title: text.slice(0, 60) || 'New conversation' });
+      }
     }
 
     return result;
@@ -473,8 +531,34 @@ export function registerIpc(browserService: ElectronBrowserService): void {
     return [];
   });
 
-  ipcMain.handle(IPC.AGENT_RUN, () => {
-    return { ok: false, error: 'Agent execution not yet implemented' };
+  ipcMain.handle(IPC.AGENT_RUN, async (_e, id: string) => {
+    const agentDef = getAgent(id);
+    if (!agentDef) return { ok: false, error: 'Agent not found' };
+    const settings = loadSettings();
+    const provider = settings.provider as 'anthropic' | 'openai' | 'gemini';
+    const apiKey = settings.providerKeys[provider]?.trim();
+    if (!apiKey) return { ok: false, error: 'No API key configured' };
+    const model = settings.models[provider] ?? DEFAULT_MODEL_BY_PROVIDER[provider];
+    const abort = new AbortController();
+    const convId = `conv-agent-${Date.now()}`;
+    const now = new Date().toISOString();
+    createConversation({ id: convId, title: agentDef.name, mode: 'chat', created_at: now, updated_at: now });
+    try {
+      await PipelineOrchestrator.run(agentDef.goal, {
+        provider, apiKey, model,
+        conversationId: convId,
+        signal: abort.signal,
+        browserService,
+        unrestrictedMode: settings.unrestrictedMode,
+        onStateChanged: (state) => {
+          getMainWindow()?.webContents.send(IPC_EVENTS.SWARM_STATE_CHANGED, state);
+        },
+        onText: () => {},
+      });
+      return { ok: true, conversationId: convId };
+    } catch (e: any) {
+      return { ok: false, error: e.message };
+    }
   });
 
   ipcMain.handle(IPC.AGENT_RUN_CURRENT_PAGE, () => {
