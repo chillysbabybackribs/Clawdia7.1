@@ -1,7 +1,7 @@
 // src/main/core/PipelineOrchestrator.ts
 import { agentLoop } from '../agent/agentLoop';
 import { streamLLM } from '../agent/streamLLM';
-import { createRun, updateRun, addMessage, updateConversation } from '../db';
+import { createRun, updateRun } from '../db';
 import type { LoopOptions } from '../agent/types';
 import type { SwarmState, SwarmAgent } from '../../shared/types';
 
@@ -24,7 +24,6 @@ interface Subtask {
 }
 
 const MAX_WORKERS = 5;
-const MAX_WORKER_TOOL_CALLS = 20;
 const MAX_WORKER_ITERATIONS = 30;
 
 export class PipelineOrchestrator {
@@ -158,7 +157,7 @@ export class PipelineOrchestrator {
     opts.onStateChanged({ ...state, agents: [...state.agents] });
 
     // ── Stage 2: Workers (parallel) ───────────────────────────────────────────
-    const loopBase: Omit<LoopOptions, 'runId' | 'onText'> = {
+    const loopBase: Omit<LoopOptions, 'runId' | 'onText' | 'onToolActivity'> = {
       provider: opts.provider,
       apiKey: opts.apiKey,
       model: opts.model,
@@ -167,12 +166,6 @@ export class PipelineOrchestrator {
       browserService: opts.browserService,
       maxIterations: MAX_WORKER_ITERATIONS,
       onThinking: () => {},
-      onToolActivity: (activity) => {
-        // Update toolCallCount on the matching worker agent
-        const agent = state.agents.find(a => a.id !== 'planner' && a.id !== 'synthesizer' && a.status === 'running');
-        if (agent) agent.toolCallCount++;
-        opts.onStateChanged({ ...state, agents: [...state.agents] });
-      },
     };
 
     const workerResults: Array<{ subtask: string; result: string; ok: boolean }> = [];
@@ -180,7 +173,7 @@ export class PipelineOrchestrator {
     await Promise.all(
       subtasks.map(async (sub, i) => {
         const workerAgent = workerAgents[i];
-        const workerRunId = `run-worker-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+        const workerRunId = `run-worker-${crypto.randomUUID()}`;
         const workerNow = new Date().toISOString();
 
         createRun({
@@ -206,6 +199,10 @@ export class PipelineOrchestrator {
             ...loopBase,
             runId: workerRunId,
             onText: () => {},
+            onToolActivity: () => {
+              workerAgent.toolCallCount++;
+              opts.onStateChanged({ ...state, agents: [...state.agents] });
+            },
           });
           workerAgent.status = 'done';
           workerAgent.completedAt = Date.now();
@@ -223,6 +220,13 @@ export class PipelineOrchestrator {
         opts.onStateChanged({ ...state, agents: [...state.agents] });
       }),
     );
+
+    if (workerResults.every(r => !r.ok)) {
+      updateRun(parentRunId, { status: 'failed', workflow_stage: 'failed', updated_at: new Date().toISOString() });
+      state.completedAt = Date.now();
+      opts.onStateChanged({ ...state, agents: [...state.agents] });
+      throw new Error('All worker agents failed');
+    }
 
     // ── Stage 3: Synthesizer ──────────────────────────────────────────────────
     synthAgent.status = 'running';
@@ -257,7 +261,7 @@ export class PipelineOrchestrator {
         synthSystemPrompt,
         '',
         { toolGroup: 'core', modelTier: 'standard', isGreeting: false },
-        { ...opts, onText: (delta) => { finalText += delta; opts.onText(delta); }, maxIterations: 1 } as any,
+        { ...opts, onText: (delta: string) => opts.onText(delta), maxIterations: 1 } as any,
       );
       finalText = text;
       synthAgent.status = 'done';
