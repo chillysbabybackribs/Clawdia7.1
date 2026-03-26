@@ -39,6 +39,7 @@ export interface MessageFileRef {
 export interface Message {
   id: string;
   role: 'user' | 'assistant';
+  type?: 'chat' | 'pipeline';         // undefined = 'chat'
   content: string;
   timestamp: string;
   attachments?: MessageAttachment[];
