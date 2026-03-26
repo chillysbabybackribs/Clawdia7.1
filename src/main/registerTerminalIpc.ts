@@ -45,8 +45,7 @@ export function registerTerminalIpc(
       controller.requestTakeover(id, requester),
     );
 
-    // Stub — Claude Code integration not implemented yet
-    ipcMain.handle(IPC.TERMINAL_SPAWN_CLAUDE_CODE, () => ({ sessionId: null }));
+
   }
 
   // Wire controller events to this window's renderer — cleaned up when window closes
