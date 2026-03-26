@@ -141,8 +141,9 @@ contextBridge.exposeInMainWorld('clawdia', {
 
   swarm: {
     onStateChanged: (cb: (state: any) => void) => {
-      ipcRenderer.on(IPC_EVENTS.SWARM_STATE_CHANGED, (_e, state) => cb(state));
-      return () => ipcRenderer.removeAllListeners(IPC_EVENTS.SWARM_STATE_CHANGED);
+      const handler = (_e: Electron.IpcRendererEvent, state: any) => cb(state);
+      ipcRenderer.on(IPC_EVENTS.SWARM_STATE_CHANGED, handler);
+      return () => ipcRenderer.removeListener(IPC_EVENTS.SWARM_STATE_CHANGED, handler);
     },
   },
 

@@ -310,7 +310,6 @@ export function registerIpc(browserService: ElectronBrowserService): void {
       // ── Multi-agent pipeline path ─────────────────────────────────────────
       // Insert a synthetic pipeline message into the conversation so PipelineBlock renders
       const pipelineMsgId = `msg-pipe-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
-      const pipelineMsgTs = new Date().toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
       if (!event.sender.isDestroyed()) event.sender.send(IPC_EVENTS.CHAT_STREAM_END, { ok: true, pipelineMessageId: pipelineMsgId, isPipelineStart: true });
 
       try {
