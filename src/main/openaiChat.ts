@@ -152,11 +152,18 @@ export async function streamOpenAIChat({
 
       const toolCalls = Object.values(toolCallAccumulators);
 
+      // Generate stable IDs for this turn's tool calls (must match between assistant + tool result)
+      const toolCallIds: Record<string, string> = {};
+      const ts = Date.now();
+      for (const idx of Object.keys(toolCallAccumulators)) {
+        toolCallIds[idx] = `call_${idx}_${ts}`;
+      }
+
       // Push assistant turn to loop
       const assistantMsg: OpenAIMessage = { role: 'assistant', content: turnText || null };
       if (toolCalls.length > 0) {
         (assistantMsg as any).tool_calls = Object.entries(toolCallAccumulators).map(([idx, tc]) => ({
-          id: `call_${idx}_${Date.now()}`,
+          id: toolCallIds[idx],
           type: 'function',
           function: { name: tc.name, arguments: tc.args },
         }));
@@ -167,7 +174,7 @@ export async function streamOpenAIChat({
 
       // Execute tools and push results
       for (const [idx, tc] of Object.entries(toolCallAccumulators)) {
-        const toolCallId = `call_${idx}_${Date.now()}`;
+        const toolCallId = toolCallIds[idx];
         const startMs = Date.now();
         let resultStr: string;
 
