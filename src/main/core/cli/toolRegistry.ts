@@ -3,6 +3,7 @@ import type Anthropic from '@anthropic-ai/sdk';
 import { Type } from '@google/genai';
 import type OpenAI from 'openai';
 import { BROWSER_TOOLS } from './browserTools';
+import { MEMORY_TOOLS } from './memoryTools';
 import { SHELL_TOOLS_OPENAI } from './shellTools';
 
 type OAITool = OpenAI.Chat.Completions.ChatCompletionTool;
@@ -20,6 +21,7 @@ const SHELL_TOOLS_CANONICAL: Anthropic.Tool[] = SHELL_TOOLS_OPENAI.map(t => ({
 const ALL_TOOLS: Anthropic.Tool[] = [
   ...SHELL_TOOLS_CANONICAL,
   ...BROWSER_TOOLS,
+  ...MEMORY_TOOLS,
 ];
 
 const TOOL_INDEX: Map<string, Anthropic.Tool> = new Map(
