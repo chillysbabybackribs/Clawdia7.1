@@ -23,6 +23,7 @@ let _storeCallCount = 0;
 /** Called once by initDb() to wire the shared DB instance into this module. */
 export function initMemory(db: Database.Database): void {
   _db = db;
+  _storeCallCount = 0;
 }
 
 function getDb(): Database.Database {
@@ -139,7 +140,7 @@ export function getMemoryContext(userMessage: string): string {
       ftsFacts = getDb()
         .prepare(
           `SELECT m.* FROM user_memory m
-           JOIN user_memory_fts fts ON m.id = fts.rowid
+           JOIN user_memory_fts fts ON m.rowid = fts.rowid
            WHERE user_memory_fts MATCH ?
            ORDER BY rank
            LIMIT 5`

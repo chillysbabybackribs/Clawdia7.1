@@ -64,7 +64,6 @@ export function initDb(): void {
     db = new Database(dbPath);
     db.pragma('journal_mode = WAL');
     db.pragma('foreign_keys = ON');
-    initMemory(db);
 
     db.exec(`
       CREATE TABLE IF NOT EXISTS conversations (
@@ -157,6 +156,9 @@ export function initDb(): void {
 
     // Mark orphaned runs as failed (app was killed mid-run)
     db.prepare(`UPDATE runs SET status = 'failed' WHERE status = 'running'`).run();
+
+    // Wire memory module after all tables exist
+    initMemory(db);
   } catch (err) {
     console.error('[db] Failed to initialize database:', err);
     db = null; // degrade to in-memory-only mode
