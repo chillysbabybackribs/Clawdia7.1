@@ -276,7 +276,7 @@ export async function setTransition(name: string): Promise<StepResult> {
     async () => {
       // Try AT-SPI set_value first
       const setR = await a11ySetValue(OBS_PILOT_CONFIG.appName, ctrl.a11yRole, ctrl.a11yName ?? '', name);
-      if (setR.ok) return { ok: true, locatorUsed: 'a11y' as LocatorUsed, failType: null };
+      if (!setR.error) return { ok: true, locatorUsed: 'a11y' as LocatorUsed, failType: null };
 
       // Fallback: click combo then pick option
       const clickR = await clickControl(ctrl);

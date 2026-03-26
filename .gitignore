@@ -3,3 +3,4 @@ dist/
 dist-packaged/
 *.log
 .DS_Store
+logs/
