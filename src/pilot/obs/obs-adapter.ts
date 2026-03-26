@@ -127,7 +127,7 @@ export async function launchOBS(): Promise<StepResult> {
   if (!shot) return makeResult(step, false, { startMs, failType: 'verify_failed', confidence: 0 });
 
   const v = await verify(
-    'OBS Studio main window is visible with Scenes, Sources, Audio Mixer, and Controls panels',
+    'OBS Studio main window is visible with all 6 panels: menu bar, Scenes, Sources, Audio Mixer, Scene Transitions, and Controls',
     shot, step,
   );
   return makeResult(step, v.ok, {
@@ -141,8 +141,7 @@ export async function detectMainWindow(): Promise<StepResult> {
   const startMs = Date.now();
   const step = 'detectMainWindow';
 
-  const focused = await focusOBS();
-  if (!focused) return makeResult(step, false, { startMs, failType: 'element_not_found', confidence: 0 });
+  await focusOBS();
 
   const tree = await a11yGetTree(OBS_PILOT_CONFIG.appName, undefined, 2);
   const treeOk = !tree.error && tree.tree != null;
