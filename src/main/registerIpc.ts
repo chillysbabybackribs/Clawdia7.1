@@ -5,9 +5,8 @@ import { IPC, IPC_EVENTS } from './ipc-channels';
 import { DEFAULT_MODEL_BY_PROVIDER } from '../shared/model-registry';
 import type { Message } from '../shared/types';
 import type { MessageAttachment } from '../shared/types';
-import { streamAnthropicChat } from './anthropicChat';
-import { streamGeminiChat } from './geminiChat';
-import { streamOpenAIChat } from './openaiChat';
+import { agentLoop } from './agent/agentLoop';
+import { cancelLoop, pauseLoop, resumeLoop, addContext } from './agent/loopControl';
 import { loadSettings, patchSettings, type AppSettings } from './settingsStore';
 import {
   createConversation,
@@ -20,6 +19,11 @@ import {
   getRuns,
   getRunEvents,
 } from './db';
+import { listPolicyProfiles } from './db/policies';
+import { evaluatePolicy } from './agent/policy-engine';
+import { a11yListApps } from './core/desktop/a11y';
+import { smartFocus } from './core/desktop/smartFocus';
+import { getRemainingBudgets } from './agent/spending-budget';
 
 function getMainWindow(): BrowserWindow | undefined {
   return BrowserWindow.getAllWindows()[0];
@@ -28,6 +32,7 @@ function getMainWindow(): BrowserWindow | undefined {
 const sessions = new Map<string, any[]>();
 let activeConversationId: string | null = null;
 let chatAbort: AbortController | null = null;
+let activeRunId: string | null = null;
 
 const MAX_SESSION_TURNS = 20; // max user+assistant turn PAIRS to keep
 
@@ -174,12 +179,12 @@ export function registerIpc(browserService: ElectronBrowserService): void {
     patchSettings({ performanceStance: v }),
   );
 
-  ipcMain.handle(IPC.POLICY_LIST, () => []);
+  ipcMain.handle(IPC.POLICY_LIST, () => listPolicyProfiles());
 
   ipcMain.handle(IPC.CHAT_NEW, () => {
     chatAbort?.abort();
-    const now = Date.now();
-    const id = `conv-${now}`;
+    const now = new Date().toISOString();
+    const id = `conv-${Date.now()}`;
     createConversation({ id, title: 'New conversation', mode: 'chat', created_at: now, updated_at: now });
     activeConversationId = id;
     sessions.set(id, []);
@@ -259,16 +264,17 @@ export function registerIpc(browserService: ElectronBrowserService): void {
 
     // Ensure conversation exists in DB (handles legacy in-memory-only convs)
     if (!getConversation(id)) {
-      const now = Date.now();
+      const now = new Date().toISOString();
       createConversation({ id, title: text.slice(0, 60) || 'New conversation', mode: 'chat', created_at: now, updated_at: now });
     }
 
     // Persist user message
     const userMsgId = `msg-u-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
     const userMsgTs = new Date().toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+    const nowTs = new Date().toISOString();
     const userMsg: Message = { id: userMsgId, role: 'user', content: text, timestamp: userMsgTs, attachments };
-    addMessage({ id: userMsgId, conversation_id: id, role: 'user', content: JSON.stringify(userMsg), created_at: Date.now() });
-    updateConversation(id, { updated_at: Date.now() });
+    addMessage({ id: userMsgId, conversation_id: id, role: 'user', content: JSON.stringify(userMsg), created_at: nowTs });
+    updateConversation(id, { updated_at: nowTs });
 
     let sessionMessages = getOrCreateSession(id);
     const pruned = pruneSession(sessionMessages);
@@ -280,47 +286,42 @@ export function registerIpc(browserService: ElectronBrowserService): void {
     chatAbort?.abort();
     chatAbort = new AbortController();
 
-    let result: { response: string; error?: string };
+    const runId = `run-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+    activeRunId = runId;
 
-    if (settings.provider === 'gemini') {
-      result = await streamGeminiChat({
-        webContents: event.sender,
+    let result: { response: string; error?: string };
+    try {
+      const response = await agentLoop(text, sessionMessages, {
+        provider: settings.provider as 'anthropic' | 'openai' | 'gemini',
         apiKey,
-        modelRegistryId: model,
-        userText: text,
-        attachments,
-        sessionMessages,
-        signal: chatAbort.signal,
-        browserService,
+        model,
+        runId,
+        signal: chatAbort!.signal,
         unrestrictedMode: settings.unrestrictedMode,
-        conversationId: id,
-      });
-    } else if (settings.provider === 'openai') {
-      result = await streamOpenAIChat({
-        webContents: event.sender,
-        apiKey,
-        modelRegistryId: model,
-        userText: text,
-        attachments,
-        sessionMessages,
-        signal: chatAbort.signal,
         browserService,
-        unrestrictedMode: settings.unrestrictedMode,
-        conversationId: id,
+        onText: (delta) => {
+          if (!event.sender.isDestroyed()) event.sender.send(IPC_EVENTS.CHAT_STREAM_TEXT, delta);
+        },
+        onThinking: (t) => {
+          if (!event.sender.isDestroyed()) event.sender.send(IPC_EVENTS.CHAT_THINKING, t);
+        },
+        onToolActivity: (activity) => {
+          if (!event.sender.isDestroyed()) event.sender.send(IPC_EVENTS.CHAT_TOOL_ACTIVITY, activity);
+        },
       });
-    } else {
-      result = await streamAnthropicChat({
-        webContents: event.sender,
-        apiKey,
-        modelRegistryId: model,
-        userText: text,
-        attachments,
-        sessionMessages,
-        signal: chatAbort.signal,
-        browserService,
-        unrestrictedMode: settings.unrestrictedMode,
-        conversationId: id,
-      });
+      result = { response };
+      if (!event.sender.isDestroyed()) event.sender.send(IPC_EVENTS.CHAT_STREAM_END, { ok: true });
+    } catch (e: unknown) {
+      const err = e instanceof Error ? e : new Error(String(e));
+      if (err.name === 'AbortError' || err.message === 'AbortError') {
+        result = { response: '', error: 'Stopped' };
+        if (!event.sender.isDestroyed()) event.sender.send(IPC_EVENTS.CHAT_STREAM_END, { ok: false, cancelled: true });
+      } else {
+        result = { response: '', error: err.message };
+        if (!event.sender.isDestroyed()) event.sender.send(IPC_EVENTS.CHAT_STREAM_END, { ok: false, error: err.message });
+      }
+    } finally {
+      activeRunId = null;
     }
 
     // Persist assistant message after streaming completes
@@ -328,8 +329,9 @@ export function registerIpc(browserService: ElectronBrowserService): void {
       const assistantMsgId = `msg-a-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
       const assistantMsgTs = new Date().toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
       const assistantMsg: Message = { id: assistantMsgId, role: 'assistant', content: result.response, timestamp: assistantMsgTs };
-      addMessage({ id: assistantMsgId, conversation_id: id, role: 'assistant', content: JSON.stringify(assistantMsg), created_at: Date.now() });
-      updateConversation(id, { updated_at: Date.now(), title: text.slice(0, 60) || 'New conversation' });
+      const now = new Date().toISOString();
+      addMessage({ id: assistantMsgId, conversation_id: id, role: 'assistant', content: JSON.stringify(assistantMsg), created_at: now });
+      updateConversation(id, { updated_at: now, title: text.slice(0, 60) || 'New conversation' });
     }
 
     return result;
@@ -338,11 +340,18 @@ export function registerIpc(browserService: ElectronBrowserService): void {
   ipcMain.handle(IPC.CHAT_STOP, () => {
     chatAbort?.abort();
     chatAbort = null;
+    if (activeRunId) cancelLoop(activeRunId);
   });
 
-  ipcMain.handle(IPC.CHAT_PAUSE, () => { });
-  ipcMain.handle(IPC.CHAT_RESUME, () => { });
-  ipcMain.handle(IPC.CHAT_ADD_CONTEXT, () => { });
+  ipcMain.handle(IPC.CHAT_PAUSE, () => {
+    if (activeRunId) pauseLoop(activeRunId);
+  });
+  ipcMain.handle(IPC.CHAT_RESUME, () => {
+    if (activeRunId) resumeLoop(activeRunId);
+  });
+  ipcMain.handle(IPC.CHAT_ADD_CONTEXT, (_e, text: string) => {
+    if (activeRunId) addContext(activeRunId, text);
+  });
   ipcMain.handle(IPC.CHAT_RATE_TOOL, () => { });
 
   ipcMain.handle(IPC.RUN_LIST, (_e, conversationId: string) => {
@@ -389,4 +398,20 @@ export function registerIpc(browserService: ElectronBrowserService): void {
   browserService.on('loadingChanged', (loading) => sendToRenderer(IPC_EVENTS.BROWSER_LOADING, loading));
   browserService.on('tabsChanged', (tabs) => sendToRenderer(IPC_EVENTS.BROWSER_TABS_CHANGED, tabs));
   browserService.on('modeChanged', (payload) => sendToRenderer(IPC_EVENTS.BROWSER_MODE_CHANGED, payload));
+
+  // ── Desktop ─────────────────────────────────────────────────────────────────
+  ipcMain.handle(IPC.DESKTOP_LIST_APPS, async () => {
+    const res = await a11yListApps();
+    return res.apps ?? [];
+  });
+
+  ipcMain.handle(IPC.DESKTOP_FOCUS_APP, async (_e, app: string) => {
+    const res = await smartFocus(app);
+    return res.focused;
+  });
+
+  // ── Spending ────────────────────────────────────────────────────────────────
+  ipcMain.handle(IPC.WALLET_GET_REMAINING_BUDGETS, () => {
+    return getRemainingBudgets();
+  });
 }
