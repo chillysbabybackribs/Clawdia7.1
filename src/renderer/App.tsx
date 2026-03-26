@@ -1,5 +1,5 @@
 import React, { useState, useCallback, useEffect } from 'react';
-import Sidebar from './components/Sidebar';
+import AgentSidebar from './components/AgentSidebar';
 import AppChrome from './components/AppChrome';
 import ChatPanel from './components/ChatPanel';
 import BrowserPanel from './components/BrowserPanel';
@@ -27,10 +27,6 @@ interface UiSessionState {
   calendarOpen?: boolean;
 }
 
-interface TaskSidebarState {
-  runningCount: number;
-  completedCount: number;
-}
 
 export default function App() {
   const [activeView, setActiveView] = useState<View>('chat');
@@ -45,7 +41,6 @@ export default function App() {
   const [activeEditorTabId, setActiveEditorTabId] = useState<string | null>(null);
   const [editorDirtyByTabId, setEditorDirtyByTabId] = useState<Record<string, boolean>>({});
   const [sessionHydrated, setSessionHydrated] = useState(false);
-  const [taskSidebarState, setTaskSidebarState] = useState<TaskSidebarState>({ runningCount: 0, completedCount: 0 });
   const browserVisible = rightPaneMode === 'browser';
   const calendarOpen = rightPaneMode === 'calendar';
   const editorOpen = rightPaneMode === 'editor';
@@ -122,16 +117,6 @@ export default function App() {
   const handleOpenProcess = useCallback((processId: string) => {
     setSelectedProcessId(processId);
     setActiveView('processes');
-  }, []);
-
-  const handleOpenAgent = useCallback((agentId: string) => {
-    setSelectedAgentId(agentId);
-    setActiveView('agent-detail');
-  }, []);
-
-  const handleCreateAgent = useCallback(() => {
-    setSelectedAgentId(null);
-    setActiveView('agent-create');
   }, []);
 
   const handleToggleBrowser = useCallback(() => {
@@ -225,37 +210,6 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    const api = (window as any).clawdia;
-    if (!api?.tasks?.summary) return;
-
-    api.tasks.summary().then((summary: TaskSidebarState) => {
-      setTaskSidebarState({
-        runningCount: Number(summary?.runningCount ?? 0),
-        completedCount: Number(summary?.completedCount ?? 0),
-      });
-    }).catch(() => {});
-
-    const unsubStarted = api.tasks.onRunStarted?.(() => {
-      setTaskSidebarState((current) => ({
-        ...current,
-        runningCount: current.runningCount + 1,
-      }));
-    });
-
-    const unsubCompleted = api.tasks.onRunComplete?.(() => {
-      setTaskSidebarState((current) => ({
-        runningCount: Math.max(0, current.runningCount - 1),
-        completedCount: current.completedCount + 1,
-      }));
-    });
-
-    return () => {
-      unsubStarted?.();
-      unsubCompleted?.();
-    };
-  }, []);
-
-  useEffect(() => {
     const handler = (e: KeyboardEvent) => {
       const ctrl = e.ctrlKey || e.metaKey;
       if (ctrl && e.key === 'n') { e.preventDefault(); handleNewChat(); }
@@ -318,18 +272,7 @@ export default function App() {
     <div className="flex h-screen w-screen flex-col overflow-hidden rounded-[10px] border-[2px] border-white/[0.04]">
       <AppChrome />
       <div className="flex min-h-0 flex-1">
-        <Sidebar
-          onViewChange={setActiveView}
-          onNewChat={handleNewChat}
-          onLoadConversation={handleLoadConversation}
-          onOpenProcess={handleOpenProcess}
-          onOpenAgent={handleOpenAgent}
-          onCreateAgent={handleCreateAgent}
-          onOpenFile={handleOpenEditorFile}
-          chatKey={chatKey}
-          runningTaskCount={taskSidebarState.runningCount}
-          completedTasksBadge={taskSidebarState.completedCount}
-        />
+        <AgentSidebar />
 
         <div
           className="relative flex h-full min-w-0 flex-col"
