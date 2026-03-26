@@ -236,13 +236,13 @@ export default function BrowserPanel() {
 
   return (
     <div className="flex flex-col h-full bg-surface-0">
-      <div className="drag-region flex items-center h-[40px] bg-surface-1 border-b border-border-subtle px-2 gap-1 flex-shrink-0 overflow-hidden">
+      <div className="drag-region flex items-center h-[46px] bg-surface-1 border-b border-border-subtle px-2 gap-1 flex-shrink-0 overflow-hidden">
         <div className="flex items-center gap-1 min-w-0 overflow-x-auto no-scrollbar">
           {tabs.map(tab => (
             <div
               key={tab.id}
               onClick={() => handleSwitchTab(tab.id)}
-              className={`no-drag group flex items-center gap-2 h-[32px] px-3 rounded-xl cursor-pointer transition-all duration-100 max-w-[210px] min-w-[120px] flex-shrink-0 ${tab.isActive ? 'bg-surface-3 text-text-primary shadow-[inset_0_1px_0_rgba(255,255,255,0.05),0_8px_18px_rgba(0,0,0,0.18)]' : 'text-text-tertiary hover:text-text-secondary hover:bg-white/[0.03]'}`}
+              className={`no-drag group flex items-center gap-2 h-full px-[16px] cursor-pointer transition-all duration-100 max-w-[210px] min-w-[120px] flex-shrink-0 text-[14px] ${tab.isActive ? 'text-text-primary border-b-[2.5px] border-[#4a9eff]' : 'text-text-tertiary hover:text-text-secondary hover:bg-white/[0.03] border-b-[2.5px] border-transparent'}`}
             >
               {tab.isLoading && tab.isActive && (
                 <div className="w-3 h-3 rounded-full border-[1.5px] border-accent border-t-transparent animate-spin flex-shrink-0" />
@@ -265,7 +265,7 @@ export default function BrowserPanel() {
             </div>
           ))}
         </div>
-        <button onClick={handleNewTab} className="no-drag flex items-center justify-center w-7 h-7 rounded-xl text-text-muted hover:text-text-secondary hover:bg-white/[0.04] transition-colors cursor-pointer flex-shrink-0" title="New tab">
+        <button onClick={handleNewTab} className="no-drag flex items-center justify-center h-full px-[10px] text-text-muted hover:text-text-secondary hover:bg-white/[0.04] transition-colors cursor-pointer flex-shrink-0" title="New tab">
           <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round">
             <line x1="12" y1="5" x2="12" y2="19" />
             <line x1="5" y1="12" x2="19" y2="12" />
