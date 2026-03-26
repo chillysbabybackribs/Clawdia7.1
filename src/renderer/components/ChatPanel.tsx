@@ -14,6 +14,8 @@ import InputBar from './InputBar';
 import { type ToolStreamMap } from './ToolActivity';
 import MarkdownRenderer from './MarkdownRenderer';
 import SwarmPanel from './SwarmPanel';
+import TabStrip from './TabStrip';
+import type { ConversationTab } from '../tabLogic';
 
 
 interface ChatPanelProps {
@@ -27,6 +29,11 @@ interface ChatPanelProps {
   onOpenPendingApproval?: (processId: string) => void;
   loadConversationId?: string | null;
   replayBuffer?: Array<{ type: string; data: any }> | null;
+  tabs: ConversationTab[];
+  activeTabId: string;
+  onNewTab: () => void;
+  onCloseTab: (tabId: string) => void;
+  onSwitchTab: (tabId: string) => void;
 }
 
 function ApprovalBanner({
@@ -453,6 +460,11 @@ export default function ChatPanel({
   onOpenPendingApproval,
   loadConversationId,
   replayBuffer,
+  tabs,
+  activeTabId,
+  onNewTab,
+  onCloseTab,
+  onSwitchTab,
 }: ChatPanelProps) {
   const MIN_THINKING_VISIBLE_MS = 2400;
   const THINKING_PAIR_WINDOW_MS = 1400;
@@ -1091,8 +1103,15 @@ export default function ChatPanel({
 
   return (
     <div className="flex flex-col h-full">
-      <header className="drag-region flex items-center gap-2 px-4 h-[44px] flex-shrink-0 bg-surface-1 border-b border-border-subtle shadow-[inset_0_-1px_6px_rgba(0,0,0,0.2),0_2px_8px_rgba(0,0,0,0.3)] relative z-10">
-        <div className="flex-1 drag-region" />
+      {/* Icons row — terminal + settings */}
+      <div
+        className="drag-region flex items-center justify-end gap-1 px-2 h-[44px] flex-shrink-0 relative z-10"
+        style={{
+          background: '#09090c',
+          borderBottom: '2px solid rgba(255,255,255,0.08)',
+          boxShadow: '0 2px 8px rgba(0,0,0,0.4), inset 0 -1px 0 rgba(255,255,255,0.025)',
+        }}
+      >
         <button
           onClick={onToggleTerminal}
           title={terminalOpen ? 'Close terminal' : 'Open terminal'}
@@ -1114,7 +1133,16 @@ export default function ChatPanel({
             <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z" />
           </svg>
         </button>
-      </header>
+      </div>
+
+      {/* Tab strip row — tabs + new tab button */}
+      <TabStrip
+        tabs={tabs}
+        activeTabId={activeTabId}
+        onSwitch={onSwitchTab}
+        onClose={onCloseTab}
+        onNew={onNewTab}
+      />
 
       <div ref={scrollRef} onScroll={handleScroll} className="flex-1 overflow-y-auto overflow-x-hidden scroll-smooth">
         <div className="flex flex-col gap-4 px-4 pt-5 pb-8 max-w-[720px]">

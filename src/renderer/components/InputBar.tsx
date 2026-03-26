@@ -191,7 +191,14 @@ export default function InputBar({
   const canSend = text.trim().length > 0 || attachments.length > 0;
 
   return (
-    <div className="px-4 pb-4 pt-2">
+    <div
+      className="px-4 pb-4 pt-3"
+      style={{
+        background: '#0d0d12',
+        borderTop: '2px solid rgba(255,255,255,0.07)',
+        boxShadow: 'inset 0 2px 8px rgba(0,0,0,0.3)',
+      }}
+    >
       <div
         className={`
           relative flex flex-col rounded-xl transition-all duration-200
@@ -308,10 +315,10 @@ export default function InputBar({
               <>
                 <button
                   onClick={() => setModelOpen((v) => !v)}
-                  className="flex items-center gap-1.5 h-8 px-2.5 rounded-lg text-[12px] font-medium text-text-tertiary hover:text-text-secondary hover:bg-white/[0.05] transition-all cursor-pointer"
+                  className="flex items-center gap-1 text-[11px] text-text-tertiary hover:text-text-secondary transition-colors cursor-pointer"
                 >
                   {currentModel?.label || 'Select model'}
-                  <svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" className="opacity-50">
+                  <svg width="8" height="8" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" className="opacity-40">
                     <polyline points="6 9 12 15 18 9" />
                   </svg>
                 </button>
@@ -355,15 +362,17 @@ export default function InputBar({
                   </div>
                 )}
 
+                <div style={{ width: '1px', height: '10px', background: 'rgba(255,255,255,0.08)', flexShrink: 0 }} />
+
                 <button
                   onClick={onToggleClaudeMode}
                   disabled={claudeModeDisabled}
-                  className={`flex items-center gap-1.5 h-8 px-2.5 rounded-lg text-[12px] font-medium transition-all ${
+                  className={`flex items-center gap-1 text-[11px] transition-colors ${
                     claudeMode
-                      ? 'bg-amber-400/12 text-amber-300 hover:bg-amber-400/18'
+                      ? 'text-amber-300 cursor-pointer'
                       : claudeModeDisabled
                         ? 'text-text-tertiary/35 cursor-default'
-                        : 'text-text-tertiary hover:text-text-secondary hover:bg-white/[0.05]'
+                        : 'text-text-tertiary hover:text-text-secondary cursor-pointer'
                   }`}
                   title={claudeModeDisabled ? 'Create or open a conversation first' : 'Toggle Claude terminal mode for this conversation'}
                 >

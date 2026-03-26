@@ -4,10 +4,27 @@ export default function AppChrome() {
   const api = (window as any).clawdia;
 
   return (
-    <header className="drag-region flex h-[34px] flex-shrink-0 items-center border-b border-border-subtle bg-surface-1 px-3 shadow-[inset_0_-1px_6px_rgba(0,0,0,0.16)]">
+    <header
+      className="drag-region flex h-[36px] flex-shrink-0 items-center px-3 relative"
+      style={{
+        background: '#09090c',
+        borderBottom: '2px solid rgba(255,255,255,0.10)',
+        boxShadow: '0 2px 10px rgba(0,0,0,0.6), inset 0 -1px 0 rgba(255,255,255,0.03)',
+      }}
+    >
       <div className="flex-1" />
 
-      <div className="text-[11px] font-medium uppercase tracking-[0.14em] text-text-tertiary">
+      <div
+        className="text-[11px] font-medium uppercase tracking-[0.16em]"
+        style={{
+          color: '#6e6e82',
+          border: '1px solid rgba(255,255,255,0.10)',
+          padding: '3px 12px',
+          borderRadius: '4px',
+          background: 'rgba(255,255,255,0.02)',
+          boxShadow: 'inset 0 1px 0 rgba(255,255,255,0.04), 0 1px 4px rgba(0,0,0,0.4)',
+        }}
+      >
         Clawdia Workspace
       </div>
 

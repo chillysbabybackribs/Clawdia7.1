@@ -250,12 +250,22 @@ export default function App() {
   }
 
   return (
-    <div className="flex h-screen w-screen flex-col overflow-hidden rounded-[10px] border-[2px] border-white/[0.04]">
+    <div
+      className="flex h-screen w-screen flex-col overflow-hidden rounded-[10px] border-[2px] border-white/[0.10]"
+      style={{ boxShadow: '0 8px 40px rgba(0,0,0,0.8), 0 2px 8px rgba(0,0,0,0.6), inset 0 1px 0 rgba(255,255,255,0.05)' }}
+    >
       <AppChrome />
       <div className="flex min-h-0 flex-1">
         <div
           className="relative flex h-full min-w-0 flex-col"
-          style={{ flex: rightPaneMode === 'none' ? '1 0 0' : '35 0 0' }}
+          style={{
+            flex: rightPaneMode === 'none' ? '1 0 0' : '35 0 0',
+            background: '#0b0b0f',
+            ...(rightPaneMode !== 'none' ? {
+              borderRight: '2px solid rgba(255,255,255,0.09)',
+              boxShadow: 'inset -2px 0 12px rgba(0,0,0,0.35), 2px 0 8px rgba(0,0,0,0.3)',
+            } : {}),
+          }}
         >
           {activeView === 'chat' && (
             <ChatPanel
