@@ -27,6 +27,7 @@ export function runClaudeCode(options: RunClaudeCodeOptions): Promise<RunClaudeC
     '--print',
     '--dangerously-skip-permissions',
     '--output-format', 'stream-json',
+    '--verbose',
     '--include-partial-messages',
     '--input-format', 'text',
   ];
