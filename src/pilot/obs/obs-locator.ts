@@ -2,7 +2,7 @@
 import * as fs from 'fs';
 import { executeGuiInteract } from '../../main/core/desktop';
 import { captureScreen, runOcr } from '../../main/core/desktop/screenshot';
-import { a11yFind, a11yDoAction } from '../../main/core/desktop/a11y';
+import { a11yDoAction } from '../../main/core/desktop/a11y';
 import { wait } from '../../main/core/desktop/shared';
 import type { ControlDef, LocatorUsed } from './obs-types';
 import { OBS_PILOT_CONFIG } from './obs-config';
@@ -32,7 +32,7 @@ export async function clickControl(
 ): Promise<{ ok: boolean; strategy: LocatorUsed; error?: string }> {
   if (ctrl.a11yRole) {
     const result = await a11yDoAction(appName, ctrl.a11yRole, ctrl.a11yName ?? '', 'click');
-    if (result.ok) {
+    if (result.success) {
       await wait(OBS_PILOT_CONFIG.actionDelayMs);
       return { ok: true, strategy: 'a11y' };
     }
