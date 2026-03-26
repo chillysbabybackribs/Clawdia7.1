@@ -68,10 +68,15 @@ export default function PipelineBlock() {
   const [expanded, setExpanded] = useState(false);
 
   useEffect(() => {
-    // Inject keyframe once
-    const styleEl = document.createElement('style');
-    styleEl.textContent = PULSE_STYLE;
-    document.head.appendChild(styleEl);
+    // Inject keyframe once, guard against duplicates
+    const STYLE_ID = 'pb-pulse-keyframes';
+    let styleEl: HTMLStyleElement | null = null;
+    if (!document.getElementById(STYLE_ID)) {
+      styleEl = document.createElement('style');
+      styleEl.id = STYLE_ID;
+      styleEl.textContent = PULSE_STYLE;
+      document.head.appendChild(styleEl);
+    }
 
     const off = window.clawdia.swarm.onStateChanged((s: SwarmState) => {
       setState(s);
@@ -80,7 +85,8 @@ export default function PipelineBlock() {
     });
     return () => {
       off();
-      document.head.removeChild(styleEl);
+      // Only remove if we were the one who added it
+      if (styleEl) document.head.removeChild(styleEl);
     };
   }, []);
 

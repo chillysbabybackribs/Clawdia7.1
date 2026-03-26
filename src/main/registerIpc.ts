@@ -340,6 +340,12 @@ export function registerIpc(browserService: ElectronBrowserService): void {
           const nowStr = new Date().toISOString();
           addMessage({ id: assistantMsgId, conversation_id: id, role: 'assistant', content: JSON.stringify(assistantMsg), created_at: nowStr });
           updateConversation(id, { updated_at: nowStr, title: text.slice(0, 60) || 'New conversation' });
+
+          // Update session so follow-up messages have pipeline context
+          const session = sessions.get(id) ?? [];
+          session.push({ role: 'user', content: text });
+          session.push({ role: 'assistant', content: response });
+          sessions.set(id, session);
         }
       } catch (e: unknown) {
         const err = e instanceof Error ? e : new Error(String(e));
