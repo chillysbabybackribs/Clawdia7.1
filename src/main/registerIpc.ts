@@ -18,6 +18,23 @@ const sessions = new Map<string, any[]>();
 let activeConversationId: string | null = null;
 let chatAbort: AbortController | null = null;
 
+const MAX_SESSION_TURNS = 20; // max user+assistant turn PAIRS to keep
+
+/**
+ * Prune a session to the last MAX_SESSION_TURNS pairs.
+ * Always cuts at a user-role boundary to avoid orphaned tool_result blocks.
+ */
+function pruneSession(messages: any[]): any[] {
+  const maxMessages = MAX_SESSION_TURNS * 2;
+  if (messages.length <= maxMessages) return messages;
+  let start = messages.length - maxMessages;
+  // Walk forward until we land on a user message
+  while (start < messages.length && messages[start].role !== 'user') {
+    start++;
+  }
+  return messages.slice(start);
+}
+
 function getOrCreateSession(id: string): any[] {
   if (!sessions.has(id)) sessions.set(id, []);
   return sessions.get(id)!;
@@ -188,7 +205,13 @@ export function registerIpc(browserService: ElectronBrowserService): void {
 
     ensureConversation();
     const id = activeConversationId!;
-    const sessionMessages = getOrCreateSession(id);
+    let sessionMessages = getOrCreateSession(id);
+    // Prune to sliding window before building request
+    const pruned = pruneSession(sessionMessages);
+    if (pruned.length < sessionMessages.length) {
+      sessions.set(id, pruned);
+      sessionMessages = pruned;
+    }
 
     chatAbort?.abort();
     chatAbort = new AbortController();
