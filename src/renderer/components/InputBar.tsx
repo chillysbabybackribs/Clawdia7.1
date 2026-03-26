@@ -203,7 +203,7 @@ export default function InputBar({
         <div className="no-drag flex items-center gap-2 pb-2 px-1 relative">
           <button
             onClick={() => setModelOpen((v) => !v)}
-            className="flex items-center gap-1 text-[11px] text-text-tertiary hover:text-text-secondary transition-colors cursor-pointer"
+            className="flex items-center gap-1 text-[14px] text-text-tertiary hover:text-text-secondary transition-colors cursor-pointer"
           >
             {currentModel?.label || 'Select model'}
             <svg width="8" height="8" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" className="opacity-40">
@@ -232,7 +232,7 @@ export default function InputBar({
                             setModelIdx(idx >= 0 ? idx : 0);
                             setModelOpen(false);
                           }}
-                          className={`w-full flex items-center gap-2.5 px-3.5 py-2 text-left text-[13px] transition-all cursor-pointer ${
+                          className={`w-full flex items-center gap-2.5 px-3.5 py-2 text-left text-[15px] transition-all cursor-pointer ${
                             isSelected ? 'text-white bg-white/[0.08]' : 'text-white/50 hover:text-white/80 hover:bg-white/[0.05]'
                           }`}
                         >
@@ -255,7 +255,7 @@ export default function InputBar({
           <button
             onClick={onToggleClaudeMode}
             disabled={claudeModeDisabled}
-            className={`flex items-center gap-1 text-[11px] transition-colors ${
+            className={`flex items-center gap-1 text-[14px] transition-colors ${
               claudeMode
                 ? 'text-amber-300 cursor-pointer'
                 : claudeModeDisabled
@@ -347,7 +347,7 @@ export default function InputBar({
               onClick={handlePickFiles}
               disabled={isStreaming}
               title="Attach file"
-              className={`flex items-center justify-center w-8 h-8 rounded-lg transition-all no-drag ${
+              className={`flex items-center justify-center w-9 h-9 rounded-lg transition-all no-drag ${
                 isStreaming
                   ? 'text-text-tertiary/35 cursor-default'
                   : 'text-text-tertiary hover:text-text-secondary hover:bg-white/[0.05] cursor-pointer'
@@ -362,7 +362,7 @@ export default function InputBar({
                 <button
                   onClick={isPaused ? onResume : onPause}
                   title={isPaused ? 'Resume' : 'Pause'}
-                  className={`flex items-center justify-center w-8 h-8 rounded-lg transition-all cursor-pointer ${
+                  className={`flex items-center justify-center w-9 h-9 rounded-lg transition-all cursor-pointer ${
                     isPaused ? 'bg-[#8ab4f8]/15 text-[#8ab4f8] hover:bg-[#8ab4f8]/25' : 'bg-amber-500/15 text-amber-400 hover:bg-amber-500/25'
                   }`}
                 >
@@ -374,14 +374,14 @@ export default function InputBar({
                 </button>
 
                 {canSend && (
-                  <button onClick={handleSend} title="Add context" className="flex items-center justify-center w-8 h-8 rounded-lg bg-[#8ab4f8]/15 text-[#8ab4f8] hover:bg-[#8ab4f8]/25 transition-all cursor-pointer">
+                  <button onClick={handleSend} title="Add context" className="flex items-center justify-center w-9 h-9 rounded-lg bg-[#8ab4f8]/15 text-[#8ab4f8] hover:bg-[#8ab4f8]/25 transition-all cursor-pointer">
                     <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
                       <line x1="12" y1="5" x2="12" y2="19" /><line x1="5" y1="12" x2="19" y2="12" />
                     </svg>
                   </button>
                 )}
 
-                <button onClick={onStop} title="Stop (Esc)" className="flex items-center justify-center w-8 h-8 rounded-lg bg-red-500/12 text-red-400 hover:bg-red-500/20 transition-all cursor-pointer">
+                <button onClick={onStop} title="Stop (Esc)" className="flex items-center justify-center w-9 h-9 rounded-lg bg-red-500/12 text-red-400 hover:bg-red-500/20 transition-all cursor-pointer">
                   <svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="6" width="12" height="12" rx="2" /></svg>
                 </button>
               </>
@@ -391,7 +391,7 @@ export default function InputBar({
                 disabled={!canSend}
                 title="Send (Enter)"
                 className={`
-                  flex items-center justify-center w-9 h-9 rounded-full transition-all cursor-pointer
+                  flex items-center justify-center w-10 h-10 rounded-full transition-all cursor-pointer
                   ${canSend
                     ? 'bg-white text-[#18181c] hover:bg-white/90 shadow-sm shadow-black/20'
                     : 'bg-white/[0.10] text-white/30 cursor-default'
