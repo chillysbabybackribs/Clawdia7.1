@@ -1,4 +1,4 @@
-import React, { useState, useCallback, useEffect } from 'react';
+import React, { useState, useCallback, useEffect, useReducer, useRef } from 'react';
 import AppChrome from './components/AppChrome';
 import ChatPanel from './components/ChatPanel';
 import BrowserPanel from './components/BrowserPanel';
@@ -10,8 +10,52 @@ import EditorPanel from './components/EditorPanel';
 import TerminalPanel from './components/TerminalPanel';
 import CreateAgentPanel from './components/agents/CreateAgentPanel';
 import AgentDetailPanel from './components/agents/AgentDetailPanel';
+import { makeTab, addTab, closeTab, type ConversationTab } from './tabLogic';
+import TabStrip from './components/TabStrip';
 
 export type View = 'chat' | 'conversations' | 'settings' | 'processes' | 'agent-create' | 'agent-detail';
+
+interface TabState {
+  tabs: ConversationTab[];
+  activeTabId: string;
+}
+
+type TabAction =
+  | { type: 'NEW_TAB'; tab: ConversationTab }
+  | { type: 'CLOSE_TAB'; tabId: string }
+  | { type: 'SWITCH_TAB'; tabId: string }
+  | { type: 'SET_ACTIVE_CONVERSATION'; conversationId: string | null }
+  | { type: 'HYDRATE'; conversationId: string };
+
+function tabReducer(state: TabState, action: TabAction): TabState {
+  switch (action.type) {
+    case 'NEW_TAB': {
+      const result = addTab(state.tabs, action.tab);
+      return { tabs: result.tabs, activeTabId: result.activeTabId };
+    }
+    case 'CLOSE_TAB': {
+      const result = closeTab(state.tabs, action.tabId, state.activeTabId);
+      return { tabs: result.tabs, activeTabId: result.activeTabId };
+    }
+    case 'SWITCH_TAB': {
+      return { ...state, activeTabId: action.tabId };
+    }
+    case 'SET_ACTIVE_CONVERSATION': {
+      const tabs = state.tabs.map(t =>
+        t.id === state.activeTabId ? { ...t, conversationId: action.conversationId } : t
+      );
+      return { ...state, tabs };
+    }
+    case 'HYDRATE': {
+      const tabs = state.tabs.map((t, i) =>
+        i === 0 ? { ...t, conversationId: action.conversationId } : t
+      );
+      return { ...state, tabs };
+    }
+    default:
+      return state;
+  }
+}
 
 type ReplayBufferItem = { type: string; data: any };
 type RightPaneMode = 'none' | 'browser' | 'editor' | 'terminal';
@@ -37,6 +81,13 @@ export default function App() {
   const [activeEditorTabId, setActiveEditorTabId] = useState<string | null>(null);
   const [editorDirtyByTabId, setEditorDirtyByTabId] = useState<Record<string, boolean>>({});
   const [sessionHydrated, setSessionHydrated] = useState(false);
+  const [tabState, dispatchTab] = useReducer(tabReducer, undefined, () => {
+    const t = makeTab(null);
+    return { tabs: [t], activeTabId: t.id };
+  });
+  const { tabs, activeTabId } = tabState;
+  const tabStateRef = useRef(tabState);
+  useEffect(() => { tabStateRef.current = tabState; }, [tabState]);
   const browserVisible = rightPaneMode === 'browser';
   const editorOpen = rightPaneMode === 'editor';
   const terminalOpen = rightPaneMode === 'terminal';
@@ -67,7 +118,10 @@ export default function App() {
         } else if (typeof session?.browserVisible === 'boolean') {
           setRightPaneMode(session.browserVisible ? 'browser' : 'none');
         }
-        if (session?.activeConversationId) setLoadConversationId(session.activeConversationId);
+        if (session?.activeConversationId) {
+          setLoadConversationId(session.activeConversationId);
+          dispatchTab({ type: 'HYDRATE', conversationId: session.activeConversationId });
+        }
       })
       .finally(() => setSessionHydrated(true));
   }, [hasApiKey]);
@@ -91,6 +145,7 @@ export default function App() {
   const handleNewChat = useCallback(async () => {
     const api = (window as any).clawdia;
     if (api) await api.chat.new();
+    dispatchTab({ type: 'SET_ACTIVE_CONVERSATION', conversationId: null });
     setLoadConversationId(null);
     setReplayBuffer(null);
     setChatKey(k => k + 1);
@@ -99,9 +154,40 @@ export default function App() {
 
   const handleLoadConversation = useCallback(async (id: string, buffer?: ReplayBufferItem[] | null) => {
     if (!id) return;
+    dispatchTab({ type: 'SET_ACTIVE_CONVERSATION', conversationId: id });
     setLoadConversationId(id);
     setReplayBuffer(buffer || null);
     setSelectedProcessId(null);
+    setChatKey(k => k + 1);
+    setActiveView('chat');
+  }, []);
+
+  const handleNewTab = useCallback(async () => {
+    const api = (window as any).clawdia;
+    if (api) await api.chat.new();
+    dispatchTab({ type: 'NEW_TAB', tab: makeTab(null) });
+    setLoadConversationId(null);
+    setReplayBuffer(null);
+    setChatKey(k => k + 1);
+    setActiveView('chat');
+  }, []);
+
+  const handleCloseTab = useCallback((tabId: string) => {
+    const current = tabStateRef.current;
+    const preview = closeTab(current.tabs, tabId, current.activeTabId);
+    dispatchTab({ type: 'CLOSE_TAB', tabId });
+    if (preview.activeTabId !== current.activeTabId) {
+      const nextTab = preview.tabs.find(t => t.id === preview.activeTabId);
+      setLoadConversationId(nextTab?.conversationId ?? null);
+      setChatKey(k => k + 1);
+    }
+  }, []);
+
+  const handleSwitchTab = useCallback((tabId: string) => {
+    dispatchTab({ type: 'SWITCH_TAB', tabId });
+    const tab = tabStateRef.current.tabs.find(t => t.id === tabId);
+    setLoadConversationId(tab?.conversationId ?? null);
+    setReplayBuffer(null);
     setChatKey(k => k + 1);
     setActiveView('chat');
   }, []);
@@ -250,7 +336,7 @@ export default function App() {
   }
 
   return (
-    <div className="flex h-screen w-screen flex-col overflow-hidden rounded-[10px] border-[2px] border-white/[0.04]">
+    <div className="flex h-screen w-screen flex-col overflow-hidden rounded-[10px] border-[2px] border-white/[0.10]" style={{ boxShadow: '0 8px 40px rgba(0,0,0,0.8), 0 2px 8px rgba(0,0,0,0.6), inset 0 1px 0 rgba(255,255,255,0.05)' }}>
       <AppChrome />
       <div className="flex min-h-0 flex-1">
         <div
@@ -270,6 +356,11 @@ export default function App() {
               onOpenPendingApproval={handleOpenProcess}
               loadConversationId={loadConversationId}
               replayBuffer={replayBuffer}
+              tabs={tabs}
+              activeTabId={activeTabId}
+              onNewTab={handleNewTab}
+              onCloseTab={handleCloseTab}
+              onSwitchTab={handleSwitchTab}
             />
           )}
           {activeView === 'conversations' && (
