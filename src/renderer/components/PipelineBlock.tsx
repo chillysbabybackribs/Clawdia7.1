@@ -1,9 +1,11 @@
 // src/renderer/components/PipelineBlock.tsx
-import { useState, useEffect } from 'react';
+import { useState, useEffect, type ReactElement, type CSSProperties } from 'react';
 import type { SwarmState, SwarmAgent } from '../../shared/types';
 
-function agentStatusDot(status: SwarmAgent['status']): React.ReactElement {
-  const style: React.CSSProperties = {
+const PULSE_STYLE = `@keyframes pb-pulse{0%,100%{opacity:1}50%{opacity:0.3}}`;
+
+function agentStatusDot(status: SwarmAgent['status']): ReactElement {
+  const style: CSSProperties = {
     width: 6, height: 6, borderRadius: '50%', flexShrink: 0,
   };
   if (status === 'running') {
@@ -31,7 +33,7 @@ function AgentRow({ agent }: { agent: SwarmAgent }) {
   const isDone = agent.status === 'done';
   const isFailed = agent.status === 'failed';
 
-  const rowStyle: React.CSSProperties = {
+  const rowStyle: CSSProperties = {
     padding: '7px 14px',
     display: 'flex',
     justifyContent: 'space-between',
@@ -66,12 +68,20 @@ export default function PipelineBlock() {
   const [expanded, setExpanded] = useState(false);
 
   useEffect(() => {
+    // Inject keyframe once
+    const styleEl = document.createElement('style');
+    styleEl.textContent = PULSE_STYLE;
+    document.head.appendChild(styleEl);
+
     const off = window.clawdia.swarm.onStateChanged((s: SwarmState) => {
       setState(s);
       if (!s.completedAt) setExpanded(true);
       else setExpanded(false);
     });
-    return off;
+    return () => {
+      off();
+      document.head.removeChild(styleEl);
+    };
   }, []);
 
   if (!state) return null;
@@ -79,14 +89,12 @@ export default function PipelineBlock() {
   const isComplete = !!state.completedAt;
   const doneCount = state.agents.filter(a => a.status === 'done').length;
   const totalTools = state.agents.reduce((n, a) => n + a.toolCallCount, 0);
-  const wallMs = state.completedAt ? state.completedAt - state.startedAt : Date.now() - state.startedAt;
+  const wallMs = Math.max(0, state.completedAt ? state.completedAt - state.startedAt : Date.now() - state.startedAt);
 
   if (isComplete) {
     // Collapsed completed state
     return (
-      <>
-        <style>{`@keyframes pb-pulse{0%,100%{opacity:1}50%{opacity:0.3}}`}</style>
-        <div
+      <div
           style={{
             border: '1px solid rgba(255,255,255,0.06)',
             borderRadius: 8,
@@ -113,15 +121,12 @@ export default function PipelineBlock() {
             </div>
           )}
         </div>
-      </>
     );
   }
 
   // Running state
   return (
-    <>
-      <style>{`@keyframes pb-pulse{0%,100%{opacity:1}50%{opacity:0.3}}`}</style>
-      <div
+    <div
         style={{
           border: '1px solid rgba(26,115,232,0.25)',
           borderRadius: 8,
@@ -153,6 +158,5 @@ export default function PipelineBlock() {
           </div>
         )}
       </div>
-    </>
   );
 }
