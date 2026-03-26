@@ -206,11 +206,8 @@ export async function streamAnthropicChat({
   ): Promise<Anthropic.Message> => {
     // Browser tools are deferred — the model searches for them via tool_search_tool_bm25
     // rather than loading all schemas into every request's context window.
-    const deferredBrowserTools = BROWSER_TOOLS.map((t, i) => ({
-      ...t,
-      defer_loading: true,
-      ...(i === BROWSER_TOOLS.length - 1 ? { cache_control: { type: 'ephemeral' as const } } : {}),
-    }));
+    // defer_loading and cache_control are mutually exclusive per Anthropic API
+    const deferredBrowserTools = BROWSER_TOOLS.map(t => ({ ...t, defer_loading: true }));
 
     const body: Anthropic.MessageCreateParams = {
       model: apiModelId,
