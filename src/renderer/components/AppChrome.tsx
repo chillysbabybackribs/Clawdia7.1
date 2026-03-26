@@ -12,7 +12,7 @@ export default function AppChrome() {
         boxShadow: '0 2px 10px rgba(0,0,0,0.6), inset 0 -1px 0 rgba(255,255,255,0.03)',
       }}
     >
-      <div className="flex items-baseline gap-1.5" style={{ color: '#d4c97a' }}>
+      <div className="flex items-baseline gap-1.5" style={{ color: '#4a9eff' }}>
         <span className="text-[11px] font-medium uppercase tracking-[0.16em]">Clawdia</span>
         <span className="text-[9.5px] font-medium uppercase tracking-[0.16em] opacity-70">Workspace</span>
       </div>
