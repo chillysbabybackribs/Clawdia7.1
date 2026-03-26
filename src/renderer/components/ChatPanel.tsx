@@ -16,6 +16,15 @@ import MarkdownRenderer from './MarkdownRenderer';
 import SwarmPanel from './SwarmPanel';
 import TabStrip from './TabStrip';
 import PipelineBlock from './PipelineBlock';
+
+type StreamEndPayload = {
+  ok?: boolean;
+  isPipelineStart?: boolean;
+  pipelineMessageId?: string;
+  error?: string;
+  cancelled?: boolean;
+};
+
 interface ChatPanelProps {
   browserVisible: boolean;
   onToggleBrowser: () => void;
@@ -688,7 +697,7 @@ export default function ChatPanel({
     });
   }, []);
 
-  const handleStreamEndEvent = useCallback((data?: any) => {
+  const handleStreamEndEvent = useCallback((data?: StreamEndPayload) => {
     if (data?.isPipelineStart && data?.pipelineMessageId) {
       const pipelineMsg: Message = {
         id: data.pipelineMessageId,
@@ -800,7 +809,7 @@ export default function ChatPanel({
         if (item.type === 'chat:thinking') handleThinkingEvent(item.data);
         if (item.type === 'chat:tool-activity') handleToolActivityEvent(item.data);
         if (item.type === 'chat:tool-stream') handleToolStreamEvent(item.data);
-        if (item.type === 'chat:stream:end') { handleStreamEndEvent(); sawStreamEnd = true; }
+        if (item.type === 'chat:stream:end') { handleStreamEndEvent(item.data); sawStreamEnd = true; }
       }
       if (assistantMsgIdRef.current) {
         flushStreamUpdate();
