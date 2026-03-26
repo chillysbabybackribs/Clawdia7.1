@@ -9,7 +9,7 @@ export const BROWSER_MAX = 2000;
 export function truncateToolResult(text: string, maxChars: number): string {
   if (text.length <= maxChars) return text;
   const marker = `\n[truncated — original length: ${text.length} chars]`;
-  return text.slice(0, maxChars) + marker;
+  return text.slice(0, maxChars - marker.length) + marker;
 }
 
 /** Truncate a JSON-stringified browser tool result at BROWSER_MAX. */

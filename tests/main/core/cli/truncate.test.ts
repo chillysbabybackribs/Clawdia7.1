@@ -9,7 +9,7 @@ describe('truncateToolResult', () => {
   it('truncates long strings and appends marker', () => {
     const long = 'x'.repeat(SHELL_MAX + 100);
     const result = truncateToolResult(long, SHELL_MAX);
-    expect(result.length).toBeLessThanOrEqual(SHELL_MAX + 60);
+    expect(result.length).toBeLessThanOrEqual(SHELL_MAX);
     expect(result).toContain('[truncated');
   });
 
@@ -40,7 +40,7 @@ describe('truncateBrowserResult', () => {
   it('truncates long browser results at BROWSER_MAX', () => {
     const long = 'b'.repeat(BROWSER_MAX + 500);
     const result = truncateBrowserResult(long);
-    expect(result.length).toBeLessThanOrEqual(BROWSER_MAX + 100);
+    expect(result.length).toBeLessThanOrEqual(BROWSER_MAX);
     expect(result).toContain('[truncated');
   });
 });
