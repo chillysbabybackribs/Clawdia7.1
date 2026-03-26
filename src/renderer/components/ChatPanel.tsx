@@ -14,6 +14,7 @@ import InputBar from './InputBar';
 import { type ToolStreamMap } from './ToolActivity';
 import MarkdownRenderer from './MarkdownRenderer';
 import SwarmPanel from './SwarmPanel';
+import TabStrip from './TabStrip';
 interface ChatPanelProps {
   browserVisible: boolean;
   onToggleBrowser: () => void;
@@ -25,6 +26,11 @@ interface ChatPanelProps {
   onOpenPendingApproval?: (processId: string) => void;
   loadConversationId?: string | null;
   replayBuffer?: Array<{ type: string; data: any }> | null;
+  tabs: import('../tabLogic').ConversationTab[];
+  activeTabId: string;
+  onNewTab: () => void;
+  onCloseTab: (tabId: string) => void;
+  onSwitchTab: (tabId: string) => void;
 }
 
 function ApprovalBanner({
@@ -451,6 +457,11 @@ export default function ChatPanel({
   onOpenPendingApproval,
   loadConversationId,
   replayBuffer,
+  tabs,
+  activeTabId,
+  onNewTab,
+  onCloseTab,
+  onSwitchTab,
 }: ChatPanelProps) {
   const MIN_THINKING_VISIBLE_MS = 2400;
   const THINKING_PAIR_WINDOW_MS = 1400;
@@ -1089,6 +1100,13 @@ export default function ChatPanel({
 
   return (
     <div className="flex flex-col h-full">
+      <TabStrip
+        tabs={tabs}
+        activeTabId={activeTabId}
+        onSwitch={onSwitchTab}
+        onClose={onCloseTab}
+        onNew={onNewTab}
+      />
       {/* Icons row — terminal + settings */}
       <div
         className="drag-region flex items-center justify-end gap-1 px-2 h-[44px] flex-shrink-0 relative z-10"
