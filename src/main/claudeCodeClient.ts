@@ -28,19 +28,21 @@ export function runClaudeCode(options: RunClaudeCodeOptions): Promise<RunClaudeC
     '--dangerously-skip-permissions',
     '--output-format', 'stream-json',
     '--include-partial-messages',
+    '--input-format', 'text',
   ];
 
   if (sessionId) {
     args.push('--resume', sessionId);
   }
 
-  args.push(prompt);
-
   return new Promise((resolve, reject) => {
     const child = spawn(claudeBin, args, {
       env: { ...process.env },
-      stdio: ['ignore', 'pipe', 'pipe'],
+      stdio: ['pipe', 'pipe', 'pipe'],
     });
+
+    child.stdin.write(prompt);
+    child.stdin.end();
 
     let buffer = '';
     let finalText = '';
@@ -72,24 +74,28 @@ export function runClaudeCode(options: RunClaudeCodeOptions): Promise<RunClaudeC
         }
 
         if (msg.type === 'assistant') {
-          const content = (msg as any).message?.content;
-          if (Array.isArray(content)) {
-            for (const block of content) {
-              if (block?.type === 'text' && typeof block.text === 'string') {
-                finalText += block.text;
-                onText(block.text);
+          const message = msg.message;
+          if (message && typeof message === 'object' && !Array.isArray(message)) {
+            const msgRecord = message as Record<string, unknown>;
+            const content = msgRecord.content;
+            if (Array.isArray(content)) {
+              for (const block of content) {
+                const b = block as Record<string, unknown>;
+                if (b?.type === 'text' && typeof b.text === 'string') {
+                  finalText += b.text;
+                  onText(b.text);
+                }
               }
             }
           }
         }
 
         if (msg.type === 'result') {
-          if (typeof (msg as any).session_id === 'string') {
-            resolvedSessionId = (msg as any).session_id;
-          }
-          if (!finalText.trim() && typeof (msg as any).result === 'string') {
-            finalText = (msg as any).result;
-            onText(finalText);
+          const sid = msg.session_id;
+          if (typeof sid === 'string') resolvedSessionId = sid;
+          const resultText = msg.result;
+          if (typeof resultText === 'string' && resultText.trim()) {
+            finalText = resultText;
           }
         }
       }
@@ -107,9 +113,9 @@ export function runClaudeCode(options: RunClaudeCodeOptions): Promise<RunClaudeC
         } catch { /* ignore */ }
       }
 
-      if (!finalText.trim() && code !== 0) {
+      if (code !== 0) {
         reject(new Error(
-          `claude exited with code ${code ?? 'null'} and no output. stderr: ${stderr.slice(0, 300)}`,
+          `claude exited with code ${code ?? 'null'}. stderr: ${stderr.slice(0, 500)}`,
         ));
         return;
       }

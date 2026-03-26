@@ -8,6 +8,7 @@ const mockStderr = new EventEmitter() as any;
 const mockChild = new EventEmitter() as any;
 mockChild.stdout = mockStdout;
 mockChild.stderr = mockStderr;
+mockChild.stdin = { write: vi.fn(), end: vi.fn() };
 
 vi.mock('child_process', () => ({
   spawn: vi.fn(() => mockChild),
@@ -21,6 +22,7 @@ beforeEach(() => {
   vi.clearAllMocks();
   // Re-attach mocks after clear
   (spawn as any).mockReturnValue(mockChild);
+  mockChild.stdin = { write: vi.fn(), end: vi.fn() };
 });
 
 describe('runClaudeCode', () => {
@@ -37,10 +39,13 @@ describe('runClaudeCode', () => {
         '--dangerously-skip-permissions',
         '--output-format', 'stream-json',
         '--include-partial-messages',
-        'hello',
+        '--input-format', 'text',
       ]),
       expect.any(Object),
     );
+    // Prompt should NOT be in args
+    const callArgs = (spawn as any).mock.calls[0][1] as string[];
+    expect(callArgs).not.toContain('hello');
   });
 
   it('calls onText for each assistant text chunk', async () => {
@@ -97,7 +102,7 @@ describe('runClaudeCode', () => {
     expect(secondCallArgs).not.toContain('--resume');
   });
 
-  it('rejects when claude exits with no output', async () => {
+  it('rejects when claude exits with non-zero code', async () => {
     const promise = runClaudeCode({ conversationId: 'conv-1', prompt: 'hello', onText: () => {} });
     mockChild.emit('close', 1);
     await expect(promise).rejects.toThrow();
@@ -118,9 +123,9 @@ describe('runClaudeCode', () => {
     });
     mockStdout.emit('data', Buffer.from(resultLine + '\n'));
     mockChild.emit('close', 0);
-    await promise;
+    const result = await promise;
 
-    expect(chunks).toContain('Fallback response text');
+    expect(result.finalText).toBe('Fallback response text');
   });
 
   it('returns finalText and sessionId in the result', async () => {
