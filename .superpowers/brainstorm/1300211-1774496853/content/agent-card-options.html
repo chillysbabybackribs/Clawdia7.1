@@ -1,0 +1,139 @@
+<h2>Video Extractor — Options Layout</h2>
+<p class="subtitle">All options grouped by category, single-select pills per group</p>
+
+<div class="cards">
+
+  <div class="card" data-choice="a" onclick="toggleSelect(this)">
+    <div class="card-image" style="background:#111;padding:16px;display:flex;justify-content:center;min-height:360px">
+      <div style="width:300px;background:#1a1a1a;border-radius:6px;overflow:hidden;font-size:11px;color:#ccc">
+        <div style="display:flex;align-items:center;gap:8px;padding:9px 12px;background:#242424">
+          <span style="font-size:15px">🎬</span>
+          <span style="color:#e2e8f0;font-weight:600;font-size:12px;flex:1">Video Extractor</span>
+          <span style="color:#3b82f6;font-size:10px">▲</span>
+        </div>
+        <div style="padding:10px 10px 12px;display:flex;flex-direction:column;gap:8px;border-top:1px solid #2a2a2a">
+
+          <!-- Quality -->
+          <div>
+            <div style="color:#555;font-size:8px;letter-spacing:1px;text-transform:uppercase;margin-bottom:4px">Quality</div>
+            <div style="display:flex;gap:3px;flex-wrap:wrap">
+              <div style="background:#1e2d3d;border:1px solid #3b82f6;border-radius:10px;padding:2px 7px;font-size:9px;color:#60a5fa">Best</div>
+              <div style="background:#1a1a1a;border:1px solid #2a2a2a;border-radius:10px;padding:2px 7px;font-size:9px;color:#666">1080p</div>
+              <div style="background:#1a1a1a;border:1px solid #2a2a2a;border-radius:10px;padding:2px 7px;font-size:9px;color:#666">720p</div>
+              <div style="background:#1a1a1a;border:1px solid #2a2a2a;border-radius:10px;padding:2px 7px;font-size:9px;color:#666">480p</div>
+              <div style="background:#1a1a1a;border:1px solid #2a2a2a;border-radius:10px;padding:2px 7px;font-size:9px;color:#666">360p</div>
+            </div>
+          </div>
+
+          <!-- Format -->
+          <div>
+            <div style="color:#555;font-size:8px;letter-spacing:1px;text-transform:uppercase;margin-bottom:4px">Format</div>
+            <div style="display:flex;gap:3px;flex-wrap:wrap">
+              <div style="background:#1e2d3d;border:1px solid #3b82f6;border-radius:10px;padding:2px 7px;font-size:9px;color:#60a5fa">MP4</div>
+              <div style="background:#1a1a1a;border:1px solid #2a2a2a;border-radius:10px;padding:2px 7px;font-size:9px;color:#666">WebM</div>
+              <div style="background:#1a1a1a;border:1px solid #2a2a2a;border-radius:10px;padding:2px 7px;font-size:9px;color:#666">MKV</div>
+            </div>
+          </div>
+
+          <!-- Audio -->
+          <div>
+            <div style="color:#555;font-size:8px;letter-spacing:1px;text-transform:uppercase;margin-bottom:4px">Audio</div>
+            <div style="display:flex;gap:3px;flex-wrap:wrap">
+              <div style="background:#1a1a1a;border:1px solid #2a2a2a;border-radius:10px;padding:2px 7px;font-size:9px;color:#666">Audio only</div>
+              <div style="background:#1a1a1a;border:1px solid #2a2a2a;border-radius:10px;padding:2px 7px;font-size:9px;color:#666">MP3</div>
+              <div style="background:#1a1a1a;border:1px solid #2a2a2a;border-radius:10px;padding:2px 7px;font-size:9px;color:#666">M4A</div>
+              <div style="background:#1a1a1a;border:1px solid #2a2a2a;border-radius:10px;padding:2px 7px;font-size:9px;color:#666">OPUS</div>
+            </div>
+          </div>
+
+          <!-- Input -->
+          <div style="background:#111;border:1px solid #333;border-radius:8px;padding:8px 10px;display:flex;align-items:flex-end;gap:6px;min-height:52px">
+            <div style="flex:1;color:#555;font-size:10px;line-height:1.5">Paste a URL or describe the video...</div>
+            <div style="background:#3b82f6;border-radius:5px;padding:4px 9px;font-size:9px;color:#fff;white-space:nowrap">Run ▶</div>
+          </div>
+
+          <!-- Folder -->
+          <div style="display:flex;align-items:center;gap:6px;background:#141414;border:1px solid #2a2a2a;border-radius:6px;padding:5px 9px">
+            <span style="color:#666;font-size:10px">📁</span>
+            <span style="color:#666;font-size:10px;flex:1">~/Downloads</span>
+            <span style="color:#444;font-size:9px;border:1px solid #333;border-radius:3px;padding:1px 5px">Browse</span>
+          </div>
+
+        </div>
+      </div>
+    </div>
+    <div class="card-body">
+      <h3>A — Options above input</h3>
+      <p>Quality → Format → Audio → Input → Folder. Natural top-to-bottom config flow before you type.</p>
+    </div>
+  </div>
+
+  <div class="card" data-choice="b" onclick="toggleSelect(this)">
+    <div class="card-image" style="background:#111;padding:16px;display:flex;justify-content:center;min-height:360px">
+      <div style="width:300px;background:#1a1a1a;border-radius:6px;overflow:hidden;font-size:11px;color:#ccc">
+        <div style="display:flex;align-items:center;gap:8px;padding:9px 12px;background:#242424">
+          <span style="font-size:15px">🎬</span>
+          <span style="color:#e2e8f0;font-weight:600;font-size:12px;flex:1">Video Extractor</span>
+          <span style="color:#3b82f6;font-size:10px">▲</span>
+        </div>
+        <div style="padding:10px 10px 12px;display:flex;flex-direction:column;gap:8px;border-top:1px solid #2a2a2a">
+
+          <!-- Input first -->
+          <div style="background:#111;border:1px solid #333;border-radius:8px;padding:8px 10px;display:flex;align-items:flex-end;gap:6px;min-height:52px">
+            <div style="flex:1;color:#555;font-size:10px;line-height:1.5">Paste a URL or describe the video...</div>
+            <div style="background:#3b82f6;border-radius:5px;padding:4px 9px;font-size:9px;color:#fff;white-space:nowrap">Run ▶</div>
+          </div>
+
+          <!-- Folder -->
+          <div style="display:flex;align-items:center;gap:6px;background:#141414;border:1px solid #2a2a2a;border-radius:6px;padding:5px 9px">
+            <span style="color:#666;font-size:10px">📁</span>
+            <span style="color:#666;font-size:10px;flex:1">~/Downloads</span>
+            <span style="color:#444;font-size:9px;border:1px solid #333;border-radius:3px;padding:1px 5px">Browse</span>
+          </div>
+
+          <!-- Divider -->
+          <div style="border-top:1px solid #222;margin:0 -2px"></div>
+
+          <!-- Quality -->
+          <div>
+            <div style="color:#555;font-size:8px;letter-spacing:1px;text-transform:uppercase;margin-bottom:4px">Quality</div>
+            <div style="display:flex;gap:3px;flex-wrap:wrap">
+              <div style="background:#1e2d3d;border:1px solid #3b82f6;border-radius:10px;padding:2px 7px;font-size:9px;color:#60a5fa">Best</div>
+              <div style="background:#1a1a1a;border:1px solid #2a2a2a;border-radius:10px;padding:2px 7px;font-size:9px;color:#666">1080p</div>
+              <div style="background:#1a1a1a;border:1px solid #2a2a2a;border-radius:10px;padding:2px 7px;font-size:9px;color:#666">720p</div>
+              <div style="background:#1a1a1a;border:1px solid #2a2a2a;border-radius:10px;padding:2px 7px;font-size:9px;color:#666">480p</div>
+              <div style="background:#1a1a1a;border:1px solid #2a2a2a;border-radius:10px;padding:2px 7px;font-size:9px;color:#666">360p</div>
+            </div>
+          </div>
+
+          <!-- Format -->
+          <div>
+            <div style="color:#555;font-size:8px;letter-spacing:1px;text-transform:uppercase;margin-bottom:4px">Format</div>
+            <div style="display:flex;gap:3px;flex-wrap:wrap">
+              <div style="background:#1e2d3d;border:1px solid #3b82f6;border-radius:10px;padding:2px 7px;font-size:9px;color:#60a5fa">MP4</div>
+              <div style="background:#1a1a1a;border:1px solid #2a2a2a;border-radius:10px;padding:2px 7px;font-size:9px;color:#666">WebM</div>
+              <div style="background:#1a1a1a;border:1px solid #2a2a2a;border-radius:10px;padding:2px 7px;font-size:9px;color:#666">MKV</div>
+            </div>
+          </div>
+
+          <!-- Audio -->
+          <div>
+            <div style="color:#555;font-size:8px;letter-spacing:1px;text-transform:uppercase;margin-bottom:4px">Audio</div>
+            <div style="display:flex;gap:3px;flex-wrap:wrap">
+              <div style="background:#1a1a1a;border:1px solid #2a2a2a;border-radius:10px;padding:2px 7px;font-size:9px;color:#666">Audio only</div>
+              <div style="background:#1a1a1a;border:1px solid #2a2a2a;border-radius:10px;padding:2px 7px;font-size:9px;color:#666">MP3</div>
+              <div style="background:#1a1a1a;border:1px solid #2a2a2a;border-radius:10px;padding:2px 7px;font-size:9px;color:#666">M4A</div>
+              <div style="background:#1a1a1a;border:1px solid #2a2a2a;border-radius:10px;padding:2px 7px;font-size:9px;color:#666">OPUS</div>
+            </div>
+          </div>
+
+        </div>
+      </div>
+    </div>
+    <div class="card-body">
+      <h3>B — Input first, options below</h3>
+      <p>Input + folder at top, options tucked below a divider. Quick users go straight to typing; options are there when needed.</p>
+    </div>
+  </div>
+
+</div>
