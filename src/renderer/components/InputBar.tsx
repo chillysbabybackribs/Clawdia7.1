@@ -199,6 +199,81 @@ export default function InputBar({
         boxShadow: 'inset 0 2px 8px rgba(0,0,0,0.3)',
       }}
     >
+      {!isStreaming && (
+        <div className="no-drag flex items-center gap-2 pb-2 px-1 relative">
+          <button
+            onClick={() => setModelOpen((v) => !v)}
+            className="flex items-center gap-1 text-[11px] text-text-tertiary hover:text-text-secondary transition-colors cursor-pointer"
+          >
+            {currentModel?.label || 'Select model'}
+            <svg width="8" height="8" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" className="opacity-40">
+              <polyline points="6 9 12 15 18 9" />
+            </svg>
+          </button>
+
+          {modelOpen && (
+            <div className="absolute bottom-full left-0 mb-2 py-1.5 bg-[#2a2a33]/95 backdrop-blur-md border border-white/[0.10] rounded-xl shadow-xl shadow-black/50 min-w-[210px] animate-fade-in z-50">
+              {PROVIDERS.map((prov) => {
+                const provModels = MODEL_REGISTRY.filter((m) => m.provider === prov.id);
+                return (
+                  <div key={prov.id}>
+                    <div className="px-3.5 pt-2 pb-1 text-[10px] font-semibold uppercase tracking-wider text-white/30">
+                      {prov.label}
+                    </div>
+                    {provModels.map((model) => {
+                      const isSelected = model.provider === provider && model.id === models[modelIdx]?.id;
+                      return (
+                        <button
+                          key={model.id}
+                          onClick={() => {
+                            setProvider(model.provider);
+                            const nextModels = getModelsForProvider(model.provider);
+                            const idx = nextModels.findIndex((m) => m.id === model.id);
+                            setModelIdx(idx >= 0 ? idx : 0);
+                            setModelOpen(false);
+                          }}
+                          className={`w-full flex items-center gap-2.5 px-3.5 py-2 text-left text-[13px] transition-all cursor-pointer ${
+                            isSelected ? 'text-white bg-white/[0.08]' : 'text-white/50 hover:text-white/80 hover:bg-white/[0.05]'
+                          }`}
+                        >
+                          <div className={`w-1.5 h-1.5 rounded-full flex-shrink-0 ${model.tier === 'deep' ? 'bg-amber-400' : model.tier === 'balanced' ? 'bg-[#8ab4f8]' : 'bg-emerald-400'}`} />
+                          <span>{model.label}</span>
+                          {isSelected && (
+                            <svg className="ml-auto text-[#8ab4f8] flex-shrink-0" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><polyline points="20 6 9 17 4 12" /></svg>
+                          )}
+                        </button>
+                      );
+                    })}
+                  </div>
+                );
+              })}
+            </div>
+          )}
+
+          <div style={{ width: '1px', height: '10px', background: 'rgba(255,255,255,0.08)', flexShrink: 0 }} />
+
+          <button
+            onClick={onToggleClaudeMode}
+            disabled={claudeModeDisabled}
+            className={`flex items-center gap-1 text-[11px] transition-colors ${
+              claudeMode
+                ? 'text-amber-300 cursor-pointer'
+                : claudeModeDisabled
+                  ? 'text-text-tertiary/35 cursor-default'
+                  : 'text-text-tertiary hover:text-text-secondary cursor-pointer'
+            }`}
+            title={claudeModeDisabled ? 'Create or open a conversation first' : 'Toggle Claude terminal mode for this conversation'}
+          >
+            <span>Claude Code</span>
+            {claudeMode && (
+              <span className="rounded bg-black/20 px-1.5 py-0.5 text-[10px] uppercase tracking-wide">
+                {claudeStatus}
+              </span>
+            )}
+          </button>
+        </div>
+      )}
+
       <div
         className={`
           relative flex flex-col rounded-xl transition-all duration-200
@@ -312,96 +387,23 @@ export default function InputBar({
                 </button>
               </>
             ) : (
-              <>
-                <button
-                  onClick={() => setModelOpen((v) => !v)}
-                  className="flex items-center gap-1 text-[11px] text-text-tertiary hover:text-text-secondary transition-colors cursor-pointer"
-                >
-                  {currentModel?.label || 'Select model'}
-                  <svg width="8" height="8" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" className="opacity-40">
-                    <polyline points="6 9 12 15 18 9" />
-                  </svg>
-                </button>
-
-                {modelOpen && (
-                  <div className="absolute bottom-full right-0 mb-2 py-1.5 bg-[#2a2a33]/95 backdrop-blur-md border border-white/[0.10] rounded-xl shadow-xl shadow-black/50 min-w-[210px] animate-fade-in z-50">
-                    {PROVIDERS.map((prov) => {
-                      const provModels = MODEL_REGISTRY.filter((m) => m.provider === prov.id);
-                      return (
-                        <div key={prov.id}>
-                          <div className="px-3.5 pt-2 pb-1 text-[10px] font-semibold uppercase tracking-wider text-white/30">
-                            {prov.label}
-                          </div>
-                          {provModels.map((model) => {
-                            const isSelected = model.provider === provider && model.id === models[modelIdx]?.id;
-                            return (
-                              <button
-                                key={model.id}
-                                onClick={() => {
-                                  setProvider(model.provider);
-                                  const nextModels = getModelsForProvider(model.provider);
-                                  const idx = nextModels.findIndex((m) => m.id === model.id);
-                                  setModelIdx(idx >= 0 ? idx : 0);
-                                  setModelOpen(false);
-                                }}
-                                className={`w-full flex items-center gap-2.5 px-3.5 py-2 text-left text-[13px] transition-all cursor-pointer ${
-                                  isSelected ? 'text-white bg-white/[0.08]' : 'text-white/50 hover:text-white/80 hover:bg-white/[0.05]'
-                                }`}
-                              >
-                                <div className={`w-1.5 h-1.5 rounded-full flex-shrink-0 ${model.tier === 'deep' ? 'bg-amber-400' : model.tier === 'balanced' ? 'bg-[#8ab4f8]' : 'bg-emerald-400'}`} />
-                                <span>{model.label}</span>
-                                {isSelected && (
-                                  <svg className="ml-auto text-[#8ab4f8] flex-shrink-0" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><polyline points="20 6 9 17 4 12" /></svg>
-                                )}
-                              </button>
-                            );
-                          })}
-                        </div>
-                      );
-                    })}
-                  </div>
-                )}
-
-                <div style={{ width: '1px', height: '10px', background: 'rgba(255,255,255,0.08)', flexShrink: 0 }} />
-
-                <button
-                  onClick={onToggleClaudeMode}
-                  disabled={claudeModeDisabled}
-                  className={`flex items-center gap-1 text-[11px] transition-colors ${
-                    claudeMode
-                      ? 'text-amber-300 cursor-pointer'
-                      : claudeModeDisabled
-                        ? 'text-text-tertiary/35 cursor-default'
-                        : 'text-text-tertiary hover:text-text-secondary cursor-pointer'
-                  }`}
-                  title={claudeModeDisabled ? 'Create or open a conversation first' : 'Toggle Claude terminal mode for this conversation'}
-                >
-                  <span>Claude Code</span>
-                  {claudeMode && (
-                    <span className="rounded bg-black/20 px-1.5 py-0.5 text-[10px] uppercase tracking-wide">
-                      {claudeStatus}
-                    </span>
-                  )}
-                </button>
-
-                <button
-                  onClick={handleSend}
-                  disabled={!canSend}
-                  title="Send (Enter)"
-                  className={`
-                    flex items-center justify-center w-9 h-9 rounded-full transition-all cursor-pointer
-                    ${canSend
-                      ? 'bg-white text-[#18181c] hover:bg-white/90 shadow-sm shadow-black/20'
-                      : 'bg-white/[0.10] text-white/30 cursor-default'
-                    }
-                  `}
-                >
-                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
-                    <line x1="5" y1="12" x2="19" y2="12" />
-                    <polyline points="12 5 19 12 12 19" />
-                  </svg>
-                </button>
-              </>
+              <button
+                onClick={handleSend}
+                disabled={!canSend}
+                title="Send (Enter)"
+                className={`
+                  flex items-center justify-center w-9 h-9 rounded-full transition-all cursor-pointer
+                  ${canSend
+                    ? 'bg-white text-[#18181c] hover:bg-white/90 shadow-sm shadow-black/20'
+                    : 'bg-white/[0.10] text-white/30 cursor-default'
+                  }
+                `}
+              >
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                  <line x1="5" y1="12" x2="19" y2="12" />
+                  <polyline points="12 5 19 12 12 19" />
+                </svg>
+              </button>
             )}
           </div>
         </div>
