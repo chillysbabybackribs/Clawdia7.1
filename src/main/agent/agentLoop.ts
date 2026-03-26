@@ -35,6 +35,9 @@ export async function agentLoop(
     options,
   };
 
+  // Push current user message onto session history
+  messages.push({ role: 'user', content: userMessage });
+
   // Greeting shortcut — no tools needed
   if (profile.isGreeting) {
     options.onThinking?.('Responding…');
