@@ -32,6 +32,7 @@ import { evaluatePolicy } from './agent/policy-engine';
 import { a11yListApps } from './core/desktop/a11y';
 import { smartFocus } from './core/desktop/smartFocus';
 import { getRemainingBudgets } from './agent/spending-budget';
+import { runClaudeCode } from './claudeCodeClient';
 
 function getMainWindow(): BrowserWindow | undefined {
   return BrowserWindow.getAllWindows()[0];
@@ -248,11 +249,15 @@ export function registerIpc(browserService: ElectronBrowserService): void {
     };
   });
 
-  ipcMain.handle(IPC.CHAT_GET_MODE, (_e, _id: string) => ({
-    mode: 'chat' as const,
-    claudeTerminalStatus: 'idle' as const,
-  }));
-  ipcMain.handle(IPC.CHAT_SET_MODE, () => ({ ok: true }));
+  ipcMain.handle(IPC.CHAT_GET_MODE, (_e, id: string) => {
+    const conv = getConversation(id);
+    const mode = conv?.mode ?? 'chat';
+    return { mode, claudeTerminalStatus: 'idle' as const };
+  });
+  ipcMain.handle(IPC.CHAT_SET_MODE, (_e, id: string, mode: string) => {
+    if (id) updateConversation(id, { mode });
+    return { ok: true, mode };
+  });
   ipcMain.handle(IPC.CHAT_GET_ACTIVE_TERMINAL_SESSION, () => ({ sessionId: null }));
 
   ipcMain.handle(IPC.CHAT_SEND, async (event, payload: { text: string; attachments?: MessageAttachment[] }) => {
@@ -283,6 +288,38 @@ export function registerIpc(browserService: ElectronBrowserService): void {
     const userMsg: Message = { id: userMsgId, role: 'user', content: text, timestamp: userMsgTs, attachments };
     addMessage({ id: userMsgId, conversation_id: id, role: 'user', content: JSON.stringify(userMsg), created_at: nowTs });
     updateConversation(id, { updated_at: nowTs });
+
+    // ── Claude Code path ──────────────────────────────────────────────────────
+    const conv = getConversation(id);
+    if (conv?.mode === 'claude_terminal') {
+      try {
+        const { finalText } = await runClaudeCode({
+          conversationId: id,
+          prompt: text,
+          onText: (delta) => {
+            if (!event.sender.isDestroyed()) event.sender.send(IPC_EVENTS.CHAT_STREAM_TEXT, delta);
+          },
+        });
+
+        if (!event.sender.isDestroyed()) event.sender.send(IPC_EVENTS.CHAT_STREAM_END, { ok: true });
+
+        if (finalText) {
+          const assistantMsgId = `msg-a-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+          const assistantMsgTs = new Date().toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+          const assistantMsg: Message = { id: assistantMsgId, role: 'assistant', content: finalText, timestamp: assistantMsgTs };
+          const nowStr = new Date().toISOString();
+          addMessage({ id: assistantMsgId, conversation_id: id, role: 'assistant', content: JSON.stringify(assistantMsg), created_at: nowStr });
+          updateConversation(id, { updated_at: nowStr });
+        }
+
+        return { response: finalText };
+      } catch (e: unknown) {
+        const err = e instanceof Error ? e : new Error(String(e));
+        if (!event.sender.isDestroyed()) event.sender.send(IPC_EVENTS.CHAT_STREAM_END, { ok: false, error: err.message });
+        return { response: '', error: err.message };
+      }
+    }
+    // ── End Claude Code path ──────────────────────────────────────────────────
 
     let sessionMessages = getOrCreateSession(id);
     const pruned = pruneSession(sessionMessages);
