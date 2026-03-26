@@ -14,7 +14,7 @@ export default function AppChrome() {
     >
       <div className="flex items-baseline gap-1.5" style={{ color: '#e8d98a' }}>
         <span className="text-[11px] font-medium uppercase tracking-[0.16em]">Clawdia</span>
-        <span className="text-[8px] font-medium uppercase tracking-[0.16em] opacity-70">Workspace</span>
+        <span className="text-[9.5px] font-medium uppercase tracking-[0.16em] opacity-70">Workspace</span>
       </div>
 
       <div className="flex-1" />
