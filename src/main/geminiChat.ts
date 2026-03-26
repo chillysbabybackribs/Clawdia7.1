@@ -4,83 +4,16 @@ import * as fs from 'fs';
 import { IPC_EVENTS } from './ipc-channels';
 import type { MessageAttachment } from '../shared/types';
 import { executeShellTool } from './core/cli/shellTools';
-import { BROWSER_TOOLS, executeBrowserTool } from './core/cli/browserTools';
+import { executeBrowserTool } from './core/cli/browserTools';
+import { getSearchToolGemini, executeSearchTools, toGeminiDeclaration, searchTools } from './core/cli/toolRegistry';
 import type { BrowserService } from './core/browser/BrowserService';
 import { truncateBrowserResult } from './core/cli/truncate';
 import { SHARED_SYSTEM_PROMPT } from './core/cli/systemPrompt';
 
-// ── Module-level constants (computed once) ───────────────────────────────────
-
-const BROWSER_DECLARATIONS = BROWSER_TOOLS.map(t => ({
-    name: t.name,
-    description: t.description,
-    parameters: {
-        type: Type.OBJECT,
-        properties: Object.fromEntries(
-            Object.entries((t.input_schema as any).properties ?? {}).map(([k, v]: [string, any]) => [
-                k,
-                { type: v.type === 'number' ? Type.NUMBER : Type.STRING, description: v.description ?? '' },
-            ])
-        ),
-        required: (t.input_schema as any).required ?? [],
-    },
-}));
-
-const GEMINI_TOOLS = [{
-    functionDeclarations: [
-        {
-            name: 'shell_exec',
-            description: 'Execute a bash shell command and explore the local system.',
-            parameters: {
-                type: Type.OBJECT,
-                properties: {
-                    command: { type: Type.STRING, description: 'The shell command to run.' }
-                },
-                required: ['command']
-            }
-        },
-        {
-            name: 'file_edit',
-            description: 'Read and edit files on the local system.',
-            parameters: {
-                type: Type.OBJECT,
-                properties: {
-                    command: { type: Type.STRING, description: 'The action to perform: view, create, or str_replace.' },
-                    path: { type: Type.STRING, description: 'The file path.' },
-                    file_text: { type: Type.STRING, description: 'File content (if create)' },
-                    old_str: { type: Type.STRING, description: 'Text to replace (if str_replace)' },
-                    new_str: { type: Type.STRING, description: 'New text (if str_replace)' }
-                },
-                required: ['command', 'path']
-            }
-        },
-        ...BROWSER_DECLARATIONS,
-        {
-            name: 'file_list_directory',
-            description: 'List the contents of a directory. Returns structured JSON with name, type, and size.',
-            parameters: {
-                type: Type.OBJECT,
-                properties: {
-                    path: { type: Type.STRING, description: 'Absolute directory path to list.' },
-                },
-                required: ['path'],
-            },
-        },
-        {
-            name: 'file_search',
-            description: 'Search for a pattern in files. Returns structured JSON matches with file path, line number, and matching text.',
-            parameters: {
-                type: Type.OBJECT,
-                properties: {
-                    pattern: { type: Type.STRING, description: 'Search pattern (regex).' },
-                    path:    { type: Type.STRING, description: 'Directory to search in (default: current directory).' },
-                    glob:    { type: Type.STRING, description: 'File glob pattern to filter (e.g. "*.ts", "*.py").' },
-                },
-                required: ['pattern'],
-            },
-        },
-    ]
-}] as any;
+// ── Module-level constants (kept for reference) ───────────────────────────────
+// GEMINI_TOOLS is no longer used directly in the loop — tools are loaded on demand
+// via the search_tools meta-tool. Kept here for reference only.
+const GEMINI_TOOLS = null; // eslint-disable-line @typescript-eslint/no-unused-vars
 
 const MAX_TOOL_TURNS = 20;
 
@@ -168,6 +101,17 @@ export async function streamGeminiChat({
         let finalResponseText = '';
         let turns = 0;
 
+        // Build active tools list — start with search + pre-loaded shell tools
+        let activeGeminiTools: any[] = [
+            {
+                functionDeclarations: [
+                    getSearchToolGemini(),
+                    // Pre-load shell tools since they're small and almost always needed
+                    ...searchTools({ names: ['shell_exec', 'file_edit', 'file_list_directory', 'file_search'] }).map(toGeminiDeclaration),
+                ]
+            }
+        ];
+
         while (turns < MAX_TOOL_TURNS) {
             turns++;
             if (signal.aborted) throw new Error('AbortError');
@@ -178,7 +122,7 @@ export async function streamGeminiChat({
                 model: modelRegistryId,
                 config: {
                     systemInstruction: SHARED_SYSTEM_PROMPT,
-                    tools: GEMINI_TOOLS,
+                    tools: activeGeminiTools,
                     temperature: 0,
                 },
                 history: sessionMessages.slice(0, -1), // Everything except the last turn
@@ -235,6 +179,37 @@ export async function streamGeminiChat({
 
                 if (!webContents.isDestroyed()) {
                     webContents.send(IPC_EVENTS.CHAT_TOOL_ACTIVITY, tcObj);
+                }
+
+                // Handle search_tools meta-tool
+                if (fc.name === 'search_tools') {
+                    const searchArgs: Record<string, unknown> = fc.args as Record<string, unknown>;
+                    const searchResultStr = executeSearchTools(searchArgs);
+                    const parsed = JSON.parse(searchResultStr);
+                    // Add newly discovered tools to active declarations
+                    if (parsed.schemas) {
+                        const currentDecls = (activeGeminiTools[0] as any).functionDeclarations as any[];
+                        for (const schema of parsed.schemas) {
+                            if (!currentDecls.find((d: any) => d.name === schema.name)) {
+                                currentDecls.push(toGeminiDeclaration(schema));
+                            }
+                        }
+                    }
+                    if (!webContents.isDestroyed()) {
+                        webContents.send(IPC_EVENTS.CHAT_TOOL_ACTIVITY, {
+                            id: tcId,
+                            name: 'search_tools',
+                            status: 'success',
+                            detail: `Loaded: ${parsed.tools_loaded?.join(', ') ?? 'catalog'}`,
+                        });
+                    }
+                    toolResultParts.push({
+                        functionResponse: {
+                            name: 'search_tools',
+                            response: { result: searchResultStr },
+                        }
+                    });
+                    continue;
                 }
 
                 let resultStr: string;

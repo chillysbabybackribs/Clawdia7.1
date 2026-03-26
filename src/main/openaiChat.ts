@@ -3,28 +3,15 @@ import type { WebContents } from 'electron';
 import * as fs from 'fs';
 import { IPC_EVENTS } from './ipc-channels';
 import type { MessageAttachment } from '../shared/types';
-import { executeShellTool, SHELL_TOOLS_OPENAI } from './core/cli/shellTools';
-import { BROWSER_TOOLS, executeBrowserTool } from './core/cli/browserTools';
+import { executeShellTool } from './core/cli/shellTools';
+import { executeBrowserTool } from './core/cli/browserTools';
+import { SEARCH_TOOL_OPENAI, executeSearchTools, toOpenAITool, searchTools } from './core/cli/toolRegistry';
 import type { BrowserService } from './core/browser/BrowserService';
 import { truncateBrowserResult } from './core/cli/truncate';
 import { SHARED_SYSTEM_PROMPT } from './core/cli/systemPrompt';
 
 type OpenAIMessage = OpenAI.Chat.ChatCompletionMessageParam;
 
-// Convert BROWSER_TOOLS (Anthropic schema) to OpenAI function tool format
-const BROWSER_TOOLS_OPENAI: OpenAI.Chat.ChatCompletionTool[] = BROWSER_TOOLS.map(t => ({
-  type: 'function' as const,
-  function: {
-    name: t.name,
-    description: t.description,
-    parameters: t.input_schema as Record<string, unknown>,
-  },
-}));
-
-const ALL_TOOLS_OPENAI: OpenAI.Chat.ChatCompletionTool[] = [
-  ...SHELL_TOOLS_OPENAI,
-  ...BROWSER_TOOLS_OPENAI,
-];
 
 function buildUserContent(
   text: string,
@@ -103,6 +90,12 @@ export async function streamOpenAIChat({
       ...sessionMessages,
     ];
 
+    // Start with only the search meta-tool; tools are loaded on demand
+    let activeTools: OpenAI.Chat.ChatCompletionTool[] = [SEARCH_TOOL_OPENAI];
+    // Pre-load shell tools since they're small and almost always needed
+    const shellToolSchemas = searchTools({ names: ['shell_exec', 'file_edit', 'file_list_directory', 'file_search'] });
+    activeTools = [SEARCH_TOOL_OPENAI, ...shellToolSchemas.map(toOpenAITool)];
+
     let fullText = '';
     const MAX_TOOL_TURNS = 20;
     let turns = 0;
@@ -114,7 +107,7 @@ export async function streamOpenAIChat({
         {
           model: modelRegistryId,
           messages: loopMessages,
-          tools: ALL_TOOLS_OPENAI,
+          tools: activeTools,
           tool_choice: 'auto',
           stream: true,
           // @ts-ignore
@@ -188,6 +181,37 @@ export async function streamOpenAIChat({
             status: 'running',
             detail: tc.args.slice(0, 200),
           });
+        }
+
+        // Handle search_tools meta-tool
+        if (tc.name === 'search_tools') {
+          const searchResult = executeSearchTools(args);
+          const parsed = JSON.parse(searchResult);
+          // Add newly discovered tools to activeTools for subsequent turns
+          if (parsed.schemas) {
+            for (const schema of parsed.schemas) {
+              const oaiTool = toOpenAITool(schema);
+              if (!activeTools.find(t => t.function.name === schema.name)) {
+                activeTools.push(oaiTool);
+              }
+            }
+          }
+          // Send tool activity to UI
+          if (!webContents.isDestroyed()) {
+            webContents.send(IPC_EVENTS.CHAT_TOOL_ACTIVITY, {
+              id: toolCallId,
+              name: 'search_tools',
+              status: 'success',
+              detail: `Loaded: ${parsed.tools_loaded?.join(', ') ?? 'catalog'}`,
+              durationMs: Date.now() - startMs,
+            });
+          }
+          loopMessages.push({
+            role: 'tool',
+            tool_call_id: toolCallId,
+            content: searchResult,
+          } as OpenAIMessage);
+          continue; // don't fall through to regular tool execution
         }
 
         try {
