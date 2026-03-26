@@ -81,7 +81,7 @@ function resolveDbPath(): string {
 
 let db: Database.Database | null = null;
 
-function getDb(): Database.Database {
+export function getDb(): Database.Database {
   if (!db) throw new Error('db not initialized — call initDb() first');
   return db;
 }

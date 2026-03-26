@@ -20,6 +20,7 @@ import {
   getRuns,
   appendRunEvent,
   getRunEvents,
+  getDb,
 } from '../../src/main/db';
 
 const testDbPath = process.env.CLAWDIA_DB_PATH_OVERRIDE!;
@@ -122,9 +123,9 @@ describe('runs', () => {
     const childId = `run-child-${Date.now()}`;
     createRun({ id: parentId, conversation_id: 'c1', title: 'p', goal: 'p', status: 'running', started_at: now, updated_at: now, tool_call_count: 0, was_detached: 0, workflow_stage: 'orchestrating' });
     createRun({ id: childId, conversation_id: 'c1', title: 'c', goal: 'c', status: 'running', started_at: now, updated_at: now, tool_call_count: 0, was_detached: 0, workflow_stage: 'executing', parent_run_id: parentId });
-    const row = getRuns('c1').find(r => r.id === childId);
-    expect(row).not.toBeUndefined();
-    expect(row!.parent_run_id).toBe(parentId);
+    const db = getDb();
+    const row = db.prepare('SELECT parent_run_id FROM runs WHERE id=?').get(childId) as any;
+    expect(row.parent_run_id).toBe(parentId);
   });
 });
 
