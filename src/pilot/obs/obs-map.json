@@ -1,0 +1,98 @@
+{
+  "app": "obs-studio",
+  "version": "1.0.0",
+  "updated": "2026-03-26",
+  "screens": {
+    "main": {
+      "windowTitle": "OBS",
+      "windowTitlePattern": "OBS.*",
+      "precondition": "OBS launched and not loading",
+      "regions": ["menuBar", "scenes", "sources", "mixer", "transitions", "controls"]
+    },
+    "settings": {
+      "windowTitle": "Settings",
+      "windowTitlePattern": "Settings",
+      "precondition": "openSettings() called",
+      "regions": ["settingsNav", "settingsContent", "settingsButtons"]
+    },
+    "addScene": {
+      "windowTitle": "Add Scene",
+      "windowTitlePattern": "Add Scene",
+      "precondition": "scenes.sceneAddBtn clicked",
+      "regions": ["sceneNameInput", "dialogButtons"]
+    },
+    "addSource": {
+      "windowTitle": "Add Source",
+      "windowTitlePattern": "Add Source",
+      "precondition": "sources.sourceAddBtn clicked",
+      "regions": ["sourceTypeList", "dialogButtons"]
+    }
+  },
+  "regions": {
+    "menuBar": {
+      "label": "Menu Bar",
+      "a11yRole": "menu bar",
+      "a11yName": null,
+      "position": "top",
+      "controls": []
+    },
+    "scenes": {
+      "label": "Scenes",
+      "a11yRole": "list",
+      "a11yName": "Scenes",
+      "position": "bottom-left",
+      "controls": ["sceneAddBtn", "sceneRemoveBtn"]
+    },
+    "sources": {
+      "label": "Sources",
+      "a11yRole": "list",
+      "a11yName": "Sources",
+      "position": "bottom-center-left",
+      "controls": ["sourceAddBtn", "sourceRemoveBtn"]
+    },
+    "mixer": {
+      "label": "Audio Mixer",
+      "a11yRole": "panel",
+      "a11yName": "Audio Mixer",
+      "position": "bottom-center-right",
+      "controls": ["micMuteBtn", "desktopMuteBtn"]
+    },
+    "transitions": {
+      "label": "Scene Transitions",
+      "a11yRole": "panel",
+      "a11yName": "Scene Transitions",
+      "position": "bottom-right-of-center",
+      "controls": ["transitionCombo"]
+    },
+    "controls": {
+      "label": "Controls",
+      "a11yRole": "panel",
+      "a11yName": null,
+      "position": "bottom-right",
+      "controls": ["settingsBtn"]
+    },
+    "settingsButtons": {
+      "label": "Settings Dialog Buttons",
+      "a11yRole": "panel",
+      "a11yName": null,
+      "position": "settings-dialog-bottom",
+      "controls": ["settingsOkBtn", "settingsCloseBtn"]
+    }
+  },
+  "controls": {
+    "sceneAddBtn":    { "a11yRole": "push button", "a11yName": "Add",      "region": "scenes",          "ocrFallback": "+" },
+    "sceneRemoveBtn": { "a11yRole": "push button", "a11yName": "Remove",   "region": "scenes",          "ocrFallback": "-" },
+    "sourceAddBtn":   { "a11yRole": "push button", "a11yName": "Add",      "region": "sources",         "ocrFallback": "+" },
+    "sourceRemoveBtn":{ "a11yRole": "push button", "a11yName": "Remove",   "region": "sources",         "ocrFallback": "-" },
+    "micMuteBtn":     { "a11yRole": "push button", "a11yName": "Mute",     "region": "mixer",           "ocrFallback": "Mute",     "toggleState": true },
+    "desktopMuteBtn": { "a11yRole": "push button", "a11yName": "Mute",     "region": "mixer",           "ocrFallback": "Mute",     "toggleState": true },
+    "transitionCombo":{ "a11yRole": "combo box",   "a11yName": null,       "region": "transitions",     "ocrFallback": "Fade",     "knownValues": ["Cut","Fade","Swipe","Slide","Stinger","Luma Wipe"] },
+    "settingsBtn":    { "a11yRole": "push button", "a11yName": "Settings", "region": "controls",        "ocrFallback": "Settings" },
+    "settingsOkBtn":  { "a11yRole": "push button", "a11yName": "OK",       "region": "settingsButtons", "ocrFallback": "OK" },
+    "settingsCloseBtn":{ "a11yRole": "push button","a11yName": "Close",    "region": "settingsButtons", "ocrFallback": "Close" },
+    "sceneNameInput": { "a11yRole": "text",        "a11yName": null,       "region": "addScene",        "ocrFallback": "" },
+    "sourceTypeList": { "a11yRole": "list",        "a11yName": null,       "region": "addSource",       "ocrFallback": "" }
+  },
+  "locatorStrategy": ["a11y", "ocr", "coordFallback"],
+  "confidence": { "initial": 0.5, "successIncrement": 0.1, "failureDecrement": 0.2 }
+}
