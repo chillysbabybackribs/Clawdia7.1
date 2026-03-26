@@ -116,7 +116,7 @@ export async function launchOBS(): Promise<StepResult> {
   if (/OBS/.test(String(windows))) {
     await focusOBS();
   } else {
-    run(`${OBS_PILOT_CONFIG.obsExecutable} &`);
+    await run(`${OBS_PILOT_CONFIG.obsExecutable} &`);
     const appeared = await waitForWindow(/OBS/, OBS_PILOT_CONFIG.launchTimeoutMs);
     if (!appeared) return makeResult(step, false, { startMs, failType: 'timeout', confidence: 0 });
     await focusOBS();
@@ -216,7 +216,11 @@ export async function addSource(type: string, name: string): Promise<StepResult>
 
   // OK to confirm type selection
   const okCtrl: ControlDef = OBS_MAP.controls.settingsOkBtn;
-  await clickControl(okCtrl);
+  const okR = await clickControl(okCtrl);
+  if (!okR.ok) {
+    await executeGuiInteract({ action: 'key', text: 'Escape' });
+    return makeResult(step, false, { startMs, failType: 'element_not_found', locatorUsed: okR.strategy, confidence: 0 });
+  }
   await wait(OBS_PILOT_CONFIG.modalTimeoutMs);
 
   // Name dialog — clear and type name
@@ -309,17 +313,20 @@ export async function closeSettings(): Promise<StepResult> {
     async () => {
       const okCtrl: ControlDef = OBS_MAP.controls.settingsOkBtn;
       let r = await clickControl(okCtrl);
+      let usedEscape = false;
       if (!r.ok) {
         const closeCtrl: ControlDef = OBS_MAP.controls.settingsCloseBtn;
         r = await clickControl(closeCtrl);
       }
       if (!r.ok) {
         await executeGuiInteract({ action: 'key', text: 'Escape' });
+        usedEscape = true;
       }
       await wait(500);
       const windows = await executeGuiInteract({ action: 'list_windows' });
       const closed = !/Settings/.test(String(windows));
-      return { ok: closed, locatorUsed: r.strategy, failType: closed ? null : 'timeout' as FailType };
+      const locator: LocatorUsed = usedEscape ? 'none' : r.strategy;
+      return { ok: closed, locatorUsed: locator, failType: closed ? null : 'timeout' as FailType };
     },
     'The OBS Settings dialog is closed and the main window is visible',
   );
