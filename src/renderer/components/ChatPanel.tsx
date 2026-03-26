@@ -21,8 +21,6 @@ interface ChatPanelProps {
   onToggleBrowser: () => void;
   onHideBrowser: () => void;
   onShowBrowser: () => void;
-  calendarOpen: boolean;
-  onToggleCalendar: () => void;
   terminalOpen: boolean;
   onToggleTerminal: () => void;
   onOpenSettings: () => void;
@@ -135,51 +133,6 @@ function HumanInterventionBanner({
   );
 }
 
-function CalendarTrigger({ open, onToggle }: { open: boolean; onToggle: () => void }) {
-  const fmt = () => {
-    const d = new Date();
-    return d.toLocaleDateString([], { weekday: 'short', month: 'short', day: 'numeric' });
-  };
-  const [label, setLabel] = useState(fmt);
-  useEffect(() => {
-    const interval = setInterval(() => setLabel(fmt()), 60_000);
-    return () => clearInterval(interval);
-  }, []);
-  return (
-    <button
-      onClick={onToggle}
-      className="no-drag"
-      title={open ? 'Close calendar' : 'Open calendar'}
-      style={{
-        background: open ? 'rgba(255,255,255,0.06)' : 'transparent',
-        border: open ? '1px solid rgba(255,255,255,0.35)' : '1px solid transparent',
-        borderRadius: 6,
-        padding: '3px 8px',
-        cursor: 'pointer',
-        transition: 'background 0.15s, border-color 0.15s, color 0.15s',
-        color: open ? '#fff' : 'rgba(255,255,255,0.55)',
-        fontSize: 13,
-        fontWeight: 400,
-        letterSpacing: '0.01em',
-        lineHeight: 1,
-      }}
-      onMouseEnter={(e) => {
-        if (!open) {
-          (e.currentTarget as HTMLElement).style.background = 'rgba(255,255,255,0.05)';
-          (e.currentTarget as HTMLElement).style.color = 'rgba(255,255,255,0.85)';
-        }
-      }}
-      onMouseLeave={(e) => {
-        if (!open) {
-          (e.currentTarget as HTMLElement).style.background = 'transparent';
-          (e.currentTarget as HTMLElement).style.color = 'rgba(255,255,255,0.55)';
-        }
-      }}
-    >
-      {label}
-    </button>
-  );
-}
 
 /** Copy button with checkmark feedback */
 function CopyButton({ text }: { text: string }) {
@@ -494,8 +447,6 @@ export default function ChatPanel({
   onToggleBrowser,
   onHideBrowser,
   onShowBrowser,
-  calendarOpen,
-  onToggleCalendar,
   terminalOpen,
   onToggleTerminal,
   onOpenSettings,
@@ -1141,7 +1092,6 @@ export default function ChatPanel({
   return (
     <div className="flex flex-col h-full">
       <header className="drag-region flex items-center gap-2 px-4 h-[44px] flex-shrink-0 bg-surface-1 border-b border-border-subtle shadow-[inset_0_-1px_6px_rgba(0,0,0,0.2),0_2px_8px_rgba(0,0,0,0.3)] relative z-10">
-        <CalendarTrigger open={calendarOpen} onToggle={onToggleCalendar} />
         <div className="flex-1 drag-region" />
         <button
           onClick={onToggleTerminal}

@@ -2,7 +2,6 @@ import React, { useState, useCallback, useEffect } from 'react';
 import AppChrome from './components/AppChrome';
 import ChatPanel from './components/ChatPanel';
 import BrowserPanel from './components/BrowserPanel';
-import Calendar from './components/Calendar';
 import ConversationsView from './components/ConversationsView';
 import SettingsView from './components/SettingsView';
 import WelcomeScreen from './components/WelcomeScreen';
@@ -15,7 +14,7 @@ import AgentDetailPanel from './components/agents/AgentDetailPanel';
 export type View = 'chat' | 'conversations' | 'settings' | 'processes' | 'agent-create' | 'agent-detail';
 
 type ReplayBufferItem = { type: string; data: any };
-type RightPaneMode = 'none' | 'browser' | 'calendar' | 'editor' | 'terminal';
+type RightPaneMode = 'none' | 'browser' | 'editor' | 'terminal';
 type EditorTab = { id: string; filePath: string };
 
 interface UiSessionState {
@@ -23,9 +22,7 @@ interface UiSessionState {
   activeView: View;
   rightPaneMode?: RightPaneMode;
   browserVisible?: boolean;
-  calendarOpen?: boolean;
 }
-
 
 export default function App() {
   const [activeView, setActiveView] = useState<View>('chat');
@@ -41,7 +38,6 @@ export default function App() {
   const [editorDirtyByTabId, setEditorDirtyByTabId] = useState<Record<string, boolean>>({});
   const [sessionHydrated, setSessionHydrated] = useState(false);
   const browserVisible = rightPaneMode === 'browser';
-  const calendarOpen = rightPaneMode === 'calendar';
   const editorOpen = rightPaneMode === 'editor';
   const terminalOpen = rightPaneMode === 'terminal';
   const activeEditorTab = editorTabs.find((tab) => tab.id === activeEditorTabId) || null;
@@ -68,8 +64,6 @@ export default function App() {
         if (session?.activeView) setActiveView(session.activeView);
         if (session?.rightPaneMode) {
           setRightPaneMode(session.rightPaneMode);
-        } else if (typeof session?.calendarOpen === 'boolean' && session.calendarOpen) {
-          setRightPaneMode('calendar');
         } else if (typeof session?.browserVisible === 'boolean') {
           setRightPaneMode(session.browserVisible ? 'browser' : 'none');
         }
@@ -85,7 +79,6 @@ export default function App() {
       activeView,
       rightPaneMode,
       browserVisible: rightPaneMode === 'browser',
-      calendarOpen: rightPaneMode === 'calendar',
     });
   }, [sessionHydrated, hasApiKey, loadConversationId, activeView, rightPaneMode]);
 
@@ -128,17 +121,6 @@ export default function App() {
 
   const handleShowBrowser = useCallback(() => {
     setRightPaneMode('browser');
-  }, []);
-
-  const handleToggleCalendar = useCallback(() => {
-    setRightPaneMode((mode) => {
-      if (mode === 'calendar') {
-        (window as any).clawdia?.browser.show();
-        return 'browser';
-      }
-      (window as any).clawdia?.browser.hide();
-      return 'calendar';
-    });
   }, []);
 
   const handleToggleTerminal = useCallback(() => {
@@ -282,8 +264,6 @@ export default function App() {
               onToggleBrowser={handleToggleBrowser}
               onHideBrowser={handleHideBrowser}
               onShowBrowser={handleShowBrowser}
-              calendarOpen={calendarOpen}
-              onToggleCalendar={handleToggleCalendar}
               terminalOpen={terminalOpen}
               onToggleTerminal={handleToggleTerminal}
               onOpenSettings={() => setActiveView('settings')}
@@ -331,15 +311,6 @@ export default function App() {
           )}
         </div>
 
-        {calendarOpen && (
-          <div
-            className="flex h-full min-w-0 flex-col border-l-[2px] border-white/[0.06]"
-            style={{ flex: '65 0 0' }}
-          >
-            <Calendar />
-          </div>
-        )}
-
         {editorOpen && (
           <div
             className="flex h-full min-w-0 flex-col border-l-[2px] border-white/[0.06]"
@@ -367,7 +338,7 @@ export default function App() {
           <TerminalPanel visible={terminalOpen} conversationId={loadConversationId} />
         </div>
 
-        {browserVisible && !calendarOpen && !editorOpen && !terminalOpen && (
+        {browserVisible && !editorOpen && !terminalOpen && (
           <div
             className="flex h-full min-w-0 flex-col border-l-[2px] border-white/[0.06] shadow-[inset_2px_0_8px_rgba(0,0,0,0.3),-2px_0_12px_rgba(0,0,0,0.4)]"
             style={{ flex: '65 0 0' }}
