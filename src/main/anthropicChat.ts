@@ -10,9 +10,12 @@ import { truncateBrowserResult, truncateToolResult, SHELL_MAX } from './core/cli
 import { buildSharedSystemPrompt, buildAnthropicStreamSystemPrompt } from './core/cli/systemPrompt';
 import { startRun, trackToolCall, trackToolResult, completeRun, failRun } from './runTracker';
 import { evaluatePolicy } from './agent/policy-engine';
+import { executeGuiInteract, DESKTOP_TOOL_NAMES, renderCapabilities } from './core/desktop';
 import { getMemoryContext } from './db/memory';
+import { checkBudget } from './agent/spending-budget';
 import { executeMemoryStore, executeMemorySearch, executeMemoryForget } from './agent/memoryExecutors';
 import { MEMORY_TOOLS } from './core/cli/memoryTools';
+import type { ToolUseBlock, LLMTurn, LoopOptions } from './agent/types';
 
 /** Anthropic API accepts the same model ids as the in-app registry (e.g. claude-sonnet-4-6). */
 export function resolveAnthropicModelId(registryId: string): string {
@@ -160,6 +163,15 @@ export async function streamAnthropicChat({
   const messagesForRequest: Anthropic.MessageParam[] = [...sessionMessages, userMessage];
 
   const runStream = async (withThinking: boolean): Promise<string> => {
+    const budget = checkBudget(1); // Check with 1 cent minimum
+    if (!budget.allowed) {
+      return `Budget exceeded: ${budget.periodLimit} cents limit reached for ${budget.blockedBy} period.`;
+    }
+    const caps = await renderCapabilities();
+    const basePrompt = await buildAnthropicStreamSystemPrompt(unrestrictedMode, caps);
+    const memCtx = getMemoryContext(userText);
+    const systemInstructions = memCtx ? `${memCtx}\n\n${basePrompt}` : basePrompt;
+
     const body: Anthropic.MessageCreateParams = {
       model: apiModelId,
       max_tokens: 8192,
@@ -167,11 +179,7 @@ export async function streamAnthropicChat({
       system: [
         {
           type: 'text' as const,
-          text: (() => {
-            const memCtx = getMemoryContext(userText);
-            const base = buildAnthropicStreamSystemPrompt(unrestrictedMode);
-            return memCtx ? `${memCtx}\n\n${base}` : base;
-          })(),
+          text: systemInstructions,
           cache_control: { type: 'ephemeral' as const },
         },
       ] as any,
@@ -243,20 +251,25 @@ export async function streamAnthropicChat({
   const runToolTurn = async (
     messages: Anthropic.MessageParam[],
   ): Promise<Anthropic.Message> => {
+    const budget = checkBudget(1);
+    if (!budget.allowed) {
+      throw new Error(`Budget exceeded (${budget.blockedBy} limit)`);
+    }
     // Shell tools are always loaded (small, always needed).
     // Browser tools are deferred — model searches via tool_search_tool_bm25.
     // defer_loading and cache_control are mutually exclusive per Anthropic API.
     const deferredBrowserTools = BROWSER_TOOLS.map(t => ({ ...t, defer_loading: true }));
 
+    const caps = await renderCapabilities();
+    const basePrompt = await buildSharedSystemPrompt(unrestrictedMode, caps);
+    const memCtx = getMemoryContext(userText);
+    const systemInstruction = memCtx ? `${memCtx}\n\n${basePrompt}` : basePrompt;
+
     const body: Anthropic.MessageCreateParams = {
       model: apiModelId,
       max_tokens: 8192,
       messages,
-      system: (() => {
-        const memCtx = getMemoryContext(userText);
-        const base = buildSharedSystemPrompt(unrestrictedMode);
-        return memCtx ? `${memCtx}\n\n${base}` : base;
-      })(),
+      system: systemInstruction,
       tools: [
         { type: 'tool_search_tool_bm25_20251119', name: 'tool_search_tool_bm25' } as any,
         ...ANTHROPIC_SHELL_TOOLS.map((t, i) =>
@@ -336,6 +349,8 @@ export async function streamAnthropicChat({
       try {
         if (SHELL_TOOL_NAMES.has(block.name)) {
           resultContent = await executeShellTool(block.name, block.input as Record<string, unknown>);
+        } else if (DESKTOP_TOOL_NAMES.has(block.name)) {
+          resultContent = await executeGuiInteract(block.input as Record<string, unknown>);
         } else if (MEMORY_TOOL_NAMES.has(block.name)) {
           if (block.name === 'memory_store') {
             resultContent = executeMemoryStore(block.input as Record<string, unknown>);
@@ -478,4 +493,41 @@ export async function streamAnthropicChat({
     }
     return { response: '', error: err.message };
   }
+}
+
+/**
+ * Single-turn non-streaming call for use by agentLoop.
+ * Returns text + tool_use blocks from one LLM response. Does NOT run a tool loop.
+ */
+export async function streamAnthropicLLM(
+  messages: Anthropic.MessageParam[],
+  systemPrompt: string,
+  tools: Anthropic.Tool[],
+  options: LoopOptions,
+): Promise<LLMTurn> {
+  const client = new Anthropic({ apiKey: options.apiKey });
+
+  const body: Anthropic.MessageCreateParams = {
+    model: options.model,
+    max_tokens: 8192,
+    messages,
+    system: systemPrompt,
+    tools: tools as Anthropic.Tool[],
+  };
+
+  const response = await client.messages.create(body, { signal: options.signal });
+
+  const textBlocks = response.content.filter((b): b is Anthropic.TextBlock => b.type === 'text');
+  const toolUseBlocks = response.content.filter((b): b is Anthropic.ToolUseBlock => b.type === 'tool_use');
+
+  const text = textBlocks.map(b => b.text).join('');
+  if (text) options.onText(text);
+
+  const toolBlocks: ToolUseBlock[] = toolUseBlocks.map(b => ({
+    id: b.id,
+    name: b.name,
+    input: b.input as Record<string, unknown>,
+  }));
+
+  return { text, toolBlocks };
 }

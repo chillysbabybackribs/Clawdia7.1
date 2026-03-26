@@ -10,6 +10,9 @@ import type { BrowserService } from './core/browser/BrowserService';
 import { truncateBrowserResult } from './core/cli/truncate';
 import { buildSharedSystemPrompt } from './core/cli/systemPrompt';
 import { startRun, trackToolCall, trackToolResult, completeRun, failRun } from './runTracker';
+import { executeGuiInteract, DESKTOP_TOOL_NAMES, renderCapabilities } from './core/desktop';
+import { checkBudget } from './agent/spending-budget';
+import type { ToolUseBlock, LLMTurn, LoopOptions } from './agent/types';
 
 type OpenAIMessage = OpenAI.Chat.ChatCompletionMessageParam;
 
@@ -89,10 +92,18 @@ export async function streamOpenAIChat({
   const sessionLengthBeforeRequest = sessionMessages.length;
 
   try {
+    const budget = checkBudget(1);
+    if (!budget.allowed) {
+      return { response: '', error: `Budget exceeded: ${budget.periodLimit} cents limit reached for ${budget.blockedBy} period.` };
+    }
+
     sessionMessages.push(userMessage);
 
+    const caps = await renderCapabilities();
+    const systemPrompt = await buildSharedSystemPrompt(unrestrictedMode, caps);
+
     const loopMessages: OpenAIMessage[] = [
-      { role: 'system', content: buildSharedSystemPrompt(unrestrictedMode) },
+      { role: 'system', content: systemPrompt },
       ...sessionMessages,
     ];
 
@@ -226,6 +237,8 @@ export async function streamOpenAIChat({
           if (tc.name.startsWith('browser_') && browserService) {
             const output = await executeBrowserTool(tc.name, args, browserService);
             resultStr = truncateBrowserResult(JSON.stringify(output));
+          } else if (DESKTOP_TOOL_NAMES.has(tc.name)) {
+            resultStr = await executeGuiInteract(args);
           } else {
             resultStr = await executeShellTool(tc.name, args);
           }
@@ -285,4 +298,60 @@ export async function streamOpenAIChat({
     }
     return { response: '', error: err.message };
   }
+}
+
+export async function streamOpenAILLM(
+  messages: OpenAI.Chat.ChatCompletionMessageParam[],
+  systemPrompt: string,
+  tools: OpenAI.Chat.ChatCompletionTool[],
+  options: LoopOptions,
+): Promise<LLMTurn> {
+  const client = new OpenAI({ apiKey: options.apiKey });
+
+  const loopMessages: OpenAI.Chat.ChatCompletionMessageParam[] = [
+    { role: 'system', content: systemPrompt },
+    ...messages,
+  ];
+
+  const stream = await client.chat.completions.create(
+    {
+      model: options.model,
+      messages: loopMessages,
+      tools,
+      tool_choice: 'auto',
+      stream: true,
+      // @ts-ignore
+      store: false,
+    },
+    { signal: options.signal },
+  );
+
+  let text = '';
+  const toolCallAccumulators: Record<string, { name: string; args: string }> = {};
+
+  for await (const chunk of stream) {
+    const delta = chunk.choices[0]?.delta;
+    if (!delta) continue;
+    if (delta.content) {
+      text += delta.content;
+      options.onText(delta.content);
+    }
+    if (delta.tool_calls) {
+      for (const tc of delta.tool_calls) {
+        const idx = String(tc.index);
+        if (!toolCallAccumulators[idx]) toolCallAccumulators[idx] = { name: '', args: '' };
+        if (tc.function?.name) toolCallAccumulators[idx].name = tc.function.name;
+        if (tc.function?.arguments) toolCallAccumulators[idx].args += tc.function.arguments;
+      }
+    }
+  }
+
+  const ts = Date.now();
+  const toolBlocks: ToolUseBlock[] = Object.entries(toolCallAccumulators).map(([idx, tc]) => ({
+    id: `call_${idx}_${ts}`,
+    name: tc.name,
+    input: (() => { try { return JSON.parse(tc.args || '{}'); } catch { return {}; } })(),
+  }));
+
+  return { text, toolBlocks };
 }

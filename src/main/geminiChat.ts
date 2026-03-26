@@ -9,7 +9,10 @@ import { getSearchToolGemini, executeSearchTools, toGeminiDeclaration, searchToo
 import type { BrowserService } from './core/browser/BrowserService';
 import { truncateBrowserResult } from './core/cli/truncate';
 import { buildSharedSystemPrompt } from './core/cli/systemPrompt';
+import { executeGuiInteract, DESKTOP_TOOL_NAMES, renderCapabilities } from './core/desktop';
+import { evaluatePolicy } from './agent/policy-engine';
 import { startRun, trackToolCall, trackToolResult, completeRun, failRun } from './runTracker';
+import type { ToolUseBlock, LLMTurn, LoopOptions } from './agent/types';
 
 // ── Module-level constants (kept for reference) ───────────────────────────────
 // GEMINI_TOOLS is no longer used directly in the loop — tools are loaded on demand
@@ -124,10 +127,13 @@ export async function streamGeminiChat({
 
             sendThinking('Gemini is thinking…');
 
+            const caps = await renderCapabilities();
+            const systemPrompt = await buildSharedSystemPrompt(unrestrictedMode, caps);
+
             const chat = ai.chats.create({
                 model: modelRegistryId,
                 config: {
-                    systemInstruction: buildSharedSystemPrompt(unrestrictedMode),
+                    systemInstruction: systemPrompt,
                     tools: activeGeminiTools,
                     temperature: 0,
                 },
@@ -222,9 +228,54 @@ export async function streamGeminiChat({
                 }
 
                 let resultStr: string;
+
+                // ── Policy gate ───────────────────────────────────────────────
+                const policyDecision = evaluatePolicy(
+                    fc.name,
+                    fc.args as Record<string, unknown>,
+                );
+
+                if (policyDecision.effect === 'deny') {
+                    resultStr = `[POLICY DENIED] ${policyDecision.reason} (rule: ${policyDecision.ruleId ?? 'none'}, profile: ${policyDecision.profileName})`;
+                    if (!webContents.isDestroyed()) {
+                        webContents.send(IPC_EVENTS.CHAT_TOOL_ACTIVITY, {
+                            id: tcId,
+                            name: uiName,
+                            status: 'error',
+                            detail: `Policy denied: ${policyDecision.reason}`,
+                            policyDenied: true,
+                        });
+                    }
+                    toolResultParts.push({
+                        functionResponse: { name: fc.name, response: { result: resultStr, error: true } },
+                    });
+                    continue;
+                }
+
+                if (policyDecision.effect === 'require_approval') {
+                    resultStr = `[POLICY HELD] This action requires your approval: ${policyDecision.reason}. ` +
+                        `Tool "${fc.name}" was not executed. Change the policy profile in Settings to allow it.`;
+                    if (!webContents.isDestroyed()) {
+                        webContents.send(IPC_EVENTS.CHAT_TOOL_ACTIVITY, {
+                            id: tcId,
+                            name: uiName,
+                            status: 'error',
+                            detail: `Requires approval: ${policyDecision.reason}`,
+                            policyHeld: true,
+                        });
+                    }
+                    toolResultParts.push({
+                        functionResponse: { name: fc.name, response: { result: resultStr } },
+                    });
+                    continue;
+                }
+                // ── End policy gate ───────────────────────────────────────────────
+
                 if (fc.name.startsWith('browser_') && browserService) {
                     const output = await executeBrowserTool(fc.name, fc.args as Record<string, unknown>, browserService);
                     resultStr = truncateBrowserResult(JSON.stringify(output));
+                } else if (DESKTOP_TOOL_NAMES.has(fc.name)) {
+                    resultStr = await executeGuiInteract(fc.args as Record<string, unknown>);
                 } else {
                     resultStr = await executeShellTool(fc.name, fc.args as Record<string, unknown>);
                 }
@@ -279,4 +330,47 @@ export async function streamGeminiChat({
         }
         return { response: '', error: err.message };
     }
+}
+
+export async function streamGeminiLLM(
+  sessionMessages: any[],
+  systemPrompt: string,
+  tools: any[],
+  options: LoopOptions,
+): Promise<LLMTurn> {
+  const ai = new GoogleGenAI({ apiKey: options.apiKey });
+
+  const chat = ai.chats.create({
+    model: options.model,
+    config: {
+      systemInstruction: systemPrompt,
+      tools,
+      temperature: 0,
+    },
+    history: sessionMessages.slice(0, -1),
+  });
+
+  const responseStream = await chat.sendMessageStream({
+    message: sessionMessages[sessionMessages.length - 1].parts,
+  });
+
+  let text = '';
+  const functionCalls: any[] = [];
+
+  for await (const chunk of responseStream) {
+    if (options.signal?.aborted) throw new Error('AbortError');
+    if (chunk.text) {
+      text += chunk.text;
+      options.onText(chunk.text);
+    }
+    if (chunk.functionCalls?.length) functionCalls.push(...chunk.functionCalls);
+  }
+
+  const toolBlocks: ToolUseBlock[] = functionCalls.map((fc, i) => ({
+    id: `gc-${Date.now()}-${i}`,
+    name: fc.name,
+    input: fc.args as Record<string, unknown>,
+  }));
+
+  return { text, toolBlocks };
 }
