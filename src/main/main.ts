@@ -1,7 +1,9 @@
 import { app, BrowserWindow } from 'electron';
 import * as path from 'path';
 import { ElectronBrowserService } from './core/browser/ElectronBrowserService';
+import { TerminalSessionController } from './core/terminal/TerminalSessionController';
 import { registerIpc } from './registerIpc';
+import { registerTerminalIpc } from './registerTerminalIpc';
 
 const isDev = process.env.NODE_ENV === 'development';
 
@@ -17,14 +19,12 @@ function createWindow(): BrowserWindow {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
       nodeIntegration: false,
-      // Default sandbox blocks `require()` of local modules in preload; keep isolation without sandbox.
       sandbox: false,
     },
   });
 
   if (isDev) {
     win.loadURL('http://127.0.0.1:5174');
-    win.webContents.openDevTools(); // ignore DevTools CDP noise (e.g. Autofill.* not implemented in Electron)
   } else {
     win.loadFile(path.join(__dirname, '../../dist/renderer/index.html'));
   }
@@ -35,7 +35,9 @@ app.whenReady().then(() => {
   const win = createWindow();
   const browserService = new ElectronBrowserService(win, app.getPath('userData'));
   void browserService.init();
+  const terminalController = new TerminalSessionController();
   registerIpc(browserService);
+  registerTerminalIpc(terminalController, win);
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();
   });
