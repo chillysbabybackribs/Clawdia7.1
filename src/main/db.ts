@@ -81,6 +81,7 @@ function resolveDbPath(): string {
 
 let db: Database.Database | null = null;
 
+/** @internal — exposed for tests only; do not use in production code. */
 export function getDb(): Database.Database {
   if (!db) throw new Error('db not initialized — call initDb() first');
   return db;
@@ -209,6 +210,9 @@ export function initDb(): void {
     } catch { }
     try {
       db.prepare(`ALTER TABLE runs ADD COLUMN estimated_cost_usd REAL`).run();
+    } catch { }
+    try {
+      db.prepare(`ALTER TABLE runs ADD COLUMN parent_run_id TEXT REFERENCES runs(id) ON DELETE CASCADE`).run();
     } catch { }
 
     // Mark orphaned runs as failed (app was killed mid-run)
