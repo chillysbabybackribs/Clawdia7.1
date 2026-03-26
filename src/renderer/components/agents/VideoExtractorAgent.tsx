@@ -1,5 +1,5 @@
 // src/renderer/components/agents/VideoExtractorAgent.tsx
-import React, { useState, useRef, useEffect } from 'react';
+import React, { useState, useEffect } from 'react';
 
 interface Props {
   isOpen: boolean;
@@ -19,23 +19,20 @@ const QUALITY_OPTIONS = ['Best', '1080p', '720p', '480p', '360p'];
 const FORMAT_OPTIONS = ['MP4', 'WebM', 'MKV'];
 const AUDIO_OPTIONS = ['Video', 'Audio only', 'MP3', 'M4A', 'OPUS'];
 
-const DEFAULT_FOLDER = (typeof window !== 'undefined' && (window as any).__dirname)
-  ? ''
-  : '~/Downloads';
-
 export default function VideoExtractorAgent({ isOpen, onToggle }: Props) {
   const [input, setInput] = useState('');
-  const [folder, setFolder] = useState(DEFAULT_FOLDER);
+  const [folder, setFolder] = useState('');
   const [quality, setQuality] = useState('Best');
   const [format, setFormat] = useState('MP4');
   const [audio, setAudio] = useState('Video');
   const [status, setStatus] = useState<DownloadStatus>({ type: 'idle' });
-  const textareaRef = useRef<HTMLTextAreaElement>(null);
 
   // Load default download folder on mount
   useEffect(() => {
-    const home = (window as any).clawdia?.shell?.homedir?.() ?? '';
-    if (home) setFolder(home + '/Downloads');
+    const api = (window as any).clawdia;
+    api?.videoExtractor?.getHomeDir?.().then((home: string) => {
+      if (home) setFolder(home + '/Downloads');
+    });
   }, []);
 
   // Listen for IPC events from main process
@@ -48,6 +45,7 @@ export default function VideoExtractorAgent({ isOpen, onToggle }: Props) {
     });
     const unsubComplete = api.videoExtractor.onComplete((data: { filePath: string }) => {
       setStatus({ type: 'done', filePath: data.filePath });
+      setInput('');
     });
     const unsubError = api.videoExtractor.onError((data: { message: string }) => {
       setStatus({ type: 'error', message: data.message });
@@ -78,21 +76,24 @@ export default function VideoExtractorAgent({ isOpen, onToggle }: Props) {
 
     setStatus({ type: 'checking' });
 
-    // Check yt-dlp is installed
-    const { installed } = await api.videoExtractor.checkYtdlp();
-    if (!installed) {
-      setStatus({ type: 'needs-install' });
-      return;
-    }
+    try {
+      const { installed } = await api.videoExtractor.checkYtdlp();
+      if (!installed) {
+        setStatus({ type: 'needs-install' });
+        return;
+      }
 
-    setStatus({ type: 'running', percent: null, line: 'Starting...' });
-    await api.videoExtractor.startDownload({
-      url: input.trim(),
-      outputDir: folder,
-      quality,
-      format,
-      audio,
-    });
+      setStatus({ type: 'running', percent: null, line: 'Starting...' });
+      await api.videoExtractor.startDownload({
+        url: input.trim(),
+        outputDir: folder,
+        quality,
+        format,
+        audio,
+      });
+    } catch (err: any) {
+      setStatus({ type: 'error', message: err?.message ?? 'Unexpected error' });
+    }
   };
 
   const handleInstall = async () => {
@@ -128,7 +129,6 @@ export default function VideoExtractorAgent({ isOpen, onToggle }: Props) {
           {/* Chat-style input */}
           <div className="mt-2 flex items-center gap-2 rounded-lg border border-white/[0.1] bg-surface-0 px-3 py-2 min-h-[52px]">
             <textarea
-              ref={textareaRef}
               value={input}
               onChange={(e) => setInput(e.target.value)}
               onKeyDown={(e) => {
@@ -172,7 +172,7 @@ export default function VideoExtractorAgent({ isOpen, onToggle }: Props) {
               <select
                 value={quality}
                 onChange={(e) => setQuality(e.target.value)}
-                disabled={isRunning}
+                disabled={isRunning || audio !== 'Video'}
                 className="rounded-[5px] border border-white/[0.08] bg-surface-0 px-2 py-1 text-[10px] text-text-secondary outline-none disabled:opacity-40"
               >
                 {QUALITY_OPTIONS.map((q) => (

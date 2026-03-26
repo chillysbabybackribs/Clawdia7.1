@@ -6,6 +6,12 @@ import * as path from 'path';
 
 export function registerVideoExtractorIpc(win: BrowserWindow): void {
 
+  // Return the real home directory (avoids tilde expansion issues with shell:false)
+  ipcMain.removeHandler('get-home-dir');
+  ipcMain.handle('get-home-dir', () => {
+    return os.homedir();
+  });
+
   // Check if yt-dlp is installed
   ipcMain.removeHandler('check-ytdlp');
   ipcMain.handle('check-ytdlp', () => {
