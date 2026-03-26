@@ -329,35 +329,34 @@ export default function InputBar({
             ))}
           </div>
         )}
-        <textarea
-          ref={textareaRef}
-          value={text}
-          onChange={handleInput}
-          onKeyDown={handleKeyDown}
-          onFocus={() => setFocused(true)}
-          onBlur={() => setFocused(false)}
-          placeholder={isStreaming ? 'Add a follow-up...' : 'Ask me anything...'}
-          rows={1}
-          className="w-full bg-transparent text-text-primary text-[14px] placeholder:text-text-tertiary px-4 pt-1.5 pb-1.5 resize-none outline-none max-h-[200px] leading-[1.6]"
-        />
+        <div className="flex items-center px-3 py-2 gap-2">
+          <textarea
+            ref={textareaRef}
+            value={text}
+            onChange={handleInput}
+            onKeyDown={handleKeyDown}
+            onFocus={() => setFocused(true)}
+            onBlur={() => setFocused(false)}
+            placeholder={isStreaming ? 'Add a follow-up...' : 'Ask me anything...'}
+            rows={1}
+            className="flex-1 bg-transparent text-text-primary text-[16px] placeholder:text-text-tertiary px-2 py-2 resize-none outline-none max-h-[200px] leading-[1.6]"
+          />
 
-        <div className="flex items-center justify-between px-3 pb-2.5 pt-0.5">
-          <button
-            onClick={handlePickFiles}
-            disabled={isStreaming}
-            title="Attach file"
-            className={`flex items-center justify-center w-8 h-8 rounded-lg transition-all no-drag ${
-              isStreaming
-                ? 'text-text-tertiary/35 cursor-default'
-                : 'text-text-tertiary hover:text-text-secondary hover:bg-white/[0.05] cursor-pointer'
-            }`}
-          >
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-              <path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48" />
-            </svg>
-          </button>
-
-          <div className="flex items-center gap-1.5 no-drag relative">
+          <div className="flex items-center gap-1.5 no-drag relative flex-shrink-0">
+            <button
+              onClick={handlePickFiles}
+              disabled={isStreaming}
+              title="Attach file"
+              className={`flex items-center justify-center w-8 h-8 rounded-lg transition-all no-drag ${
+                isStreaming
+                  ? 'text-text-tertiary/35 cursor-default'
+                  : 'text-text-tertiary hover:text-text-secondary hover:bg-white/[0.05] cursor-pointer'
+              }`}
+            >
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48" />
+              </svg>
+            </button>
             {isStreaming ? (
               <>
                 <button
@@ -411,3 +410,4 @@ export default function InputBar({
     </div>
   );
 }
+
