@@ -478,6 +478,7 @@ export default function TerminalPanel({ visible, conversationId }: TerminalPanel
   const [splitSessionId, setSplitSessionId] = useState<string | null>(null);
   const [splitRatio, setSplitRatio] = useState(0.5);
   const [splitIsObserving, setSplitIsObserving] = useState(false);
+  const [isAvailable, setIsAvailable] = React.useState<boolean | null>(null);
 
   // Sync activeTabId to first tab on mount
   React.useEffect(() => {
@@ -485,7 +486,28 @@ export default function TerminalPanel({ visible, conversationId }: TerminalPanel
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  React.useEffect(() => {
+    let cancelled = false;
+    api?.terminal?.isAvailable()
+      .then((available) => { if (!cancelled) setIsAvailable(available); })
+      .catch(() => { if (!cancelled) setIsAvailable(false); });
+    return () => { cancelled = true; };
+  }, [api]);
+
   const activeTab = tabs.find((t) => t.id === activeTabId) ?? tabs[0];
+
+  if (isAvailable === false) {
+    return (
+      <div className={`flex flex-1 items-center justify-center bg-[#0d0d10] text-text-secondary ${visible ? '' : 'hidden'}`}>
+        <div className="space-y-2 text-center">
+          <div className="text-sm font-medium text-text-primary">Terminal Unavailable</div>
+          <div className="max-w-xs text-xs">
+            node-pty is not installed or failed to load. Run npm install and rebuild Electron native modules.
+          </div>
+        </div>
+      </div>
+    );
+  }
 
   const handleAddTab = () => {
     const tab = makeTab(tabs.length + 1);
