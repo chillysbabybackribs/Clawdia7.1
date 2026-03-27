@@ -107,6 +107,7 @@ function TerminalPane({ sessionId, conversationId, isObserving = false, onSpawnE
       // Observe mode: just attach to events, no spawn
       if (isObserving) {
         const snapshot = await api.terminal.getSnapshot(sessionId).catch(() => null);
+        if (disposed) { term.dispose(); return; }
         if (snapshot?.output) term.write(sliceRecentOutput(snapshot.output));
         setIsConnected(!!snapshot?.connected);
       } else {
@@ -114,11 +115,13 @@ function TerminalPane({ sessionId, conversationId, isObserving = false, onSpawnE
         let result: { id: string } | null = null;
         try {
           const snapshot = await api.terminal.getSnapshot(sessionId).catch(() => null);
+          if (disposed) { term.dispose(); return; }
           if (snapshot?.connected) {
             result = { id: sessionId };
             if (snapshot.output) term.write(sliceRecentOutput(snapshot.output));
           } else {
             result = await api.terminal.spawn(sessionId, dims ? { cols: dims.cols, rows: dims.rows } : undefined);
+            if (disposed) { term.dispose(); return; }
           }
         } catch {
           result = null;
@@ -128,10 +131,16 @@ function TerminalPane({ sessionId, conversationId, isObserving = false, onSpawnE
           setSpawnError(true);
           onSpawnError?.(sessionId);
           term.writeln('\r\n\x1b[31m[Failed to start terminal session. Click Retry.]\x1b[0m');
+          cleanupRef.current = () => {
+            term.dispose();
+            termRef.current = null;
+            fitAddonRef.current = null;
+          };
           return;
         }
 
         const snapshot = await api.terminal.getSnapshot(sessionId).catch(() => null);
+        if (disposed) { term.dispose(); return; }
         if (snapshot?.output) term.write(sliceRecentOutput(snapshot.output));
         setIsConnected(!!snapshot?.connected);
         setAgentControlled(!!snapshot?.agentControlled);
@@ -171,6 +180,7 @@ function TerminalPane({ sessionId, conversationId, isObserving = false, onSpawnE
         setIsConnected(payload.connected);
         setAgentControlled(!!payload.agentControlled);
         setSessionOwner(payload.owner ?? 'user');
+        sessionModeRef.current = payload.mode ?? 'user_owned';
         setSessionMode(payload.mode ?? 'user_owned');
         setActiveRun(payload.runId ?? null);
         setTakeoverRequestedBy(payload.takeoverRequestedBy ?? null);
@@ -192,13 +202,15 @@ function TerminalPane({ sessionId, conversationId, isObserving = false, onSpawnE
 
       const resizeObserver = new ResizeObserver(resizeHandler);
       resizeObserver.observe(containerRef.current!);
-      requestAnimationFrame(() => { resizeHandler(); term.scrollToBottom(); });
+      let initialRaf: number | null = null;
+      initialRaf = requestAnimationFrame(() => { initialRaf = null; resizeHandler(); term.scrollToBottom(); });
 
       cleanupRef.current = () => {
         inputDisposable.dispose();
         unsubData();
         unsubExit();
         unsubSessionState();
+        if (initialRaf !== null) cancelAnimationFrame(initialRaf);
         if (resizeRaf !== null) cancelAnimationFrame(resizeRaf);
         resizeObserver.disconnect();
         term.dispose();
