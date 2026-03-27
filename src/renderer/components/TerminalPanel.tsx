@@ -484,6 +484,23 @@ function TerminalSplitContainer({
   const containerRef = React.useRef<HTMLDivElement>(null);
   const isDragging = React.useRef(false);
 
+  const activeDragListenersRef = React.useRef<{
+    move: ((e: MouseEvent) => void) | null;
+    up: (() => void) | null;
+  }>({ move: null, up: null });
+
+  // Clean up drag listeners on unmount
+  React.useEffect(() => {
+    return () => {
+      if (activeDragListenersRef.current.move) {
+        window.removeEventListener('mousemove', activeDragListenersRef.current.move);
+      }
+      if (activeDragListenersRef.current.up) {
+        window.removeEventListener('mouseup', activeDragListenersRef.current.up);
+      }
+    };
+  }, []);
+
   const handleDividerMouseDown = React.useCallback((e: React.MouseEvent) => {
     e.preventDefault();
     isDragging.current = true;
@@ -503,15 +520,19 @@ function TerminalSplitContainer({
       isDragging.current = false;
       window.removeEventListener('mousemove', onMouseMove);
       window.removeEventListener('mouseup', onMouseUp);
+      activeDragListenersRef.current.move = null;
+      activeDragListenersRef.current.up = null;
     };
 
+    activeDragListenersRef.current.move = onMouseMove;
+    activeDragListenersRef.current.up = onMouseUp;
     window.addEventListener('mousemove', onMouseMove);
     window.addEventListener('mouseup', onMouseUp);
   }, [onSplitRatioChange]);
 
   if (!bottomSessionId) {
     return (
-      <div className="flex flex-1 flex-col overflow-hidden min-h-0">
+      <div ref={containerRef} className="flex flex-1 flex-col overflow-hidden min-h-0">
         <TerminalPane sessionId={topSessionId} conversationId={conversationId} />
       </div>
     );
