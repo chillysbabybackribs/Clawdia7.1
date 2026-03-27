@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React from 'react';
 import 'xterm/css/xterm.css';
 
 const TERMINAL_THEME = {
@@ -454,7 +454,7 @@ function TerminalTabBar({
         }`}
         title={splitActive ? 'Close split pane' : 'Split terminal (top/bottom)'}
       >
-        {splitActive ? '⊟ Split' : '⊟ Split'}
+        {splitActive ? '⊟ Unsplit' : '⊟ Split'}
       </button>
     </div>
   );
@@ -578,9 +578,9 @@ export default function TerminalPanel({ visible, conversationId }: TerminalPanel
   const [tabs, setTabs] = React.useState<TerminalTab[]>([initialTab]);
   const [activeTabId, setActiveTabId] = React.useState<string>(initialTab.id);
   const tabCounterRef = React.useRef(2); // next tab will be "Terminal 2"
-  const [splitSessionId, setSplitSessionId] = useState<string | null>(null);
-  const [splitRatio, setSplitRatio] = useState(0.5);
-  const [splitIsObserving, setSplitIsObserving] = useState(false);
+  const [splitSessionId, setSplitSessionId] = React.useState<string | null>(null);
+  const [splitRatio, setSplitRatio] = React.useState(0.5);
+  const [splitIsObserving, setSplitIsObserving] = React.useState(false);
   const [isAvailable, setIsAvailable] = React.useState<boolean | null>(null);
 
   React.useEffect(() => {
