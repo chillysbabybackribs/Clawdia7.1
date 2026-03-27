@@ -138,6 +138,7 @@ export default function InputBar({
   }, []);
 
   const handleSend = useCallback(() => {
+    if (disabled) return;
     const trimmed = text.trim();
     if (!trimmed && attachments.length === 0) return;
     if (isStreaming) onAddContext(trimmed);
