@@ -16,11 +16,17 @@ export interface A11yQuery {
 export function selectLocatorStrategy(ctrl: ControlDef): LocatorUsed {
   if (ctrl.a11yRole) return 'a11y';
   if (ctrl.ocrFallback) return 'ocr';
+  if (ctrl.relative) return 'relative';
   return 'coord';
 }
 
 export function buildA11yQuery(appName: string, ctrl: ControlDef): A11yQuery {
   return { appName, role: ctrl.a11yRole, name: ctrl.a11yName ?? '' };
+}
+
+export function getRelativePoint(ctrl: ControlDef): { x: number; y: number } {
+  const [rx, ry] = ctrl.relative ?? [0, 0];
+  return { x: rx, y: ry + OBS_PILOT_CONFIG.contentYOffset };
 }
 
 /**

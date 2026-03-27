@@ -8,7 +8,7 @@ export type FailType =
   | 'precondition_failed'
   | 'unknown';
 
-export type LocatorUsed = 'a11y' | 'ocr' | 'coord' | 'none';
+export type LocatorUsed = 'a11y' | 'ocr' | 'relative' | 'coord' | 'none';
 
 export interface StepResult {
   step: string;
@@ -35,6 +35,8 @@ export interface ControlDef {
   a11yName: string | null;
   region: string;
   ocrFallback: string;
+  coord?: [number, number];
+  relative?: [number, number];
   knownValues?: string[];
   toggleState?: boolean;
 }
@@ -63,4 +65,9 @@ export interface OBSMap {
   controls: Record<string, ControlDef>;
   locatorStrategy: string[];
   confidence: { initial: number; successIncrement: number; failureDecrement: number };
+}
+
+export interface StateDef {
+  windowTitlePattern: string;
+  cues: string[];
 }

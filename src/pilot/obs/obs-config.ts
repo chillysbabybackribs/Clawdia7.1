@@ -14,4 +14,5 @@ export const OBS_PILOT_CONFIG = {
   obsExecutable:       '/usr/bin/obs',
   windowTitlePattern:  'OBS.*',
   appName:             'obs',
+  contentYOffset:      69,
 } as const;
