@@ -1,13 +1,13 @@
 {
   "app": "obs-studio",
-  "version": "1.1.0",
-  "updated": "2026-03-26",
+  "version": "1.2.0",
+  "updated": "2026-03-27",
   "screens": {
     "main": {
       "windowTitle": "OBS",
       "windowTitlePattern": "OBS.*",
       "precondition": "OBS launched and not loading",
-      "regions": ["menuBar", "scenes", "sources", "mixer", "transitions", "controls"]
+      "regions": ["menuBar", "scenes", "sources", "mixer", "transitions", "controls", "sceneList", "sourceList", "bottomControls"]
     },
     "settings": {
       "windowTitle": "Settings",
@@ -77,21 +77,46 @@
       "a11yName": null,
       "position": "settings-dialog-bottom",
       "controls": ["settingsOkBtn", "settingsCloseBtn"]
+    },
+    "sceneList": {
+      "label": "Scene List",
+      "a11yRole": "list",
+      "a11yName": "Scenes",
+      "position": "left-panel-bottom",
+      "controls": ["sceneItem0", "sceneAddBtn", "sceneRemoveBtn"]
+    },
+    "sourceList": {
+      "label": "Source List",
+      "a11yRole": "list",
+      "a11yName": "Sources",
+      "position": "left-panel-bottom",
+      "controls": ["sourceItem0", "sourceAddBtn", "sourceRemoveBtn"]
+    },
+    "bottomControls": {
+      "label": "Bottom Controls",
+      "a11yRole": "panel",
+      "a11yName": null,
+      "position": "bottom-center",
+      "controls": ["startRecordingBtn", "startVirtualCameraBtn"]
     }
   },
   "controls": {
-    "sceneAddBtn":     { "a11yRole": "push button", "a11yName": "Add",      "region": "scenes",          "ocrFallback": "+",        "coord": [22,  1033] },
-    "sceneRemoveBtn":  { "a11yRole": "push button", "a11yName": "Remove",   "region": "scenes",          "ocrFallback": "-",        "coord": [50,  1033] },
-    "sourceAddBtn":    { "a11yRole": "push button", "a11yName": "Add",      "region": "sources",         "ocrFallback": "+",        "coord": [330, 1028] },
-    "sourceRemoveBtn": { "a11yRole": "push button", "a11yName": "Remove",   "region": "sources",         "ocrFallback": "-",        "coord": [358, 1028] },
-    "micMuteBtn":      { "a11yRole": "push button", "a11yName": "Mute",     "region": "mixer",           "ocrFallback": "Mute",     "coord": [980, 917],  "toggleState": true },
-    "desktopMuteBtn":  { "a11yRole": "push button", "a11yName": "Mute",     "region": "mixer",           "ocrFallback": "Mute",     "coord": [980, 855],  "toggleState": true },
-    "transitionCombo": { "a11yRole": "combo box",   "a11yName": null,       "region": "transitions",     "ocrFallback": "Fade",     "coord": [1110, 883], "knownValues": ["Cut","Fade","Swipe","Slide","Stinger","Luma Wipe"] },
-    "settingsBtn":     { "a11yRole": "push button", "a11yName": "Settings", "region": "controls",        "ocrFallback": "Settings", "coord": [1421, 955] },
-    "settingsOkBtn":   { "a11yRole": "push button", "a11yName": "OK",       "region": "settingsButtons", "ocrFallback": "OK" },
-    "settingsCloseBtn":{ "a11yRole": "push button", "a11yName": "Close",    "region": "settingsButtons", "ocrFallback": "Close" },
-    "sceneNameInput":  { "a11yRole": "text",        "a11yName": null,       "region": "addScene",        "ocrFallback": "" },
-    "sourceTypeList":  { "a11yRole": "list",        "a11yName": null,       "region": "addSource",       "ocrFallback": "" }
+    "sceneAddBtn":            { "a11yRole": "push button", "a11yName": "Add",                  "region": "scenes",          "ocrFallback": "+",                    "coord": [22,   1033] },
+    "sceneRemoveBtn":         { "a11yRole": "push button", "a11yName": "Remove",               "region": "scenes",          "ocrFallback": "-",                    "coord": [50,   1033] },
+    "sourceAddBtn":           { "a11yRole": "push button", "a11yName": "Add",                  "region": "sources",         "ocrFallback": "+",                    "coord": [330,  1028] },
+    "sourceRemoveBtn":        { "a11yRole": "push button", "a11yName": "Remove",               "region": "sources",         "ocrFallback": "-",                    "coord": [358,  1028] },
+    "micMuteBtn":             { "a11yRole": "push button", "a11yName": "Mute",                 "region": "mixer",           "ocrFallback": "Mute",                 "coord": [980,  917],  "toggleState": true },
+    "desktopMuteBtn":         { "a11yRole": "push button", "a11yName": "Mute",                 "region": "mixer",           "ocrFallback": "Mute",                 "coord": [980,  855],  "toggleState": true },
+    "transitionCombo":        { "a11yRole": "combo box",   "a11yName": null,                   "region": "transitions",     "ocrFallback": "Fade",                 "coord": [1110, 883],  "knownValues": ["Cut","Fade","Swipe","Slide","Stinger","Luma Wipe"] },
+    "settingsBtn":            { "a11yRole": "push button", "a11yName": "Settings",             "region": "controls",        "ocrFallback": "Settings",             "coord": [1421, 955] },
+    "settingsOkBtn":          { "a11yRole": "push button", "a11yName": "OK",                   "region": "settingsButtons", "ocrFallback": "OK" },
+    "settingsCloseBtn":       { "a11yRole": "push button", "a11yName": "Close",                "region": "settingsButtons", "ocrFallback": "Close" },
+    "sceneNameInput":         { "a11yRole": "text",        "a11yName": null,                   "region": "addScene",        "ocrFallback": "" },
+    "sourceTypeList":         { "a11yRole": "list",        "a11yName": null,                   "region": "addSource",       "ocrFallback": "" },
+    "sceneItem0":             { "a11yRole": "list item",   "a11yName": null,                   "region": "sceneList",       "ocrFallback": "",                     "coord": [155,  840] },
+    "sourceItem0":            { "a11yRole": "list item",   "a11yName": null,                   "region": "sourceList",      "ocrFallback": "",                     "coord": [330,  900] },
+    "startRecordingBtn":      { "a11yRole": "push button", "a11yName": "Start Recording",      "region": "bottomControls",  "ocrFallback": "Start Recording",      "coord": [1200, 980] },
+    "startVirtualCameraBtn":  { "a11yRole": "push button", "a11yName": "Start Virtual Camera", "region": "bottomControls",  "ocrFallback": "Start Virtual Camera", "coord": [1200, 1030] }
   },
   "locatorStrategy": ["a11y", "ocr", "coordFallback"],
   "confidence": { "initial": 0.5, "successIncrement": 0.1, "failureDecrement": 0.2 }
