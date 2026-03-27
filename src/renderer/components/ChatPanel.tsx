@@ -327,7 +327,72 @@ function LinkPreviewList({ linkPreviews }: { linkPreviews: MessageLinkPreview[] 
   );
 }
 
-const AssistantMessage = React.memo(function AssistantMessage({ message, shimmerText }: { message: Message; shimmerText?: string }) {
+function codexStageIndex(text?: string): 0 | 1 | 2 {
+  const value = (text || '').toLowerCase();
+  if (value.includes('draft')) return 2;
+  if (value.includes('inspect') || value.includes('analyz') || value.includes('plan')) return 1;
+  return 0;
+}
+
+function CodexWaitingCard({ text }: { text: string }) {
+  const stages = ['Boot', 'Inspect', 'Draft'];
+  const activeStage = codexStageIndex(text);
+
+  return (
+    <div className="codex-wait-card max-w-[520px] overflow-hidden rounded-2xl border border-emerald-300/12 bg-[#0c1112]/95 shadow-[0_18px_48px_rgba(0,0,0,0.34)]">
+      <div className="codex-wait-glow h-px w-full" aria-hidden />
+      <div className="px-4 py-3">
+        <div className="flex items-center justify-between gap-3">
+          <div className="flex min-w-0 items-center gap-2.5">
+            <span className="codex-orb" aria-hidden />
+            <div className="min-w-0">
+              <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-emerald-200/80">Codex</div>
+              <div className="mt-1 text-[12px] text-white/58">Working inside your Clawdia workspace</div>
+            </div>
+          </div>
+          <div className="rounded-full border border-white/[0.08] bg-white/[0.03] px-2.5 py-1 font-mono text-[10px] uppercase tracking-[0.18em] text-emerald-100/65">
+            live
+          </div>
+        </div>
+
+        <div className="mt-3 flex items-center gap-2">
+          {stages.map((stage, idx) => {
+            const isActive = idx === activeStage;
+            const isComplete = idx < activeStage;
+            return (
+              <div
+                key={stage}
+                className={`rounded-full border px-2.5 py-1 font-mono text-[10px] uppercase tracking-[0.18em] transition-colors ${
+                  isActive
+                    ? 'border-emerald-300/30 bg-emerald-300/12 text-emerald-100'
+                    : isComplete
+                      ? 'border-white/[0.08] bg-white/[0.05] text-white/72'
+                      : 'border-white/[0.06] bg-transparent text-white/38'
+                }`}
+              >
+                {stage}
+              </div>
+            );
+          })}
+        </div>
+
+        <div className="mt-3 flex items-start gap-3">
+          <div className="codex-scan-bars mt-0.5" aria-hidden>
+            <span />
+            <span />
+            <span />
+          </div>
+          <div className="min-w-0">
+            <div className="font-mono text-[13px] leading-6 text-emerald-50/92">{text}</div>
+            <div className="mt-1 text-[12px] text-white/42">Terminal-native execution, chat-native presentation.</div>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+const AssistantMessage = React.memo(function AssistantMessage({ message, shimmerText, streamMode }: { message: Message; shimmerText?: string; streamMode?: 'chat' | 'claude_terminal' | 'codex_terminal' }) {
   // Live path: active streaming message (feed may be empty while shimmer is showing)
   if (message.isStreaming || (message.feed && message.feed.length > 0)) {
     const textItems: Array<{ text: string; isStreaming?: boolean; idx: number }> = [];
@@ -347,7 +412,9 @@ const AssistantMessage = React.memo(function AssistantMessage({ message, shimmer
         <div className="max-w-[92%] px-1 py-2 text-text-primary flex flex-col gap-3">
           {/* Shimmer — shown while streaming whenever shimmerText is set */}
           {message.isStreaming && shimmerText && (
-            <InlineShimmer text={shimmerText} />
+            streamMode === 'codex_terminal'
+              ? <CodexWaitingCard text={shimmerText} />
+              : <InlineShimmer text={shimmerText} />
           )}
           {textItems.map(g => (
             <MarkdownRenderer key={g.idx} content={g.text} isStreaming={g.isStreaming === true} />
@@ -497,6 +564,7 @@ export default function ChatPanel({
   const [loadedConversationId, setLoadedConversationId] = useState<string | null>(null);
   const [promptDebug, setPromptDebug] = useState<PromptDebugSnapshot | null>(null);
   const [promptDebugOpen, setPromptDebugOpen] = useState(true);
+  const [activeStreamMode, setActiveStreamMode] = useState<'chat' | 'claude_terminal' | 'codex_terminal'>('chat');
   const scrollRef = useRef<HTMLDivElement>(null);
   // Flat append-only feed — each item appended once, never moved
   const feedRef = useRef<FeedItem[]>([]);
@@ -704,6 +772,7 @@ export default function ChatPanel({
     thinkingBatchRef.current = [];
     clearThinkingAdvanceTimer();
     assistantMsgIdRef.current = null;
+    setActiveStreamMode('chat');
   }, [clearThinkingAdvanceTimer, flushStreamUpdate]);
 
   useEffect(() => {
@@ -759,7 +828,7 @@ export default function ChatPanel({
         if (scrollRef.current) scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
       });
     }).catch(() => {});
-  }, [loadConversationId, replayBuffer]);
+  }, [loadConversationId, replayBuffer, activeTabId, onConversationTitleResolved]);
 
   useEffect(() => () => clearThinkingAdvanceTimer(), [clearThinkingAdvanceTimer]);
 
@@ -959,6 +1028,7 @@ export default function ChatPanel({
     setStreamMap({});
     setWorkflowPlanDraft('');
     setIsWorkflowPlanStreaming(false);
+    setActiveStreamMode(conversationMode);
 
     setTimeout(() => {
       setMessages(prev => [...prev, {
@@ -1006,6 +1076,7 @@ export default function ChatPanel({
       setIsWorkflowPlanStreaming(false);
       if (conversationMode !== 'chat') setClaudeStatus('idle');
       assistantMsgIdRef.current = null;
+      setActiveStreamMode('chat');
       isUserScrolledUpRef.current = false;
       requestAnimationFrame(() => scrollToBottom('smooth'));
     } catch (err: any) {
@@ -1018,6 +1089,7 @@ export default function ChatPanel({
       setIsWorkflowPlanStreaming(false);
       if (conversationMode !== 'chat') setClaudeStatus('errored');
       assistantMsgIdRef.current = null;
+      setActiveStreamMode('chat');
     }
   }, [conversationMode, scrollToBottom]);
 
@@ -1188,10 +1260,10 @@ export default function ChatPanel({
           <div className="flex flex-col gap-4 px-4 pt-5 pb-8 max-w-[720px]">
             {messages.map(msg =>
               msg.type === 'pipeline'
-                ? <PipelineBlock key={msg.id} />
-                : msg.role === 'assistant'
-                ? <AssistantMessage key={msg.id} message={msg} shimmerText={msg.isStreaming ? shimmerText : undefined} />
-                : <UserMessage key={msg.id} message={msg} />
+              ? <PipelineBlock key={msg.id} />
+              : msg.role === 'assistant'
+              ? <AssistantMessage key={msg.id} message={msg} shimmerText={msg.isStreaming ? shimmerText : undefined} streamMode={msg.isStreaming ? activeStreamMode : 'chat'} />
+              : <UserMessage key={msg.id} message={msg} />
             )}
             {pendingApprovalRunId && nonWorkflowApproval && (
               <div className="flex justify-start animate-slide-up">

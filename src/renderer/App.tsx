@@ -114,7 +114,7 @@ export default function App() {
     const api = (window as any).clawdia;
     if (api) await api.chat.new();
     setTabs(current =>
-      current.map(t => t.id === activeTabId ? { ...t, conversationId: null } : t)
+      current.map(t => t.id === activeTabId ? { ...t, conversationId: null, title: undefined } : t)
     );
     setLoadConversationId(null);
     setReplayBuffer(null);
