@@ -574,21 +574,14 @@ interface TerminalPanelProps {
 export default function TerminalPanel({ visible, conversationId }: TerminalPanelProps) {
   const api = window.clawdia;
 
-  const [tabs, setTabs] = useState<TerminalTab[]>(() => [makeTab(1)]);
-  const [activeTabId, setActiveTabId] = useState<string>(() => {
-    const first = makeTab(1);
-    return first.id; // will be overwritten below — tabs initializer runs first
-  });
+  const initialTab = React.useMemo(() => makeTab(1), []);
+  const [tabs, setTabs] = React.useState<TerminalTab[]>([initialTab]);
+  const [activeTabId, setActiveTabId] = React.useState<string>(initialTab.id);
+  const tabCounterRef = React.useRef(2); // next tab will be "Terminal 2"
   const [splitSessionId, setSplitSessionId] = useState<string | null>(null);
   const [splitRatio, setSplitRatio] = useState(0.5);
   const [splitIsObserving, setSplitIsObserving] = useState(false);
   const [isAvailable, setIsAvailable] = React.useState<boolean | null>(null);
-
-  // Sync activeTabId to first tab on mount
-  React.useEffect(() => {
-    setActiveTabId(tabs[0].id);
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
 
   React.useEffect(() => {
     let cancelled = false;
@@ -618,6 +611,8 @@ export default function TerminalPanel({ visible, conversationId }: TerminalPanel
 
   const activeTab = tabs.find((t) => t.id === activeTabId) ?? tabs[0];
 
+  if (isAvailable === null) return null;
+
   if (isAvailable === false) {
     return (
       <div className={`flex flex-1 items-center justify-center bg-[#0d0d10] text-text-secondary ${visible ? '' : 'hidden'}`}>
@@ -632,7 +627,7 @@ export default function TerminalPanel({ visible, conversationId }: TerminalPanel
   }
 
   const handleAddTab = () => {
-    const tab = makeTab(tabs.length + 1);
+    const tab = makeTab(tabCounterRef.current++);
     setTabs((prev) => [...prev, tab]);
     setActiveTabId(tab.id);
   };
