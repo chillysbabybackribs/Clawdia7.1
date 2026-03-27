@@ -15,6 +15,11 @@ interface InputBarProps {
   claudeStatus?: 'idle' | 'starting' | 'ready' | 'working' | 'errored' | 'stopped';
   onToggleClaudeMode?: () => void;
   claudeModeDisabled?: boolean;
+  codexMode?: boolean;
+  codexStatus?: 'idle' | 'starting' | 'ready' | 'working' | 'errored' | 'stopped';
+  onToggleCodexMode?: () => void;
+  codexModeDisabled?: boolean;
+  disabled?: boolean;
 }
 
 export default function InputBar({
@@ -30,6 +35,11 @@ export default function InputBar({
   claudeStatus = 'idle',
   onToggleClaudeMode,
   claudeModeDisabled = false,
+  codexMode = false,
+  codexStatus = 'idle',
+  onToggleCodexMode,
+  codexModeDisabled = false,
+  disabled = false,
 }: InputBarProps) {
   const [text, setText] = useState('');
   const [attachments, setAttachments] = useState<MessageAttachment[]>([]);
@@ -192,7 +202,7 @@ export default function InputBar({
 
   return (
     <div
-      className="px-5 pb-5 pt-4"
+      className={`px-5 pb-5 pt-4${disabled ? ' opacity-50 pointer-events-none' : ''}`}
       style={{
         background: '#0d0d12',
         borderTop: '2px solid rgba(255,255,255,0.07)',
@@ -271,6 +281,28 @@ export default function InputBar({
               </span>
             )}
           </button>
+
+          <div style={{ width: '1px', height: '10px', background: 'rgba(255,255,255,0.08)', flexShrink: 0 }} />
+
+          <button
+            onClick={onToggleCodexMode}
+            disabled={codexModeDisabled}
+            className={`flex items-center gap-1 text-[14px] transition-colors ${
+              codexMode
+                ? 'text-emerald-300 cursor-pointer'
+                : codexModeDisabled
+                  ? 'text-text-tertiary/35 cursor-default'
+                  : 'text-text-tertiary hover:text-text-secondary cursor-pointer'
+            }`}
+            title={codexModeDisabled ? 'Create or open a conversation first' : 'Toggle Codex mode for this conversation'}
+          >
+            <span>Codex</span>
+            {codexMode && (
+              <span className="rounded bg-black/20 px-1.5 py-0.5 text-[10px] uppercase tracking-wide">
+                {codexStatus}
+              </span>
+            )}
+          </button>
         </div>
       )}
 
@@ -278,9 +310,10 @@ export default function InputBar({
         className={`
           relative flex flex-col rounded-xl transition-all duration-200
           bg-[#18181c] border
+          border-[1.5px] transition-colors duration-200
           ${focused
-            ? 'border-[1.5px] border-white/[0.22] shadow-[inset_0_1px_6px_rgba(0,0,0,0.3),0_-2px_10px_rgba(0,0,0,0.35),0_0_0_1px_rgba(255,255,255,0.04)]'
-            : 'border-[1.5px] border-white/[0.12] hover:border-white/[0.16] shadow-[inset_0_1px_4px_rgba(0,0,0,0.2),0_-2px_8px_rgba(0,0,0,0.25)]'
+            ? 'border-[#a0a0ad] shadow-[inset_0_1px_4px_rgba(0,0,0,0.2),0_-2px_8px_rgba(0,0,0,0.25),0_0_0_1px_rgba(160,160,173,0.15)]'
+            : 'border-[#7a7a85] shadow-[inset_0_1px_4px_rgba(0,0,0,0.2),0_-2px_8px_rgba(0,0,0,0.25)]'
           }
         `}
       >
@@ -339,6 +372,7 @@ export default function InputBar({
             onBlur={() => setFocused(false)}
             placeholder={isStreaming ? 'Add a follow-up...' : 'Ask me anything...'}
             rows={1}
+            disabled={disabled || isStreaming}
             className="flex-1 bg-transparent text-text-primary text-[21px] placeholder:text-text-tertiary px-3 py-3 resize-none outline-none max-h-[200px] leading-[1.6]"
           />
 
@@ -410,4 +444,3 @@ export default function InputBar({
     </div>
   );
 }
-

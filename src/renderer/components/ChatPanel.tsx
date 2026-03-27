@@ -9,6 +9,7 @@ import type {
   MessageAttachment,
   MessageFileRef,
   MessageLinkPreview,
+  PromptDebugSnapshot,
 } from '../../shared/types';
 import InputBar from './InputBar';
 import { type ToolStreamMap } from './ToolActivity';
@@ -16,6 +17,7 @@ import MarkdownRenderer from './MarkdownRenderer';
 import SwarmPanel from './SwarmPanel';
 import TabStrip from './TabStrip';
 import PipelineBlock from './PipelineBlock';
+import HistoryBrowser from './HistoryBrowser';
 
 type StreamEndPayload = {
   ok?: boolean;
@@ -41,6 +43,8 @@ interface ChatPanelProps {
   onNewTab: () => void;
   onCloseTab: (tabId: string) => void;
   onSwitchTab: (tabId: string) => void;
+  onOpenConversation: (id: string) => void;
+  onConversationTitleResolved: (tabId: string, title: string) => void;
 }
 
 function ApprovalBanner({
@@ -341,8 +345,8 @@ const AssistantMessage = React.memo(function AssistantMessage({ message, shimmer
     return (
       <div className="flex justify-start animate-slide-up group">
         <div className="max-w-[92%] px-1 py-2 text-text-primary flex flex-col gap-3">
-          {/* Shimmer — shown only while streaming and no text has arrived yet */}
-          {message.isStreaming && shimmerText && !hasText && (
+          {/* Shimmer — shown while streaming whenever shimmerText is set */}
+          {message.isStreaming && shimmerText && (
             <InlineShimmer text={shimmerText} />
           )}
           {textItems.map(g => (
@@ -450,7 +454,7 @@ function InlineShimmer({ text }: { text: string }) {
           className="mt-1.5 h-2 w-2 shrink-0 rounded-full bg-accent/85 shadow-[0_0_12px_rgba(99,102,241,0.45)] animate-pulse"
           aria-hidden
         />
-        <span className="inline-shimmer leading-relaxed">{text}</span>
+        <span className="inline-shimmer leading-relaxed line-clamp-1 overflow-hidden text-ellipsis">{text}</span>
       </div>
     </div>
   );
@@ -472,10 +476,11 @@ export default function ChatPanel({
   onNewTab,
   onCloseTab,
   onSwitchTab,
+  onOpenConversation,
+  onConversationTitleResolved,
 }: ChatPanelProps) {
   const MIN_THINKING_VISIBLE_MS = 2400;
-  const THINKING_PAIR_WINDOW_MS = 1400;
-  const MAX_THINKING_BATCH_LINES = 2;
+  const [historyMode, setHistoryMode] = useState(false);
   const [messages, setMessages] = useState<Message[]>([]);
   const [isStreaming, setIsStreaming] = useState(false);
   const [isPaused, setIsPaused] = useState(false);
@@ -485,11 +490,13 @@ export default function ChatPanel({
   const [pendingApprovals, setPendingApprovals] = useState<RunApproval[]>([]);
   const [pendingHumanRunId, setPendingHumanRunId] = useState<string | null>(null);
   const [pendingHumanInterventions, setPendingHumanInterventions] = useState<RunHumanIntervention[]>([]);
-  const [conversationMode, setConversationMode] = useState<'chat' | 'claude_terminal'>('chat');
+  const [conversationMode, setConversationMode] = useState<'chat' | 'claude_terminal' | 'codex_terminal'>('chat');
   const [claudeStatus, setClaudeStatus] = useState<'idle' | 'starting' | 'ready' | 'working' | 'errored' | 'stopped'>('idle');
   const [workflowPlanDraft, setWorkflowPlanDraft] = useState('');
   const [isWorkflowPlanStreaming, setIsWorkflowPlanStreaming] = useState(false);
   const [loadedConversationId, setLoadedConversationId] = useState<string | null>(null);
+  const [promptDebug, setPromptDebug] = useState<PromptDebugSnapshot | null>(null);
+  const [promptDebugOpen, setPromptDebugOpen] = useState(true);
   const scrollRef = useRef<HTMLDivElement>(null);
   // Flat append-only feed — each item appended once, never moved
   const feedRef = useRef<FeedItem[]>([]);
@@ -501,7 +508,6 @@ export default function ChatPanel({
   const thinkingQueueRef = useRef<Array<{ text: string; at: number }>>([]);
   const thinkingBatchRef = useRef<Array<{ text: string; at: number }>>([]);
   const thinkingVisibleUntilRef = useRef(0);
-  const thinkingAppendWindowUntilRef = useRef(0);
   const thinkingAdvanceTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const scrollToBottom = useCallback((behavior: 'auto' | 'smooth' = 'auto') => {
@@ -524,31 +530,6 @@ export default function ChatPanel({
       thinkingAdvanceTimeoutRef.current = null;
     }
   }, []);
-
-  const scheduleThinkingAdvance = useCallback(() => {
-    clearThinkingAdvanceTimer();
-    if (thinkingQueueRef.current.length === 0) return;
-    const delay = Math.max(0, thinkingVisibleUntilRef.current - Date.now());
-    thinkingAdvanceTimeoutRef.current = setTimeout(() => {
-      const nextBatch: Array<{ text: string; at: number }> = [];
-      const first = thinkingQueueRef.current.shift();
-      if (!first) return;
-      nextBatch.push(first);
-      while (
-        thinkingQueueRef.current.length > 0
-        && nextBatch.length < MAX_THINKING_BATCH_LINES
-        && thinkingQueueRef.current[0].at - nextBatch[0].at <= THINKING_PAIR_WINDOW_MS
-      ) {
-        nextBatch.push(thinkingQueueRef.current.shift()!);
-      }
-      thinkingBatchRef.current = nextBatch;
-      thinkingVisibleUntilRef.current = Date.now() + MIN_THINKING_VISIBLE_MS;
-      thinkingAppendWindowUntilRef.current = Date.now() + THINKING_PAIR_WINDOW_MS;
-      setShimmerText(nextBatch.map((item) => item.text).join('\n'));
-      autoScroll();
-      if (thinkingQueueRef.current.length > 0) scheduleThinkingAdvance();
-    }, delay);
-  }, [autoScroll, clearThinkingAdvanceTimer]);
 
   const flushStreamUpdate = useCallback(() => {
     if (!assistantMsgIdRef.current) return;
@@ -592,6 +573,8 @@ export default function ChatPanel({
 
   const handleStreamTextChunk = useCallback((chunk: string) => {
     ensureAssistantReplayMessage();
+    // Clear shimmer when real text arrives so they don't overlap
+    setShimmerText('');
     if (chunk.includes('__RESET__')) {
       while (feedRef.current.length > 0 && feedRef.current[feedRef.current.length - 1].kind === 'text') {
         feedRef.current.pop();
@@ -618,39 +601,27 @@ export default function ChatPanel({
       || thought.startsWith('[Reasoning ')
       || thought.startsWith('Paused');
     if (isGeneric) return;
-    const next = { text: thought.trim(), at: Date.now() };
-    if (!next.text) return;
 
-    const canAppendToCurrent =
-      thinkingBatchRef.current.length > 0
-      && Date.now() <= thinkingAppendWindowUntilRef.current
-      && thinkingBatchRef.current.length < MAX_THINKING_BATCH_LINES;
+    // Sanitize: single line only, strip markdown artifacts, cap length
+    let clean = thought.trim().split(/[\n\r]/)[0].replace(/^[-*>#]+\s*/, '').trim();
+    if (clean.length > 80) clean = clean.slice(0, 77) + '…';
+    if (!clean) return;
 
-    if (canAppendToCurrent) {
-      const lastText = thinkingBatchRef.current[thinkingBatchRef.current.length - 1]?.text;
-      if (lastText !== next.text) {
-        thinkingBatchRef.current = [...thinkingBatchRef.current, next];
-        thinkingVisibleUntilRef.current = Math.max(thinkingVisibleUntilRef.current, Date.now() + 1800);
-        thinkingAppendWindowUntilRef.current = Date.now() + THINKING_PAIR_WINDOW_MS;
-        setShimmerText(thinkingBatchRef.current.map((item) => item.text).join('\n'));
-      }
-      autoScroll();
-      return;
-    }
+    const next = { text: clean, at: Date.now() };
 
-    if (thinkingBatchRef.current.length === 0 && !shimmerText) {
-      thinkingBatchRef.current = [next];
-      thinkingVisibleUntilRef.current = Date.now() + MIN_THINKING_VISIBLE_MS;
-      thinkingAppendWindowUntilRef.current = Date.now() + THINKING_PAIR_WINDOW_MS;
-      setShimmerText(next.text);
-      autoScroll();
-      return;
-    }
+    // Dedupe identical consecutive thoughts
+    const lastText = thinkingBatchRef.current[thinkingBatchRef.current.length - 1]?.text;
+    if (lastText === next.text) return;
 
-    thinkingQueueRef.current.push(next);
-    scheduleThinkingAdvance();
+    // Replace previous thought — keeps shimmer to a single clean line,
+    // preventing paragraph buildup from batched thinking deltas.
+    thinkingBatchRef.current = [next];
+    thinkingVisibleUntilRef.current = Date.now() + MIN_THINKING_VISIBLE_MS;
+    thinkingQueueRef.current = []; // latest thought wins
+    clearThinkingAdvanceTimer();
+    setShimmerText(next.text);
     autoScroll();
-  }, [autoScroll, scheduleThinkingAdvance, shimmerText]);
+  }, [autoScroll, clearThinkingAdvanceTimer]);
 
   const handleWorkflowPlanTextEvent = useCallback((chunk: string) => {
     setWorkflowPlanDraft(prev => prev + chunk);
@@ -779,6 +750,9 @@ export default function ChatPanel({
       clearThinkingAdvanceTimer();
       setMessages(result.messages || []);
       setLoadedConversationId(loadConversationId);
+      if (result.title && activeTabId) {
+        onConversationTitleResolved(activeTabId, result.title);
+      }
       setConversationMode(result.mode || 'chat');
       setClaudeStatus(result.claudeTerminalStatus || 'idle');
       requestAnimationFrame(() => {
@@ -886,6 +860,11 @@ export default function ChatPanel({
     cleanups.push(api.chat.onStreamText(handleStreamTextChunk));
 
     cleanups.push(api.chat.onThinking(handleThinkingEvent));
+    if (api.chat.onPromptDebug) {
+      cleanups.push(api.chat.onPromptDebug((payload: PromptDebugSnapshot) => {
+        setPromptDebug(payload);
+      }));
+    }
     if (api.chat.onWorkflowPlanText) {
       cleanups.push(api.chat.onWorkflowPlanText(handleWorkflowPlanTextEvent));
     }
@@ -940,11 +919,32 @@ export default function ChatPanel({
     setClaudeStatus(result.claudeTerminalStatus || (nextMode === 'claude_terminal' ? 'idle' : 'stopped'));
   }, [conversationMode, loadConversationId, loadedConversationId, onToggleTerminal, terminalOpen]);
 
+  const handleToggleCodexMode = useCallback(async () => {
+    const api = (window as any).clawdia;
+    if (!api) return;
+    let conversationId = loadedConversationId || loadConversationId;
+    if (!conversationId) {
+      const created = await api.chat.new();
+      if (!created?.id) return;
+      conversationId = created.id;
+      setLoadedConversationId(created.id);
+      setMessages([]);
+      setConversationMode('chat');
+      setClaudeStatus('idle');
+    }
+    const nextMode = conversationMode === 'codex_terminal' ? 'chat' : 'codex_terminal';
+    const result = await api.chat.setMode(conversationId, nextMode);
+    if (result?.error) return;
+    setConversationMode(nextMode);
+    setClaudeStatus(result.claudeTerminalStatus || (nextMode === 'codex_terminal' ? 'idle' : 'stopped'));
+  }, [conversationMode, loadConversationId, loadedConversationId]);
+
   const handleSend = useCallback(async (text: string, attachments: MessageAttachment[] = []) => {
     const api = (window as any).clawdia;
     if (!api) return;
 
     isUserScrolledUpRef.current = false;
+    setPromptDebug(null);
 
     const userMsg: Message = {
       id: `user-${Date.now()}`, role: 'user', content: text, attachments,
@@ -970,6 +970,7 @@ export default function ChatPanel({
     }, 100);
 
     try {
+      if (conversationMode !== 'chat') setClaudeStatus('working');
       const result = await api.chat.send(text, attachments);
 
       const finalFeed = [...feedRef.current].map(item =>
@@ -1003,6 +1004,7 @@ export default function ChatPanel({
       setShimmerText('');
       setWorkflowPlanDraft('');
       setIsWorkflowPlanStreaming(false);
+      if (conversationMode !== 'chat') setClaudeStatus('idle');
       assistantMsgIdRef.current = null;
       isUserScrolledUpRef.current = false;
       requestAnimationFrame(() => scrollToBottom('smooth'));
@@ -1014,9 +1016,10 @@ export default function ChatPanel({
       setShimmerText('');
       setWorkflowPlanDraft('');
       setIsWorkflowPlanStreaming(false);
+      if (conversationMode !== 'chat') setClaudeStatus('errored');
       assistantMsgIdRef.current = null;
     }
-  }, [scrollToBottom]);
+  }, [conversationMode, scrollToBottom]);
 
   const handleStop = useCallback(() => {
     (window as any).clawdia?.chat.stop();
@@ -1136,6 +1139,20 @@ export default function ChatPanel({
         }}
       >
         <button
+          onClick={() => setHistoryMode(m => !m)}
+          title={historyMode ? 'Close history' : 'Chat history'}
+          className={`no-drag flex items-center justify-center w-8 h-8 rounded-lg transition-all cursor-pointer ${
+            historyMode
+              ? 'bg-white/[0.08] text-text-primary'
+              : 'text-text-secondary hover:text-text-primary hover:bg-white/[0.06]'
+          }`}
+        >
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+            <circle cx="12" cy="12" r="10" />
+            <polyline points="12 6 12 12 16 14" />
+          </svg>
+        </button>
+        <button
           onClick={onToggleTerminal}
           title={terminalOpen ? 'Close terminal' : 'Open terminal'}
           className={`no-drag flex items-center justify-center w-8 h-8 rounded-lg transition-all cursor-pointer ${
@@ -1158,32 +1175,93 @@ export default function ChatPanel({
         </button>
       </div>
 
-      <div ref={scrollRef} onScroll={handleScroll} className="flex-1 overflow-y-auto overflow-x-hidden scroll-smooth">
-        <div className="flex flex-col gap-4 px-4 pt-5 pb-8 max-w-[720px]">
-          {messages.map(msg =>
-            msg.type === 'pipeline'
-              ? <PipelineBlock key={msg.id} />
-              : msg.role === 'assistant'
-              ? <AssistantMessage key={msg.id} message={msg} shimmerText={msg.isStreaming ? shimmerText : undefined} />
-              : <UserMessage key={msg.id} message={msg} />
-          )}
-          {pendingApprovalRunId && nonWorkflowApproval && (
-            <div className="flex justify-start animate-slide-up">
-              <div className="max-w-[92%] px-1 py-1 text-text-primary">
-                <ApprovalBanner
-                  approval={nonWorkflowApproval}
-                  onApprove={() => handleApprovalDecision('approve')}
-                  onDeny={() => handleApprovalDecision('deny')}
-                  onOpenReview={() => onOpenPendingApproval?.(pendingApprovalRunId)}
-                />
-              </div>
-            </div>
-          )}
-          <div className="h-2" />
+      {historyMode ? (
+        <div className="flex-1 overflow-hidden">
+          <HistoryBrowser
+            currentTabs={tabs}
+            onSelectConversation={onOpenConversation}
+            onClose={() => setHistoryMode(false)}
+          />
         </div>
-      </div>
+      ) : (
+        <div ref={scrollRef} onScroll={handleScroll} className="flex-1 overflow-y-auto overflow-x-hidden scroll-smooth">
+          <div className="flex flex-col gap-4 px-4 pt-5 pb-8 max-w-[720px]">
+            {messages.map(msg =>
+              msg.type === 'pipeline'
+                ? <PipelineBlock key={msg.id} />
+                : msg.role === 'assistant'
+                ? <AssistantMessage key={msg.id} message={msg} shimmerText={msg.isStreaming ? shimmerText : undefined} />
+                : <UserMessage key={msg.id} message={msg} />
+            )}
+            {pendingApprovalRunId && nonWorkflowApproval && (
+              <div className="flex justify-start animate-slide-up">
+                <div className="max-w-[92%] px-1 py-1 text-text-primary">
+                  <ApprovalBanner
+                    approval={nonWorkflowApproval}
+                    onApprove={() => handleApprovalDecision('approve')}
+                    onDeny={() => handleApprovalDecision('deny')}
+                    onOpenReview={() => onOpenPendingApproval?.(pendingApprovalRunId)}
+                  />
+                </div>
+              </div>
+            )}
+            <div className="h-2" />
+          </div>
+        </div>
+      )}
 
       <SwarmPanel />
+
+      {promptDebug && (
+        <div className="pointer-events-none fixed bottom-24 right-4 z-[60] w-[520px] max-w-[calc(100vw-2rem)]">
+          <div className="pointer-events-auto rounded-2xl border border-white/[0.12] bg-[#0b0c10]/95 shadow-[0_18px_48px_rgba(0,0,0,0.38)] backdrop-blur-md">
+            <div className="flex items-center justify-between gap-3 border-b border-white/[0.08] px-4 py-3">
+              <div className="min-w-0">
+                <div className="text-[12px] font-medium uppercase tracking-[0.12em] text-text-tertiary">Prompt Injection Debug</div>
+                <div className="mt-1 text-[12px] text-text-secondary">
+                  {promptDebug.provider} · {promptDebug.model} · iteration {promptDebug.iteration}
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setPromptDebugOpen((open) => !open)}
+                className="rounded-md px-2 py-1 text-[11px] text-text-secondary transition-colors hover:bg-white/[0.06] hover:text-text-primary"
+              >
+                {promptDebugOpen ? 'Hide' : 'Show'}
+              </button>
+            </div>
+            {promptDebugOpen && (
+              <div className="max-h-[60vh] overflow-auto p-4">
+                <div className="mb-4">
+                  <div className="mb-2 text-[11px] uppercase tracking-[0.1em] text-text-tertiary">Tools</div>
+                  <div className="text-[12px] leading-6 text-text-secondary">
+                    {promptDebug.toolNames.join(', ') || 'none'}
+                  </div>
+                </div>
+                <div className="mb-4">
+                  <div className="mb-2 text-[11px] uppercase tracking-[0.1em] text-text-tertiary">System Prompt</div>
+                  <pre className="whitespace-pre-wrap break-words rounded-xl border border-white/[0.06] bg-black/30 p-3 font-mono text-[11px] leading-5 text-text-primary">
+                    {promptDebug.systemPrompt}
+                  </pre>
+                </div>
+                <div>
+                  <div className="mb-2 text-[11px] uppercase tracking-[0.1em] text-text-tertiary">Messages</div>
+                  <div className="flex flex-col gap-3">
+                    {promptDebug.messages.map((message, index) => (
+                      <div key={`${message.role}-${index}`} className="rounded-xl border border-white/[0.06] bg-black/20 p-3">
+                        <div className="mb-2 text-[11px] uppercase tracking-[0.1em] text-text-tertiary">{message.role}</div>
+                        <pre className="whitespace-pre-wrap break-words font-mono text-[11px] leading-5 text-text-primary">
+                          {message.content}
+                        </pre>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
 
       <InputBar
         onSend={handleSend}
@@ -1197,6 +1275,11 @@ export default function ChatPanel({
         claudeStatus={claudeStatus}
         onToggleClaudeMode={handleToggleClaudeMode}
         claudeModeDisabled={false}
+        codexMode={conversationMode === 'codex_terminal'}
+        codexStatus={claudeStatus}
+        onToggleCodexMode={handleToggleCodexMode}
+        codexModeDisabled={false}
+        disabled={historyMode}
       />
 
     </div>
