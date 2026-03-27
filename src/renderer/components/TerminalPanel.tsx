@@ -611,6 +611,13 @@ export default function TerminalPanel({ visible, conversationId }: TerminalPanel
 
   const activeTab = tabs.find((t) => t.id === activeTabId) ?? tabs[0];
 
+  // Keep observe mode pointing at the current active tab when switching tabs
+  React.useEffect(() => {
+    if (splitIsObserving && activeTab) {
+      setSplitSessionId(activeTab.sessionId);
+    }
+  }, [activeTab, splitIsObserving]);
+
   if (isAvailable === null) return null;
 
   if (isAvailable === false) {
