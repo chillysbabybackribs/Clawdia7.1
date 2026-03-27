@@ -22,16 +22,13 @@ export default function TabStrip({ tabs, activeTabId, onSwitch, onClose, onNew }
             key={tab.id}
             onClick={() => { if (!isActive) onSwitch(tab.id); }}
             className={[
-              'relative flex items-center gap-[7px] px-[18px] h-full cursor-pointer select-none text-[15px] font-medium transition-colors',
+              'relative flex items-center gap-[7px] px-[14px] my-[8px] h-[30px] rounded-lg cursor-pointer select-none text-[13px] font-medium transition-all border-[1.5px]',
               isActive
-                ? 'text-text-primary border-b-[2.5px] border-[#4a9eff]'
-                : 'text-white/30 hover:text-white/60 border-b-[2.5px] border-transparent group',
+                ? 'text-text-primary border-white/[0.12] bg-white/[0.04] shadow-[inset_0_1px_4px_rgba(0,0,0,0.2)]'
+                : 'text-white/40 border-white/[0.05] hover:border-white/[0.09] hover:text-white/60 group',
             ].join(' ')}
           >
-            {isActive && (
-              <span className="w-2 h-2 rounded-full bg-[#4a9eff] flex-shrink-0" />
-            )}
-            <span>Chat {index + 1}</span>
+            <span>{tab.title ?? 'New Chat'}</span>
             {!isOnly && (
               <span
                 onClick={(e) => { e.stopPropagation(); onClose(tab.id); }}
