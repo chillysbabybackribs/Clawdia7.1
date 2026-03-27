@@ -609,7 +609,7 @@ export default function TerminalPanel({ visible, conversationId }: TerminalPanel
       tabsRef.current.forEach((tab) => {
         void api?.terminal?.kill(tab.sessionId);
       });
-      if (splitSessionIdRef.current) {
+      if (splitSessionIdRef.current && !tabsRef.current.some(t => t.sessionId === splitSessionIdRef.current)) {
         void api?.terminal?.kill(splitSessionIdRef.current);
       }
     };
