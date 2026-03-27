@@ -5,8 +5,10 @@ import { IPC, IPC_EVENTS } from './ipc-channels';
 import { DEFAULT_MODEL_BY_PROVIDER } from '../shared/model-registry';
 import type { Message } from '../shared/types';
 import type { MessageAttachment } from '../shared/types';
+import type { PromptDebugSnapshot } from '../shared/types';
 import { agentLoop } from './agent/agentLoop';
 import { PipelineOrchestrator } from './core/PipelineOrchestrator';
+import { isAppMappingRequest, isContinuationRequest, extractAppMappingTarget } from './agent/classify';
 import { cancelLoop, pauseLoop, resumeLoop, addContext } from './agent/loopControl';
 import { loadSettings, patchSettings, type AppSettings } from './settingsStore';
 import {
@@ -44,13 +46,14 @@ let chatAbort: AbortController | null = null;
 let activeRunId: string | null = null;
 
 const MAX_SESSION_TURNS = 20; // max user+assistant turn PAIRS to keep
+const MAX_MAPPING_SESSION_TURNS = 6;
 
 /**
  * Prune a session to the last MAX_SESSION_TURNS pairs.
  * Always cuts at a user-role boundary to avoid orphaned tool_result blocks.
  */
-function pruneSession(messages: any[]): any[] {
-  const maxMessages = MAX_SESSION_TURNS * 2;
+function pruneSession(messages: any[], maxTurns = MAX_SESSION_TURNS): any[] {
+  const maxMessages = maxTurns * 2;
   if (messages.length <= maxMessages) return messages;
   let start = messages.length - maxMessages;
   // Walk forward until we land on a user message
@@ -65,12 +68,143 @@ function getOrCreateSession(id: string): any[] {
   return sessions.get(id)!;
 }
 
+function findPendingAnthropicToolUseIds(messages: any[]): string[] {
+  const pending = new Set<string>();
+
+  for (const message of messages) {
+    if (message?.role === 'assistant' && Array.isArray(message.content)) {
+      for (const block of message.content) {
+        if (block?.type === 'tool_use' && typeof block.id === 'string') {
+          pending.add(block.id);
+        }
+      }
+    }
+
+    if (message?.role === 'user' && Array.isArray(message.content)) {
+      for (const block of message.content) {
+        if (block?.type === 'tool_result' && typeof block.tool_use_id === 'string') {
+          pending.delete(block.tool_use_id);
+        }
+      }
+    }
+  }
+
+  return [...pending];
+}
+
+function closePendingAnthropicToolUses(
+  messages: any[],
+  reason: 'user_interrupted' | 'session_recovery' = 'user_interrupted',
+): boolean {
+  const pendingIds = findPendingAnthropicToolUseIds(messages);
+  if (pendingIds.length === 0) return false;
+
+  messages.push({
+    role: 'user',
+    content: pendingIds.map((toolUseId) => ({
+      type: 'tool_result',
+      tool_use_id: toolUseId,
+      content: JSON.stringify({
+        status: 'interrupted',
+        reason,
+        message: 'Tool run was interrupted before completion.',
+      }),
+    })),
+  });
+  return true;
+}
+
+function sanitizeAnthropicSession(messages: any[]): any[] {
+  const sanitized: any[] = [];
+  const openToolUses = new Set<string>();
+
+  for (const message of messages) {
+    if (message?.role === 'assistant' && Array.isArray(message.content)) {
+      const content = [];
+      for (const block of message.content) {
+        if (block?.type === 'tool_use' && typeof block.id === 'string') {
+          openToolUses.add(block.id);
+          content.push(block);
+          continue;
+        }
+        content.push(block);
+      }
+      sanitized.push({ ...message, content });
+      continue;
+    }
+
+    if (message?.role === 'user' && Array.isArray(message.content)) {
+      const content = [];
+      for (const block of message.content) {
+        if (block?.type === 'tool_result' && typeof block.tool_use_id === 'string') {
+          if (!openToolUses.has(block.tool_use_id)) continue;
+          openToolUses.delete(block.tool_use_id);
+          content.push(block);
+          continue;
+        }
+        content.push(block);
+      }
+      if (content.length > 0) sanitized.push({ ...message, content });
+      continue;
+    }
+
+    sanitized.push(message);
+  }
+
+  return sanitized;
+}
+
 function ensureConversation(): string {
   if (!activeConversationId) {
     activeConversationId = `conv-${Date.now()}`;
     sessions.set(activeConversationId, []);
   }
   return activeConversationId;
+}
+
+function findLastUserText(messages: any[]): string | null {
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const msg = messages[i];
+    if (msg?.role !== 'user') continue;
+    if (typeof msg.content === 'string') return msg.content;
+    if (Array.isArray(msg.content)) {
+      const text = msg.content
+        .filter((b: any) => b?.type === 'text')
+        .map((b: any) => b.text)
+        .join('\n')
+        .trim();
+      if (text) return text;
+    }
+    if (Array.isArray(msg.parts)) {
+      const text = msg.parts
+        .map((p: any) => p?.text ?? '')
+        .join('\n')
+        .trim();
+      if (text) return text;
+    }
+  }
+  return null;
+}
+
+function buildContinuationForcedProfile(text: string, sessionMessages: any[]) {
+  if (!isContinuationRequest(text)) return undefined;
+
+  for (let i = sessionMessages.length - 1; i >= 0; i--) {
+    const msg = sessionMessages[i];
+    if (msg?.role !== 'user') continue;
+    const priorText = findLastUserText([msg]);
+    if (!priorText || isContinuationRequest(priorText)) continue;
+    if (!isAppMappingRequest(priorText)) continue;
+
+    return {
+      specialMode: 'app_mapping' as const,
+      toolGroup: 'desktop' as const,
+      isContinuation: true,
+      mappingTarget: extractAppMappingTarget(priorText),
+    };
+  }
+
+  return { isContinuation: true };
 }
 
 function userTextFromContent(content: Anthropic.MessageParam['content']): string {
@@ -242,10 +376,12 @@ export function registerIpc(browserService: ElectronBrowserService): void {
       }
     });
 
+    const conv = getConversation(id);
     return {
       messages,
-      mode: 'chat' as const,
+      mode: conv?.mode ?? ('chat' as const),
       claudeTerminalStatus: 'idle' as const,
+      title: conv?.title ?? null,
     };
   });
 
@@ -321,25 +457,31 @@ export function registerIpc(browserService: ElectronBrowserService): void {
     }
     // ── End Claude Code path ──────────────────────────────────────────────────
 
+    const settings_provider = settings.provider as 'anthropic' | 'openai' | 'gemini';
+
     let sessionMessages = getOrCreateSession(id);
-    const pruned = pruneSession(sessionMessages);
+    const maxTurns = isAppMappingRequest(text) ? MAX_MAPPING_SESSION_TURNS : MAX_SESSION_TURNS;
+    const pruned = pruneSession(sessionMessages, maxTurns);
     if (pruned.length < sessionMessages.length) {
       sessions.set(id, pruned);
       sessionMessages = pruned;
+    }
+    if (settings_provider === 'anthropic') {
+      const sanitized = sanitizeAnthropicSession(sessionMessages);
+      if (sanitized.length !== sessionMessages.length) {
+        sessions.set(id, sanitized);
+        sessionMessages = sanitized;
+      }
+      closePendingAnthropicToolUses(sessionMessages, 'session_recovery');
     }
 
     chatAbort?.abort();
     chatAbort = new AbortController();
 
-    const settings_provider = settings.provider as 'anthropic' | 'openai' | 'gemini';
+    const continuationForcedProfile = buildContinuationForcedProfile(text, sessionMessages);
 
     // Check if this goal warrants a multi-agent pipeline
-    const usePipeline = await PipelineOrchestrator.classifyIntent(text, {
-      provider: settings_provider,
-      apiKey,
-      model,
-      signal: chatAbort!.signal,
-    });
+    const usePipeline = !isAppMappingRequest(text) && !(continuationForcedProfile?.specialMode === 'app_mapping') && PipelineOrchestrator.classifyIntent(text);
 
     let result: { response: string; error?: string };
 
@@ -403,13 +545,18 @@ export function registerIpc(browserService: ElectronBrowserService): void {
           model,
           runId,
           signal: chatAbort!.signal,
+          forcedProfile: continuationForcedProfile,
           unrestrictedMode: settings.unrestrictedMode,
           browserService,
+          attachments,
           onText: (delta) => {
             if (!event.sender.isDestroyed()) event.sender.send(IPC_EVENTS.CHAT_STREAM_TEXT, delta);
           },
           onThinking: (t) => {
             if (!event.sender.isDestroyed()) event.sender.send(IPC_EVENTS.CHAT_THINKING, t);
+          },
+          onPromptDebug: (snapshot: PromptDebugSnapshot) => {
+            if (!event.sender.isDestroyed()) event.sender.send(IPC_EVENTS.CHAT_PROMPT_DEBUG, snapshot);
           },
           onToolActivity: (activity) => {
             if (!event.sender.isDestroyed()) event.sender.send(IPC_EVENTS.CHAT_TOOL_ACTIVITY, activity);
@@ -420,6 +567,9 @@ export function registerIpc(browserService: ElectronBrowserService): void {
       } catch (e: unknown) {
         const err = e instanceof Error ? e : new Error(String(e));
         if (err.name === 'AbortError' || err.message === 'AbortError') {
+          if (settings_provider === 'anthropic') {
+            closePendingAnthropicToolUses(sessionMessages, 'user_interrupted');
+          }
           result = { response: '', error: 'Stopped' };
           if (!event.sender.isDestroyed()) event.sender.send(IPC_EVENTS.CHAT_STREAM_END, { ok: false, cancelled: true });
         } else {
@@ -448,6 +598,12 @@ export function registerIpc(browserService: ElectronBrowserService): void {
     chatAbort?.abort();
     chatAbort = null;
     if (activeRunId) cancelLoop(activeRunId);
+    if (activeConversationId) {
+      const sessionMessages = sessions.get(activeConversationId);
+      if (sessionMessages) {
+        closePendingAnthropicToolUses(sessionMessages, 'user_interrupted');
+      }
+    }
   });
 
   ipcMain.handle(IPC.CHAT_PAUSE, () => {

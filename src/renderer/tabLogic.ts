@@ -3,6 +3,7 @@
 export interface ConversationTab {
   id: string;
   conversationId: string | null;
+  title?: string;
 }
 
 export function makeTab(conversationId: string | null): ConversationTab {
