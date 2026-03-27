@@ -460,6 +460,89 @@ function TerminalTabBar({
   );
 }
 
+// ─── TerminalSplitContainer ───────────────────────────────────────────────────
+
+interface TerminalSplitContainerProps {
+  topSessionId: string;
+  bottomSessionId: string | null; // null = no split
+  splitRatio: number;             // 0.0–1.0
+  splitIsObserving: boolean;
+  conversationId?: string | null;
+  onSplitRatioChange: (ratio: number) => void;
+}
+
+const MIN_PANE_PX = 80;
+
+function TerminalSplitContainer({
+  topSessionId,
+  bottomSessionId,
+  splitRatio,
+  splitIsObserving,
+  conversationId,
+  onSplitRatioChange,
+}: TerminalSplitContainerProps) {
+  const containerRef = React.useRef<HTMLDivElement>(null);
+  const isDragging = React.useRef(false);
+
+  const handleDividerMouseDown = React.useCallback((e: React.MouseEvent) => {
+    e.preventDefault();
+    isDragging.current = true;
+
+    const onMouseMove = (ev: MouseEvent) => {
+      if (!isDragging.current || !containerRef.current) return;
+      const rect = containerRef.current.getBoundingClientRect();
+      const totalHeight = rect.height;
+      const offsetY = ev.clientY - rect.top;
+      const minRatio = MIN_PANE_PX / totalHeight;
+      const maxRatio = 1 - MIN_PANE_PX / totalHeight;
+      const ratio = Math.min(maxRatio, Math.max(minRatio, offsetY / totalHeight));
+      onSplitRatioChange(ratio);
+    };
+
+    const onMouseUp = () => {
+      isDragging.current = false;
+      window.removeEventListener('mousemove', onMouseMove);
+      window.removeEventListener('mouseup', onMouseUp);
+    };
+
+    window.addEventListener('mousemove', onMouseMove);
+    window.addEventListener('mouseup', onMouseUp);
+  }, [onSplitRatioChange]);
+
+  if (!bottomSessionId) {
+    return (
+      <div className="flex flex-1 flex-col overflow-hidden min-h-0">
+        <TerminalPane sessionId={topSessionId} conversationId={conversationId} />
+      </div>
+    );
+  }
+
+  return (
+    <div ref={containerRef} className="flex flex-1 flex-col overflow-hidden min-h-0">
+      {/* Top pane */}
+      <div style={{ height: `${splitRatio * 100}%` }} className="flex flex-col overflow-hidden min-h-0">
+        <TerminalPane sessionId={topSessionId} conversationId={conversationId} />
+      </div>
+
+      {/* Draggable divider */}
+      <div
+        onMouseDown={handleDividerMouseDown}
+        className="flex-shrink-0 h-1 bg-white/[0.08] hover:bg-sky-400/40 cursor-row-resize transition-colors"
+        title="Drag to resize"
+      />
+
+      {/* Bottom pane */}
+      <div style={{ height: `${(1 - splitRatio) * 100}%` }} className="flex flex-col overflow-hidden min-h-0">
+        <TerminalPane
+          sessionId={bottomSessionId}
+          conversationId={conversationId}
+          isObserving={splitIsObserving}
+        />
+      </div>
+    </div>
+  );
+}
+
 // ─── TerminalPanel (container) ────────────────────────────────────────────────
 
 interface TerminalPanelProps {
@@ -572,12 +655,14 @@ export default function TerminalPanel({ visible, conversationId }: TerminalPanel
         onToggleSplit={handleToggleSplit}
         onToggleObserve={handleToggleObserve}
       />
-      <div className="flex flex-1 flex-col overflow-hidden min-h-0">
-        <TerminalPane
-          sessionId={activeTab.sessionId}
-          conversationId={conversationId}
-        />
-      </div>
+      <TerminalSplitContainer
+        topSessionId={activeTab.sessionId}
+        bottomSessionId={splitSessionId}
+        splitRatio={splitRatio}
+        splitIsObserving={splitIsObserving}
+        conversationId={conversationId}
+        onSplitRatioChange={setSplitRatio}
+      />
     </div>
   );
 }
