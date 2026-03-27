@@ -19,10 +19,13 @@ type RightPaneMode = 'none' | 'browser' | 'editor' | 'terminal';
 type EditorTab = { id: string; filePath: string };
 
 interface UiSessionState {
-  activeConversationId: string | null;
+  tabs?: ConversationTab[];
+  activeTabId?: string;
   activeView: View;
   rightPaneMode?: RightPaneMode;
   browserVisible?: boolean;
+  // legacy field — kept for backwards compatibility on first restore
+  activeConversationId?: string | null;
 }
 
 export default function App() {
@@ -70,10 +73,20 @@ export default function App() {
         } else if (typeof session?.browserVisible === 'boolean') {
           setRightPaneMode(session.browserVisible ? 'browser' : 'none');
         }
-        if (session?.activeConversationId) {
+        // Restore full tab array (new format)
+        if (session?.tabs && session.tabs.length > 0) {
+          setTabs(session.tabs);
+          const restoredActiveTabId = session.activeTabId ?? session.tabs[0].id;
+          setActiveTabId(restoredActiveTabId);
+          const activeTab = session.tabs.find(t => t.id === restoredActiveTabId) ?? session.tabs[0];
+          if (activeTab.conversationId) {
+            setLoadConversationId(activeTab.conversationId);
+          }
+        } else if (session?.activeConversationId) {
+          // Legacy single-conversation restore
           setLoadConversationId(session.activeConversationId);
           setTabs(current =>
-            current.map((t, i) => i === 0 ? { ...t, conversationId: session.activeConversationId } : t)
+            current.map((t, i) => i === 0 ? { ...t, conversationId: session.activeConversationId ?? null } : t)
           );
         }
       })
@@ -83,12 +96,13 @@ export default function App() {
   useEffect(() => {
     if (!sessionHydrated || !hasApiKey) return;
     (window as any).clawdia?.settings?.set('uiSession', {
-      activeConversationId: loadConversationId,
+      tabs,
+      activeTabId,
       activeView,
       rightPaneMode,
       browserVisible: rightPaneMode === 'browser',
     });
-  }, [sessionHydrated, hasApiKey, loadConversationId, activeView, rightPaneMode]);
+  }, [sessionHydrated, hasApiKey, tabs, activeTabId, activeView, rightPaneMode]);
 
   useEffect(() => {
     if (rightPaneMode !== 'browser') {
@@ -168,6 +182,30 @@ export default function App() {
     }
     setActiveView('chat');
   }, [tabs]);
+
+  const handleConversationTitleResolved = useCallback((tabId: string, title: string) => {
+    setTabs(current =>
+      current.map(t => t.id === tabId ? { ...t, title } : t)
+    );
+  }, []);
+
+  const handleOpenConversation = useCallback((id: string) => {
+    const existing = tabs.find(t => t.conversationId === id);
+    if (existing) {
+      handleSwitchTab(existing.id);
+    } else {
+      const newTab = makeTab(id);
+      setTabs(current => {
+        const result = addTab(current, newTab);
+        setActiveTabId(result.activeTabId);
+        return result.tabs;
+      });
+      setLoadConversationId(id);
+      setReplayBuffer(null);
+      setChatKey(k => k + 1);
+      setActiveView('chat');
+    }
+  }, [tabs, handleSwitchTab]);
 
   const handleOpenProcess = useCallback((processId: string) => {
     setSelectedProcessId(processId);
@@ -348,6 +386,8 @@ export default function App() {
               onNewTab={handleNewTab}
               onCloseTab={handleCloseTab}
               onSwitchTab={handleSwitchTab}
+              onOpenConversation={handleOpenConversation}
+              onConversationTitleResolved={handleConversationTitleResolved}
             />
           )}
           {activeView === 'conversations' && (
