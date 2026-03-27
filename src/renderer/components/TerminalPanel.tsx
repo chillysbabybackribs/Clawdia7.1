@@ -598,6 +598,24 @@ export default function TerminalPanel({ visible, conversationId }: TerminalPanel
     return () => { cancelled = true; };
   }, [api]);
 
+  // Kill all sessions when panel unmounts
+  const tabsRef = React.useRef(tabs);
+  const splitSessionIdRef = React.useRef(splitSessionId);
+  React.useEffect(() => { tabsRef.current = tabs; }, [tabs]);
+  React.useEffect(() => { splitSessionIdRef.current = splitSessionId; }, [splitSessionId]);
+
+  React.useEffect(() => {
+    return () => {
+      tabsRef.current.forEach((tab) => {
+        void api?.terminal?.kill(tab.sessionId);
+      });
+      if (splitSessionIdRef.current) {
+        void api?.terminal?.kill(splitSessionIdRef.current);
+      }
+    };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [api]);
+
   const activeTab = tabs.find((t) => t.id === activeTabId) ?? tabs[0];
 
   if (isAvailable === false) {
