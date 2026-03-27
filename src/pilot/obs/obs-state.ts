@@ -16,7 +16,12 @@ export function detectStateFromSignals(
   let bestScore = 0;
 
   for (const [key, def] of Object.entries(states)) {
-    const titleMatch = new RegExp(def.windowTitlePattern).test(signals.windowList);
+    let titleMatch = false;
+    try {
+      titleMatch = new RegExp(def.windowTitlePattern).test(signals.windowList);
+    } catch {
+      continue;
+    }
     if (!titleMatch) continue;
 
     const cuesMatched = def.cues.filter((c) => signals.cueText.includes(c)).length;
