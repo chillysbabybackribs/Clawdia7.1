@@ -12,6 +12,7 @@ import type {
   PromptDebugSnapshot,
 } from '../../shared/types';
 import InputBar from './InputBar';
+import ToolActivityComponent from './ToolActivity';
 import { type ToolStreamMap } from './ToolActivity';
 import MarkdownRenderer from './MarkdownRenderer';
 import SwarmPanel from './SwarmPanel';
@@ -561,47 +562,31 @@ const AssistantMessage = React.memo(function AssistantMessage({
   streamMode?: 'chat' | 'claude_terminal' | 'codex_terminal';
   onOpenTerminal: () => void;
 }) {
-  const renderAsTerminalTranscript =
-    message.type === 'terminal_transcript'
-    || (!!message.isStreaming && (streamMode === 'claude_terminal' || streamMode === 'codex_terminal'));
-
   // Live path: active streaming message (feed may be empty while shimmer is showing)
   if (message.isStreaming || (message.feed && message.feed.length > 0)) {
-    const textItems: Array<{ text: string; isStreaming?: boolean; idx: number }> = [];
-    for (let i = 0; i < (message.feed?.length ?? 0); i++) {
-      const item = message.feed![i];
-      if (item.kind === 'text') {
-        if (!item.text.trim()) continue;
-        textItems.push({ text: item.text, isStreaming: item.isStreaming, idx: i });
-      }
-    }
-
-    const hasText = textItems.length > 0;
-    if (!hasText && !shimmerText) return null;
-
-    if (renderAsTerminalTranscript) {
-      const transcriptContent = textItems.map((item) => item.text).join('\n\n') || shimmerText || '';
-      return (
-        <TerminalTranscriptCard
-          message={{ ...message, content: transcriptContent, isStreaming: !!message.isStreaming }}
-          showStreamingStatus={!!message.isStreaming}
-          onOpenTerminal={onOpenTerminal}
-        />
-      );
-    }
+    const hasContent = (message.feed ?? []).some(item =>
+      (item.kind === 'text' && item.text.trim()) || item.kind === 'tool'
+    );
+    if (!hasContent && !shimmerText) return null;
 
     return (
       <div className="flex justify-start animate-slide-up group">
-        <div className="max-w-[92%] px-1 py-2 text-text-primary flex flex-col gap-3">
-          {/* Shimmer — shown while streaming whenever shimmerText is set */}
+        <div className="w-full px-1 py-2 text-text-primary flex flex-col gap-3">
           {message.isStreaming && shimmerText && (
             streamMode === 'codex_terminal'
               ? <CodexWaitingCard text={shimmerText} />
               : <InlineShimmer text={shimmerText} />
           )}
-          {textItems.map(g => (
-            <MarkdownRenderer key={g.idx} content={g.text} isStreaming={g.isStreaming === true} />
-          ))}
+          {(message.feed ?? []).map((item, idx) => {
+            if (item.kind === 'text') {
+              if (!item.text.trim()) return null;
+              return <MarkdownRenderer key={idx} content={item.text} isStreaming={item.isStreaming === true} />;
+            }
+            if (item.kind === 'tool') {
+              return <ToolActivityComponent key={item.tool.id} tools={[item.tool]} />;
+            }
+            return null;
+          })}
           {!!message.fileRefs?.length && <FileRefList fileRefs={message.fileRefs} />}
           {!!message.linkPreviews?.length && <LinkPreviewList linkPreviews={message.linkPreviews} />}
           {!message.isStreaming && message.content && (
@@ -617,13 +602,18 @@ const AssistantMessage = React.memo(function AssistantMessage({
 
   // Fallback: DB-loaded historical messages
   const hasContent = !!message.content?.trim();
-  if (!hasContent) return null;
+  if (!hasContent && !message.toolCalls?.length) return null;
   if (message.type === 'terminal_transcript') {
     return <TerminalTranscriptCard message={message} showStreamingStatus={false} onOpenTerminal={onOpenTerminal} />;
   }
   return (
     <div className="flex justify-start animate-slide-up group">
-      <div className="max-w-[92%] px-1 py-2 text-text-primary">
+      <div className="w-full px-1 py-2 text-text-primary">
+        {!!message.toolCalls?.length && (
+          <div className="mb-3">
+            <ToolActivityComponent tools={message.toolCalls} />
+          </div>
+        )}
         {hasContent && <MarkdownRenderer content={message.content} isStreaming={false} />}
         {!!message.fileRefs?.length && <FileRefList fileRefs={message.fileRefs} />}
         {!!message.linkPreviews?.length && <LinkPreviewList linkPreviews={message.linkPreviews} />}
@@ -647,8 +637,8 @@ const AssistantMessage = React.memo(function AssistantMessage({
 
 const UserMessage = React.memo(function UserMessage({ message }: { message: Message }) {
   return (
-    <div className="flex flex-col items-end gap-1 animate-slide-up">
-      <div className="max-w-[85%] rounded-2xl rounded-br-md px-4 py-2.5 bg-neutral-700/60 text-white backdrop-blur-sm">
+    <div className="flex flex-col gap-1 animate-slide-up">
+      <div className="w-full rounded-xl px-4 py-3 bg-white/[0.04] border border-white/[0.06] text-white">
         {message.attachments && message.attachments.length > 0 && (
           <div className={message.content.trim() ? 'mb-3' : ''}>
             <AttachmentGallery attachments={message.attachments} />
@@ -656,7 +646,7 @@ const UserMessage = React.memo(function UserMessage({ message }: { message: Mess
         )}
         {message.content.trim() && <div className="text-[1rem] leading-relaxed whitespace-pre-wrap">{message.content}</div>}
       </div>
-      <div className="flex items-center gap-2 mr-1">
+      <div className="flex items-center gap-2">
         <span className="text-[11px] text-text-secondary/70">{message.timestamp}</span>
         {message.content.trim() && <CopyButton text={message.content} />}
       </div>
@@ -1250,21 +1240,35 @@ export default function ChatPanel({
     setIsWorkflowPlanStreaming(false);
   }, []);
 
-  const handleToolActivityEvent = useCallback((activity: { name: string; status: string; detail?: string }) => {
+  const handleToolActivityEvent = useCallback((activity: ToolCall) => {
     ensureAssistantReplayMessage();
 
     if (activity.status === 'running') {
-      // Freeze any in-progress text item so text + shimmer don't interleave
+      // Freeze any in-progress text item so text + tool don't interleave
       const lastIdx = feedRef.current.length - 1;
       if (lastIdx >= 0 && feedRef.current[lastIdx].kind === 'text') {
         feedRef.current[lastIdx] = { ...feedRef.current[lastIdx], isStreaming: false } as FeedItem;
       }
+      // Push tool into feed
+      feedRef.current.push({ kind: 'tool', tool: activity });
       scheduleStreamUpdate();
       handleThinkingEvent(toolToShimmerLabel(activity.name, activity.detail));
-    } else if (activity.status === 'awaiting_approval') {
+    } else if (activity.status === 'success' || activity.status === 'error') {
+      // Update existing tool in feed with output
+      const idx = feedRef.current.findIndex(
+        item => item.kind === 'tool' && item.tool.id === activity.id
+      );
+      if (idx >= 0) {
+        feedRef.current[idx] = { kind: 'tool', tool: { ...(feedRef.current[idx] as any).tool, ...activity } };
+      } else {
+        feedRef.current.push({ kind: 'tool', tool: activity });
+      }
+      scheduleStreamUpdate();
+      setShimmerText('');
+    } else if ((activity as any).status === 'awaiting_approval') {
       setShimmerText('Waiting for approval…');
       autoScroll();
-    } else if (activity.status === 'needs_human') {
+    } else if ((activity as any).status === 'needs_human') {
       setShimmerText('Needs your input…');
       autoScroll();
     }
@@ -1850,7 +1854,7 @@ export default function ChatPanel({
       ) : (
         <div ref={scrollRef} onScroll={handleScroll} className="flex-1 overflow-y-auto overflow-x-hidden scroll-smooth">
           <div
-            className={`flex max-w-[720px] flex-col px-4 pt-5 pb-8 ${showCodexEmptyState || showClaudeCodeEmptyState || showClawdiaEmptyState ? '' : 'gap-4'}`}
+            className={`flex flex-col px-5 pt-5 pb-8 ${showCodexEmptyState || showClaudeCodeEmptyState || showClawdiaEmptyState ? '' : 'gap-4'}`}
             style={{ zoom: chatZoom / 100 }}
           >
             {showClawdiaEmptyState && (
