@@ -619,21 +619,51 @@ export async function streamAnthropicLLM(
     messages: anthropicMessages,
     system: systemPrompt,
     tools: tools as Anthropic.Tool[],
+    stream: true,
   };
 
-  const response = await withAnthropicRetry(
-    async () => client.messages.create(body, { signal: options.signal }),
+  const stream = await withAnthropicRetry(
+    async () => client.messages.stream(body, { signal: options.signal }),
     options.signal,
-    'message.create',
+    'message.stream',
   );
 
-  const textBlocks = response.content.filter((b): b is Anthropic.TextBlock => b.type === 'text');
-  const toolUseBlocks = response.content.filter((b): b is Anthropic.ToolUseBlock => b.type === 'tool_use');
+  let text = '';
+  const toolUseBlocks: Array<{ id: string; name: string; input: string }> = [];
+  let currentToolId = '';
+  let currentToolName = '';
+  let currentToolInput = '';
 
-  const text = textBlocks.map(b => b.text).join('');
-  if (text) options.onText(text);
+  stream.on('text', (delta) => {
+    text += delta;
+    options.onText(delta);
+  });
 
-  const toolBlocks: ToolUseBlock[] = toolUseBlocks.map(b => ({
+  stream.on('contentBlock', (block: any) => {
+    if (block.type === 'tool_use') {
+      if (currentToolId) {
+        toolUseBlocks.push({ id: currentToolId, name: currentToolName, input: currentToolInput });
+      }
+      currentToolId = block.id;
+      currentToolName = block.name;
+      currentToolInput = '';
+    }
+  });
+
+  stream.on('inputJson', (_delta: string, snapshot: unknown) => {
+    currentToolInput = typeof snapshot === 'string' ? snapshot : JSON.stringify(snapshot);
+  });
+
+  const finalMessage = await stream.finalMessage();
+
+  // Flush last tool if any
+  if (currentToolId) {
+    toolUseBlocks.push({ id: currentToolId, name: currentToolName, input: currentToolInput });
+  }
+
+  // Build tool blocks from collected data, falling back to finalMessage for input parsing
+  const finalToolUseBlocks = finalMessage.content.filter((b): b is Anthropic.ToolUseBlock => b.type === 'tool_use');
+  const toolBlocks: ToolUseBlock[] = finalToolUseBlocks.map(b => ({
     id: b.id,
     name: b.name,
     input: b.input as Record<string, unknown>,
