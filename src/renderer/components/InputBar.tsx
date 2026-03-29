@@ -223,12 +223,12 @@ export default function InputBar({
           </button>
 
           {modelOpen && (
-            <div className="absolute bottom-full left-0 mb-2 py-1.5 bg-[#2a2a33]/95 backdrop-blur-md border border-white/[0.10] rounded-xl shadow-xl shadow-black/50 min-w-[210px] animate-fade-in z-50">
+            <div className="absolute bottom-full left-0 mb-2 py-1.5 bg-surface-2 border border-white/[0.08] rounded-xl shadow-xl shadow-black/50 min-w-[210px] animate-fade-in z-50">
               {PROVIDERS.map((prov) => {
                 const provModels = MODEL_REGISTRY.filter((m) => m.provider === prov.id);
                 return (
                   <div key={prov.id}>
-                    <div className="px-3.5 pt-2 pb-1 text-[10px] font-semibold uppercase tracking-wider text-white/30">
+                    <div className="px-3.5 pt-2 pb-1 text-[10px] font-semibold uppercase tracking-wider text-text-muted">
                       {prov.label}
                     </div>
                     {provModels.map((model) => {
@@ -243,14 +243,14 @@ export default function InputBar({
                             setModelIdx(idx >= 0 ? idx : 0);
                             setModelOpen(false);
                           }}
-                          className={`w-full flex items-center gap-2.5 px-3.5 py-2 text-left text-[15px] transition-all cursor-pointer ${
-                            isSelected ? 'text-white bg-white/[0.08]' : 'text-white/50 hover:text-white/80 hover:bg-white/[0.05]'
+                          className={`w-full flex items-center gap-2.5 px-3.5 py-2 text-left text-[13px] transition-all cursor-pointer ${
+                            isSelected ? 'text-text-primary bg-white/[0.08]' : 'text-text-secondary hover:text-text-primary hover:bg-white/[0.05]'
                           }`}
                         >
-                          <div className={`w-1.5 h-1.5 rounded-full flex-shrink-0 ${model.tier === 'deep' ? 'bg-amber-400' : model.tier === 'balanced' ? 'bg-[#8ab4f8]' : 'bg-emerald-400'}`} />
-                          <span>{model.label}</span>
+                          <span className="flex-1">{model.label}</span>
+                          <span className="text-[10px] text-text-muted uppercase tracking-wide">{model.tier}</span>
                           {isSelected && (
-                            <svg className="ml-auto text-[#8ab4f8] flex-shrink-0" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><polyline points="20 6 9 17 4 12" /></svg>
+                            <svg className="text-text-secondary flex-shrink-0" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><polyline points="20 6 9 17 4 12" /></svg>
                           )}
                         </button>
                       );
@@ -266,21 +266,19 @@ export default function InputBar({
           <button
             onClick={onToggleClaudeMode}
             disabled={claudeModeDisabled}
-            className={`flex items-center gap-1 text-[14px] transition-colors ${
+            className={`flex items-center justify-center w-7 h-7 rounded-md transition-colors ${
               claudeMode
-                ? 'text-amber-300 cursor-pointer'
+                ? 'text-amber-400 bg-amber-400/10 cursor-pointer'
                 : claudeModeDisabled
-                  ? 'text-text-tertiary/35 cursor-default'
-                  : 'text-text-tertiary hover:text-text-secondary cursor-pointer'
+                  ? 'text-text-muted/35 cursor-default'
+                  : 'text-text-muted hover:text-text-secondary hover:bg-white/[0.05] cursor-pointer'
             }`}
-            title={claudeModeDisabled ? 'Create or open a conversation first' : 'Toggle Claude terminal mode for this conversation'}
+            title={claudeModeDisabled ? 'Create or open a conversation first' : claudeMode ? `Claude Code (${claudeStatus})` : 'Toggle Claude Code'}
           >
-            <span>Claude Code</span>
-            {claudeMode && (
-              <span className="rounded bg-black/20 px-1.5 py-0.5 text-[10px] uppercase tracking-wide">
-                {claudeStatus}
-              </span>
-            )}
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <polyline points="4 17 10 11 4 5" />
+              <line x1="12" y1="19" x2="20" y2="19" />
+            </svg>
           </button>
 
           <div style={{ width: '1px', height: '10px', background: 'rgba(255,255,255,0.08)', flexShrink: 0 }} />
@@ -288,21 +286,20 @@ export default function InputBar({
           <button
             onClick={onToggleCodexMode}
             disabled={codexModeDisabled}
-            className={`flex items-center gap-1 text-[14px] transition-colors ${
+            className={`flex items-center justify-center w-7 h-7 rounded-md transition-colors ${
               codexMode
-                ? 'text-emerald-300 cursor-pointer'
+                ? 'text-emerald-400 bg-emerald-400/10 cursor-pointer'
                 : codexModeDisabled
-                  ? 'text-text-tertiary/35 cursor-default'
-                  : 'text-text-tertiary hover:text-text-secondary cursor-pointer'
+                  ? 'text-text-muted/35 cursor-default'
+                  : 'text-text-muted hover:text-text-secondary hover:bg-white/[0.05] cursor-pointer'
             }`}
-            title={codexModeDisabled ? 'Create or open a conversation first' : 'Toggle Codex mode for this conversation'}
+            title={codexModeDisabled ? 'Create or open a conversation first' : codexMode ? `Codex (${codexStatus})` : 'Toggle Codex'}
           >
-            <span>Codex</span>
-            {codexMode && (
-              <span className="rounded bg-black/20 px-1.5 py-0.5 text-[10px] uppercase tracking-wide">
-                {codexStatus}
-              </span>
-            )}
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <rect x="2" y="3" width="20" height="14" rx="2" ry="2" />
+              <line x1="8" y1="21" x2="16" y2="21" />
+              <line x1="12" y1="17" x2="12" y2="21" />
+            </svg>
           </button>
         </div>
       )}
@@ -371,7 +368,7 @@ export default function InputBar({
             onKeyDown={handleKeyDown}
             onFocus={() => setFocused(true)}
             onBlur={() => setFocused(false)}
-            placeholder={isStreaming ? 'Add a follow-up...' : 'Ask me anything...'}
+            placeholder={isStreaming ? 'Queue another message...' : 'Ask me anything...'}
             rows={1}
             disabled={disabled || isStreaming}
             className="flex-1 bg-transparent text-text-primary text-[21px] placeholder:text-text-tertiary px-3 py-3 resize-none outline-none max-h-[200px] leading-[1.6]"
