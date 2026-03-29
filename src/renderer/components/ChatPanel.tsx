@@ -966,22 +966,12 @@ function toolToShimmerLabel(name: string, detail?: string): string {
   return labels[name] ?? 'Working…';
 }
 
-function InlineShimmer({ lines }: { lines: string[] }) {
-  if (lines.length === 0) return null;
+function InlineShimmer({ text }: { text: string }) {
+  if (!text) return null;
   return (
-    <div className="flex flex-col gap-0.5 px-5 py-2">
-      {lines.map((line, i) => (
-        <div key={i} className="flex items-center gap-2">
-          <span className="text-text-secondary text-[14px] flex-shrink-0" aria-hidden>✱</span>
-          <span
-            className={`text-[13px] leading-relaxed line-clamp-1 overflow-hidden text-ellipsis ${
-              i === lines.length - 1 ? 'inline-shimmer' : 'text-text-muted'
-            }`}
-          >
-            {line}
-          </span>
-        </div>
-      ))}
+    <div className="flex items-center gap-2 px-5 py-2">
+      <span className="text-text-secondary text-[14px] flex-shrink-0" aria-hidden>✱</span>
+      <span className="inline-shimmer text-[13px] leading-relaxed line-clamp-1 overflow-hidden text-ellipsis">{text}</span>
     </div>
   );
 }
@@ -1013,7 +1003,7 @@ export default function ChatPanel({
   const [messages, setMessages] = useState<Message[]>([]);
   const [isStreaming, setIsStreaming] = useState(false);
   const [isPaused, setIsPaused] = useState(false);
-  const [shimmerLines, setShimmerLines] = useState<string[]>([]);
+  const [shimmerText, setShimmerText] = useState('');
   const [streamMap, setStreamMap] = useState<ToolStreamMap>({});
   const [pendingApprovalRunId, setPendingApprovalRunId] = useState<string | null>(null);
   const [pendingApprovals, setPendingApprovals] = useState<RunApproval[]>([]);
@@ -1116,7 +1106,7 @@ export default function ChatPanel({
       isStreaming: true,
     }]);
     setIsStreaming(true);
-    setShimmerLines([]); thinkingBatchRef.current = [];
+    setShimmerText(''); thinkingBatchRef.current = [];
     return assistantId;
   }, []);
 
@@ -1165,8 +1155,6 @@ export default function ChatPanel({
 
   const handleStreamTextChunk = useCallback((chunk: string) => {
     ensureAssistantReplayMessage();
-    // Clear shimmer when real text arrives so they don't overlap
-    setShimmerLines([]); thinkingBatchRef.current = [];
     if (chunk.includes('__RESET__')) {
       while (feedRef.current.length > 0 && feedRef.current[feedRef.current.length - 1].kind === 'text') {
         feedRef.current.pop();
@@ -1176,12 +1164,12 @@ export default function ChatPanel({
     }
 
     const lastIdx = feedRef.current.length - 1;
-    const shouldSeparateTerminalChunks =
-      activeStreamModeRef.current === 'claude_terminal' || activeStreamModeRef.current === 'codex_terminal';
+    const lastItem = lastIdx >= 0 ? feedRef.current[lastIdx] : null;
 
-    if (!shouldSeparateTerminalChunks && lastIdx >= 0 && feedRef.current[lastIdx].kind === 'text') {
-      const last = feedRef.current[lastIdx] as { kind: 'text'; text: string; isStreaming?: boolean };
-      feedRef.current[lastIdx] = { kind: 'text', text: last.text + chunk, isStreaming: true };
+    // Append to existing text item only if it's still actively streaming
+    // (not frozen by a tool activity) and is a text item
+    if (lastItem && lastItem.kind === 'text' && lastItem.isStreaming) {
+      feedRef.current[lastIdx] = { kind: 'text', text: lastItem.text + chunk, isStreaming: true };
     } else {
       feedRef.current.push({ kind: 'text', text: chunk, isStreaming: true });
     }
@@ -1208,12 +1196,12 @@ export default function ChatPanel({
     const lastText = thinkingBatchRef.current[thinkingBatchRef.current.length - 1]?.text;
     if (lastText === next.text) return;
 
-    // Accumulate thinking lines as bullet points (keep last 6 to avoid overflow)
-    thinkingBatchRef.current = [...thinkingBatchRef.current, next].slice(-6);
+    // Replace with latest thought — single shimmer line
+    thinkingBatchRef.current = [next];
     thinkingVisibleUntilRef.current = Date.now() + MIN_THINKING_VISIBLE_MS;
     thinkingQueueRef.current = [];
     clearThinkingAdvanceTimer();
-    setShimmerLines(thinkingBatchRef.current.map(t => t.text));
+    setShimmerText(next.text);
     autoScroll();
   }, [autoScroll, clearThinkingAdvanceTimer]);
 
@@ -1256,12 +1244,11 @@ export default function ChatPanel({
         feedRef.current.push({ kind: 'tool', tool: activity });
       }
       scheduleStreamUpdate();
-      setShimmerLines([]); thinkingBatchRef.current = [];
     } else if ((activity as any).status === 'awaiting_approval') {
-      setShimmerLines(prev => [...prev, 'Waiting for approval…'].slice(-6));
+      setShimmerText('Waiting for approval…');
       autoScroll();
     } else if ((activity as any).status === 'needs_human') {
-      setShimmerLines(prev => [...prev, 'Needs your input…'].slice(-6));
+      setShimmerText('Needs your input…');
       autoScroll();
     }
   }, [autoScroll, ensureAssistantReplayMessage, handleThinkingEvent, scheduleStreamUpdate]);
@@ -1307,7 +1294,7 @@ export default function ChatPanel({
       ));
     }
     setIsStreaming(false);
-    setShimmerLines([]); thinkingBatchRef.current = [];
+    setShimmerText(''); thinkingBatchRef.current = [];
     thinkingQueueRef.current = [];
     thinkingBatchRef.current = [];
     clearThinkingAdvanceTimer();
@@ -1332,7 +1319,7 @@ export default function ChatPanel({
       setWorkflowPlanDraft('');
       setIsWorkflowPlanStreaming(false);
       setIsStreaming(false);
-      setShimmerLines([]); thinkingBatchRef.current = [];
+      setShimmerText(''); thinkingBatchRef.current = [];
       thinkingQueueRef.current = [];
       thinkingBatchRef.current = [];
       clearThinkingAdvanceTimer();
@@ -1353,7 +1340,7 @@ export default function ChatPanel({
       setWorkflowPlanDraft('');
       setIsWorkflowPlanStreaming(false);
       setIsStreaming(false);
-      setShimmerLines([]); thinkingBatchRef.current = [];
+      setShimmerText(''); thinkingBatchRef.current = [];
       thinkingQueueRef.current = [];
       thinkingBatchRef.current = [];
       clearThinkingAdvanceTimer();
@@ -1380,7 +1367,7 @@ export default function ChatPanel({
 
     feedRef.current = [];
     setStreamMap({});
-    setShimmerLines([]); thinkingBatchRef.current = [];
+    setShimmerText(''); thinkingBatchRef.current = [];
     setIsStreaming(true);
 
     const replay = async () => {
@@ -1621,7 +1608,7 @@ export default function ChatPanel({
       }
 
       setIsStreaming(false);
-      setShimmerLines([]); thinkingBatchRef.current = [];
+      setShimmerText(''); thinkingBatchRef.current = [];
       setWorkflowPlanDraft('');
       setIsWorkflowPlanStreaming(false);
       if (conversationMode !== 'chat') setClaudeStatus('idle');
@@ -1634,7 +1621,7 @@ export default function ChatPanel({
         m.id === assistantId ? { ...m, content: `⚠️ ${err.message || 'Unknown error'}`, isStreaming: false } : m
       ));
       setIsStreaming(false);
-      setShimmerLines([]); thinkingBatchRef.current = [];
+      setShimmerText(''); thinkingBatchRef.current = [];
       setWorkflowPlanDraft('');
       setIsWorkflowPlanStreaming(false);
       if (conversationMode !== 'chat') setClaudeStatus('errored');
@@ -1647,7 +1634,7 @@ export default function ChatPanel({
     (window as any).clawdia?.chat.stop();
     setIsStreaming(false);
     setIsPaused(false);
-    setShimmerLines([]); thinkingBatchRef.current = [];
+    setShimmerText(''); thinkingBatchRef.current = [];
   }, []);
 
   const handlePause = useCallback(() => {
@@ -1943,8 +1930,8 @@ export default function ChatPanel({
         </div>
       )}
 
-      {isStreaming && shimmerLines.length > 0 && (
-        <InlineShimmer lines={shimmerLines} />
+      {isStreaming && shimmerText && (
+        <InlineShimmer text={shimmerText} />
       )}
 
       <InputBar
