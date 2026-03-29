@@ -1,13 +1,20 @@
 // src/main/agent/types.ts
 import type { BrowserService } from '../core/browser/BrowserService';
+import type { MessageAttachment, PromptDebugSnapshot } from '../../shared/types';
 
 export type ToolGroup = 'core' | 'browser' | 'desktop' | 'coding' | 'full';
 export type ModelTier = 'fast' | 'standard' | 'powerful';
+export type SpecialMode = 'app_mapping';
+export type MappingPhase = 'phase1' | 'phase2';
 
 export interface AgentProfile {
   toolGroup: ToolGroup;
   modelTier: ModelTier;
   isGreeting: boolean;
+  isContinuation?: boolean;
+  specialMode?: SpecialMode;
+  mappingTarget?: string;
+  mappingPhase?: MappingPhase;
 }
 
 export interface LoopOptions {
@@ -15,14 +22,17 @@ export interface LoopOptions {
   apiKey: string;
   model: string;           // resolved model ID (e.g. 'claude-sonnet-4-6')
   runId: string;
+  currentIteration?: number;
   maxIterations?: number;  // default 50
   signal?: AbortSignal;
   forcedProfile?: Partial<AgentProfile>;
   unrestrictedMode?: boolean;
   browserService?: BrowserService;
+  attachments?: MessageAttachment[];
   onText: (delta: string) => void;
   onThinking?: (delta: string) => void;
   onToolActivity?: (activity: ToolActivity) => void;
+  onPromptDebug?: (snapshot: PromptDebugSnapshot) => void;
 }
 
 export interface ToolActivity {
@@ -30,6 +40,8 @@ export interface ToolActivity {
   name: string;
   status: 'running' | 'success' | 'error';
   detail?: string;
+  input?: string;         // NEW
+  output?: string;        // NEW
   durationMs?: number;
 }
 

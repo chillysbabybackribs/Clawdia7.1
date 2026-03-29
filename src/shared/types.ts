@@ -39,7 +39,7 @@ export interface MessageFileRef {
 export interface Message {
   id: string;
   role: 'user' | 'assistant';
-  type?: 'chat' | 'pipeline';         // undefined = 'chat'
+  type?: 'chat' | 'pipeline' | 'terminal_transcript';         // undefined = 'chat'
   content: string;
   timestamp: string;
   attachments?: MessageAttachment[];
@@ -51,11 +51,25 @@ export interface Message {
   isStreaming?: boolean;
 }
 
+export interface PromptDebugSnapshot {
+  provider: ProviderId | 'anthropic' | 'openai' | 'gemini';
+  model: string;
+  iteration: number;
+  systemPrompt: string;
+  toolNames: string[];
+  messages: Array<{
+    role: string;
+    content: string;
+  }>;
+}
+
 export interface ToolCall {
   id: string;
   name: string;
   status: 'running' | 'success' | 'error';
   detail?: string;
+  input?: string;         // NEW: full command/input for tool call
+  output?: string;        // NEW: full result/output from tool call
   durationMs?: number;
   previewHints?: MessageLinkPreview[];
   rating?: 'up' | 'down' | null;
@@ -67,7 +81,7 @@ export interface Conversation {
   title: string;
   updatedAt: string;
   messageCount?: number;
-  mode?: 'chat' | 'claude_terminal';
+  mode?: 'chat' | 'claude_terminal' | 'codex_terminal';
   claudeTerminalStatus?: 'idle' | 'starting' | 'ready' | 'working' | 'errored' | 'stopped';
   claudeTerminalSessionId?: string | null;
 }
