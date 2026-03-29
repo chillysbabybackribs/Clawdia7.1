@@ -339,60 +339,232 @@ function CodexWaitingCard({ text }: { text: string }) {
   const activeStage = codexStageIndex(text);
 
   return (
-    <div className="codex-wait-card max-w-[520px] overflow-hidden rounded-2xl border border-emerald-300/12 bg-[#0c1112]/95 shadow-[0_18px_48px_rgba(0,0,0,0.34)]">
-      <div className="codex-wait-glow h-px w-full" aria-hidden />
-      <div className="px-4 py-3">
-        <div className="flex items-center justify-between gap-3">
-          <div className="flex min-w-0 items-center gap-2.5">
-            <span className="codex-orb" aria-hidden />
-            <div className="min-w-0">
-              <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-emerald-200/80">Codex</div>
-              <div className="mt-1 text-[12px] text-white/58">Working inside your Clawdia workspace</div>
-            </div>
-          </div>
-          <div className="rounded-full border border-white/[0.08] bg-white/[0.03] px-2.5 py-1 font-mono text-[10px] uppercase tracking-[0.18em] text-emerald-100/65">
-            live
-          </div>
-        </div>
-
-        <div className="mt-3 flex items-center gap-2">
-          {stages.map((stage, idx) => {
-            const isActive = idx === activeStage;
-            const isComplete = idx < activeStage;
-            return (
-              <div
-                key={stage}
-                className={`rounded-full border px-2.5 py-1 font-mono text-[10px] uppercase tracking-[0.18em] transition-colors ${
-                  isActive
-                    ? 'border-emerald-300/30 bg-emerald-300/12 text-emerald-100'
-                    : isComplete
-                      ? 'border-white/[0.08] bg-white/[0.05] text-white/72'
-                      : 'border-white/[0.06] bg-transparent text-white/38'
-                }`}
-              >
-                {stage}
-              </div>
-            );
-          })}
-        </div>
-
-        <div className="mt-3 flex items-start gap-3">
-          <div className="codex-scan-bars mt-0.5" aria-hidden>
-            <span />
-            <span />
-            <span />
-          </div>
+    <div className="max-w-[520px] py-1">
+      <div className="flex items-center justify-between gap-3">
+        <div className="flex min-w-0 items-center gap-2.5">
+          <span className="codex-orb" aria-hidden />
           <div className="min-w-0">
-            <div className="font-mono text-[13px] leading-6 text-emerald-50/92">{text}</div>
-            <div className="mt-1 text-[12px] text-white/42">Terminal-native execution, chat-native presentation.</div>
+            <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-emerald-200/80">Codex</div>
+            <div className="mt-1 text-[12px] text-white/58">Working inside your Clawdia workspace</div>
           </div>
+        </div>
+        <div className="font-mono text-[10px] uppercase tracking-[0.18em] text-emerald-100/65">
+          live
+        </div>
+      </div>
+
+      <div className="mt-3 flex items-center gap-2">
+        {stages.map((stage, idx) => {
+          const isActive = idx === activeStage;
+          const isComplete = idx < activeStage;
+          return (
+            <div
+              key={stage}
+              className={`font-mono text-[10px] uppercase tracking-[0.18em] transition-colors ${
+                isActive
+                  ? 'text-emerald-100'
+                  : isComplete
+                    ? 'text-white/72'
+                    : 'text-white/38'
+              }`}
+            >
+              {stage}
+            </div>
+          );
+        })}
+      </div>
+
+      <div className="mt-3 flex items-start gap-3">
+        <div className="codex-scan-bars mt-0.5" aria-hidden>
+          <span />
+          <span />
+          <span />
+        </div>
+        <div className="min-w-0">
+          <div className="font-mono text-[13px] leading-6 text-emerald-50/92">{text}</div>
+          <div className="mt-1 text-[12px] text-white/42">Terminal-native execution, chat-native presentation.</div>
         </div>
       </div>
     </div>
   );
 }
 
-const AssistantMessage = React.memo(function AssistantMessage({ message, shimmerText, streamMode }: { message: Message; shimmerText?: string; streamMode?: 'chat' | 'claude_terminal' | 'codex_terminal' }) {
+function tokenizeTranscriptLine(line: string): Array<{ text: string; kind: 'text' | 'code' | 'path' }> {
+  const pattern = /(`[^`]+`|(?:\/[\w.@-]+)+(?:[:#]\d+(?::\d+)?)?|\b[\w.-]+\.(?:ts|tsx|js|jsx|json|md|css|html|sh|yml|yaml|sql|py|go|rs)(?:[:#]\d+(?::\d+)?)?)/g;
+  const tokens: Array<{ text: string; kind: 'text' | 'code' | 'path' }> = [];
+  let lastIndex = 0;
+
+  for (const match of line.matchAll(pattern)) {
+    const start = match.index ?? 0;
+    const value = match[0];
+    if (start > lastIndex) tokens.push({ text: line.slice(lastIndex, start), kind: 'text' });
+    if (value.startsWith('`') && value.endsWith('`')) {
+      tokens.push({ text: value.slice(1, -1), kind: 'code' });
+    } else {
+      tokens.push({ text: value, kind: 'path' });
+    }
+    lastIndex = start + value.length;
+  }
+
+  if (lastIndex < line.length) tokens.push({ text: line.slice(lastIndex), kind: 'text' });
+  return tokens.length > 0 ? tokens : [{ text: line, kind: 'text' }];
+}
+
+function renderTranscriptTokens(line: string, keyPrefix: string) {
+  return tokenizeTranscriptLine(line).map((token, idx) => {
+    if (token.kind === 'code') {
+      return (
+        <code key={`${keyPrefix}-code-${idx}`} className="rounded bg-white/[0.06] px-1.5 py-0.5 font-mono text-[0.92em] text-[#f0f4f8]">
+          {token.text}
+        </code>
+      );
+    }
+    if (token.kind === 'path') {
+      return (
+        <span key={`${keyPrefix}-path-${idx}`} className="font-mono text-[0.95em] text-[#9fd3ff]">
+          {token.text}
+        </span>
+      );
+    }
+    return <React.Fragment key={`${keyPrefix}-text-${idx}`}>{token.text}</React.Fragment>;
+  });
+}
+
+function classifyTranscriptLine(line: string): 'blank' | 'command' | 'bullet' | 'numbered' | 'status' | 'heading' | 'body' {
+  if (!line.trim()) return 'blank';
+  if (/^\$ /.test(line) || /^> /.test(line)) return 'command';
+  if (/^(\-|\*|•)\s+/.test(line)) return 'bullet';
+  if (/^\d+\.\s+/.test(line)) return 'numbered';
+  if (/^(Verification|Note|Notes|Status|Result|Results|Error|Warning|Warnings|Updated|Changed):/.test(line)) return 'status';
+  if (/^[A-Z][A-Za-z0-9 /()+-]{1,80}:$/.test(line.trim())) return 'heading';
+  return 'body';
+}
+
+function TerminalTranscriptCard({
+  message,
+  showStreamingStatus,
+  onOpenTerminal,
+}: {
+  message: Message;
+  showStreamingStatus: boolean;
+  onOpenTerminal: () => void;
+}) {
+  const isStreaming = showStreamingStatus;
+  const [elapsedSec, setElapsedSec] = useState(0);
+  const lines = message.content.split(/\r?\n/);
+
+  useEffect(() => {
+    if (!isStreaming) {
+      setElapsedSec(0);
+      return;
+    }
+
+    const startedAt = Date.now();
+    setElapsedSec(0);
+    const interval = window.setInterval(() => {
+      setElapsedSec(Math.max(0, Math.floor((Date.now() - startedAt) / 1000)));
+    }, 1000);
+    return () => window.clearInterval(interval);
+  }, [isStreaming, message.id]);
+
+  const elapsedLabel = elapsedSec < 60
+    ? `${elapsedSec}s`
+    : `${Math.floor(elapsedSec / 60)}m ${String(elapsedSec % 60).padStart(2, '0')}s`;
+
+  return (
+    <div className="flex justify-start animate-slide-up group">
+      <div className="max-w-[92%] px-1 py-2 text-text-primary">
+        <div className="flex flex-col gap-1.5">
+          {lines.map((line, idx) => {
+            const kind = classifyTranscriptLine(line);
+            if (kind === 'blank') return <div key={`${message.id}-blank-${idx}`} className="h-2" />;
+            if (kind === 'heading') {
+              return (
+                <div key={`${message.id}-heading-${idx}`} className="pt-1 text-[14px] font-semibold tracking-[-0.01em] text-white/92">
+                  {renderTranscriptTokens(line, `${message.id}-heading-${idx}`)}
+                </div>
+              );
+            }
+            if (kind === 'status') {
+              return (
+                <div key={`${message.id}-status-${idx}`} className="text-[14px] leading-7 text-white/82">
+                  <span className="font-medium text-[#c8f7d2]">
+                    {renderTranscriptTokens(line, `${message.id}-status-${idx}`)}
+                  </span>
+                </div>
+              );
+            }
+            if (kind === 'command') {
+              return (
+                <div key={`${message.id}-command-${idx}`} className="font-mono text-[13px] leading-7 text-[#e6edf3]">
+                  <span className="mr-2 text-[#7ee787]">{line[0]}</span>
+                  {renderTranscriptTokens(line.slice(2), `${message.id}-command-${idx}`)}
+                </div>
+              );
+            }
+            if (kind === 'bullet' || kind === 'numbered') {
+              const markerMatch = kind === 'bullet'
+                ? line.match(/^(\-|\*|•)\s+(.*)$/)
+                : line.match(/^(\d+\.)\s+(.*)$/);
+              const marker = markerMatch?.[1] ?? '';
+              const body = markerMatch?.[2] ?? line;
+              return (
+                <div key={`${message.id}-list-${idx}`} className="flex items-start gap-3 text-[14px] leading-7 text-white/82">
+                  <span className="mt-[1px] min-w-[20px] font-mono text-white/44">{marker}</span>
+                  <div className="min-w-0 flex-1">{renderTranscriptTokens(body, `${message.id}-list-${idx}`)}</div>
+                </div>
+              );
+            }
+            return (
+              <div key={`${message.id}-body-${idx}`} className="text-[14px] leading-7 text-white/82">
+                {renderTranscriptTokens(line, `${message.id}-body-${idx}`)}
+              </div>
+            );
+          })}
+          {isStreaming && !message.content && (
+            <div className="font-mono text-[13px] leading-7 text-white/44">Waiting for output…</div>
+          )}
+        </div>
+        {isStreaming && (
+          <div className="mt-4 flex w-[36rem] max-w-full items-center gap-3">
+            <div className="thinking-shimmer-line h-[2px] min-w-0 flex-1 rounded-full" aria-hidden />
+            <div className="flex flex-shrink-0 items-center gap-2 text-[11px] text-text-secondary/78">
+              <span className="inline-shimmer">Still working…</span>
+              <span className="font-mono text-white/42">{elapsedLabel}</span>
+            </div>
+            <div className="thinking-shimmer-line h-[2px] min-w-0 flex-1 rounded-full" aria-hidden />
+          </div>
+        )}
+        <div className="mt-3 flex items-center gap-2">
+          <span className="text-[11px] text-text-secondary/70">{message.timestamp}</span>
+          {!isStreaming && message.content && <CopyButton text={message.content} />}
+          <button
+            onClick={onOpenTerminal}
+            className="rounded px-1.5 py-0.5 text-[11px] text-text-secondary transition-colors hover:bg-white/[0.06] hover:text-text-primary"
+          >
+            Open terminal
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+const AssistantMessage = React.memo(function AssistantMessage({
+  message,
+  shimmerText,
+  streamMode,
+  onOpenTerminal,
+}: {
+  message: Message;
+  shimmerText?: string;
+  streamMode?: 'chat' | 'claude_terminal' | 'codex_terminal';
+  onOpenTerminal: () => void;
+}) {
+  const renderAsTerminalTranscript =
+    message.type === 'terminal_transcript'
+    || (!!message.isStreaming && (streamMode === 'claude_terminal' || streamMode === 'codex_terminal'));
+
   // Live path: active streaming message (feed may be empty while shimmer is showing)
   if (message.isStreaming || (message.feed && message.feed.length > 0)) {
     const textItems: Array<{ text: string; isStreaming?: boolean; idx: number }> = [];
@@ -406,6 +578,17 @@ const AssistantMessage = React.memo(function AssistantMessage({ message, shimmer
 
     const hasText = textItems.length > 0;
     if (!hasText && !shimmerText) return null;
+
+    if (renderAsTerminalTranscript) {
+      const transcriptContent = textItems.map((item) => item.text).join('\n\n') || shimmerText || '';
+      return (
+        <TerminalTranscriptCard
+          message={{ ...message, content: transcriptContent, isStreaming: !!message.isStreaming }}
+          showStreamingStatus={!!message.isStreaming}
+          onOpenTerminal={onOpenTerminal}
+        />
+      );
+    }
 
     return (
       <div className="flex justify-start animate-slide-up group">
@@ -435,6 +618,9 @@ const AssistantMessage = React.memo(function AssistantMessage({ message, shimmer
   // Fallback: DB-loaded historical messages
   const hasContent = !!message.content?.trim();
   if (!hasContent) return null;
+  if (message.type === 'terminal_transcript') {
+    return <TerminalTranscriptCard message={message} showStreamingStatus={false} onOpenTerminal={onOpenTerminal} />;
+  }
   return (
     <div className="flex justify-start animate-slide-up group">
       <div className="max-w-[92%] px-1 py-2 text-text-primary">
@@ -477,6 +663,296 @@ const UserMessage = React.memo(function UserMessage({ message }: { message: Mess
     </div>
   );
 });
+
+function CodexEmptyState({
+  onSend,
+}: {
+  onSend: (text: string) => void;
+}) {
+  const examples = [
+    'Launch Photoshop and prepare example.png for printing at 24x36.',
+    'Use my Twitch session and set up OBS to start a stream.',
+    'Open my browser, navigate a signed-in site, and collect the information I need.',
+    'Inspect this project on disk and implement a fix.',
+  ];
+
+  return (
+    <div className="flex items-start px-1 pt-6 pb-10 text-left text-white">
+      <div className="w-full">
+
+        {/* Title block */}
+        <div className="mb-1">
+          <div className="font-mono text-[11px] font-semibold uppercase tracking-[0.22em] mb-2" style={{ color: '#9ab8f7cc' }}>
+            Codex
+          </div>
+          <h1 className="font-mono text-[22px] font-bold leading-[1.2] tracking-[-0.02em] text-white/90">
+            powered by Clawdia
+          </h1>
+        </div>
+
+        {/* Divider */}
+        <div className="mt-4 mb-5 h-px w-12" style={{ backgroundColor: '#9ab8f730' }} />
+
+        {/* Description */}
+        <p className="text-[13.5px] leading-[1.75] text-white/58">
+          Uses your desktop apps, browser sessions, authenticated sites, and local files to complete tasks across your machine.
+        </p>
+
+        {/* Examples */}
+        <div className="mt-6">
+          <div className="mb-3 text-[10px] font-semibold uppercase tracking-[0.2em] text-white/30">
+            Try asking
+          </div>
+          <div className="flex flex-col gap-1.5">
+            {examples.map((example) => (
+              <button
+                key={example}
+                type="button"
+                onClick={() => onSend(example)}
+                className="group flex w-fit max-w-full items-baseline gap-2.5 text-left focus:outline-none"
+              >
+                <span className="font-mono text-[13px] text-white/20 transition-colors group-hover:text-[#9ab8f7]/60 select-none leading-none">—</span>
+                <span className="text-[15px] leading-[1.65] transition-colors border-b border-transparent group-hover:border-[#9ab8f7]/20" style={{ color: '#9ab8f7cc' }} onMouseEnter={e => (e.currentTarget.style.color = '#9ab8f7')} onMouseLeave={e => (e.currentTarget.style.color = '#9ab8f7cc')}>
+                  {example}
+                </span>
+              </button>
+            ))}
+          </div>
+        </div>
+
+        {/* How it works */}
+        <details className="mt-6 w-full group/det">
+          <summary className="flex cursor-pointer list-none items-center gap-2 text-[10px] font-semibold uppercase tracking-[0.2em] text-white/28 transition-colors hover:text-white/60 select-none w-fit">
+            <span className="font-mono text-[11px] inline-block group-open/det:[content:'▾']">▸</span>
+            <span>How it works</span>
+          </summary>
+          <div className="mt-4 flex flex-col gap-3 pl-4 border-l border-white/8">
+            {[
+              'For desktop tasks, Codex uses the Clawdia engine to launch apps, move through UI, open files, and perform multi-step actions.',
+              'For browser tasks, Codex operates inside the Clawdia browser using authenticated sessions from persisted cookies.',
+              'For local work, Codex inspects files, traces codebases, and combines filesystem actions with browser and desktop workflows.',
+            ].map((para) => (
+              <p key={para} className="text-[12.5px] leading-[1.7] text-white/42">{para}</p>
+            ))}
+          </div>
+        </details>
+
+      </div>
+    </div>
+  );
+}
+
+function ClawdiaEmptyState({
+  onSend,
+}: {
+  onSend: (text: string) => void;
+}) {
+  const accent = '#e2e8f0';
+  const accentDim = 'rgba(226,232,240,0.7)';
+  const accentBg = 'rgba(226,232,240,0.08)';
+
+  const sections = [
+    {
+      label: 'Desktop automation',
+      examples: [
+        'Open Photoshop, load my file, export it as a 300dpi PDF, and close it.',
+        'Launch OBS, set up my stream scene, and go live on my Twitch session.',
+        'Navigate the app menu to find the export option and fill in the dialog.',
+      ],
+    },
+    {
+      label: 'Browser + authenticated sessions',
+      examples: [
+        'Log into my dashboard using my saved session and pull this week\'s data.',
+        'Go through my open tabs, find duplicates, and summarize what each one is.',
+        'Use my signed-in account to grab all my invoices from this month.',
+      ],
+    },
+    {
+      label: 'Desktop + browser combined',
+      examples: [
+        'Open my email in the browser, read the brief, then create the file on disk.',
+        'Watch what\'s on my screen right now and tell me what needs attention.',
+      ],
+    },
+    {
+      label: 'Code + terminal',
+      examples: [
+        'Run my tests, trace what\'s failing, and fix it without me touching anything.',
+        'Search this entire codebase for where this bug originates and patch it.',
+      ],
+    },
+    {
+      label: 'Cross-system',
+      examples: [
+        'Learn this app\'s interface, map every button, and tell me what it can do.',
+        'Check my running apps, see what\'s using the most memory, and fix it.',
+      ],
+    },
+  ];
+
+  return (
+    <div className="flex items-start px-1 pt-6 pb-10 text-left text-white">
+      <div className="w-full">
+
+        {/* Title block */}
+        <div className="mb-1">
+          <div className="font-mono text-[11px] font-semibold uppercase tracking-[0.22em] mb-2" style={{ color: 'rgba(226,232,240,0.5)' }}>
+            Clawdia
+          </div>
+          <h1 className="font-mono text-[22px] font-bold leading-[1.2] tracking-[-0.02em] text-white/90">
+            Where models get to work.
+          </h1>
+        </div>
+
+        {/* Divider */}
+        <div className="mt-4 mb-5 h-px w-12" style={{ backgroundColor: accentBg }} />
+
+        {/* Description */}
+        <p className="text-[13.5px] leading-[1.75] text-white/58">
+          Connect any model to your desktop apps, browser sessions, local files, and terminal — and let it get things done.
+        </p>
+
+        {/* Sections */}
+        <div className="mt-6 flex flex-col gap-2">
+          <div className="mb-1 text-[10px] font-semibold uppercase tracking-[0.2em] text-white/30">
+            Try asking
+          </div>
+          {sections.map((section) => (
+            <details key={section.label} className="group/sec w-full">
+              <summary className="flex cursor-pointer list-none items-center gap-2 py-1 text-[14px] font-semibold uppercase tracking-[0.1em] text-white/28 transition-colors hover:text-white/60 select-none w-fit">
+                <span className="font-mono text-[11px] inline-block group-open/sec:[content:'▾']">▸</span>
+                <span>{section.label}</span>
+              </summary>
+              <div className="mt-1.5 mb-2 flex flex-col gap-1.5 pl-4 border-l border-white/8">
+                {section.examples.map((example) => (
+                  <button
+                    key={example}
+                    type="button"
+                    onClick={() => onSend(example)}
+                    className="group/ex flex w-fit max-w-full items-baseline gap-2.5 text-left focus:outline-none"
+                  >
+                    <span className="font-mono text-[13px] text-white/20 transition-colors group-hover/ex:text-white/40 select-none leading-none">—</span>
+                    <span
+                      className="transition-colors border-b border-transparent group-hover/ex:border-white/15"
+                      style={{ color: accentDim, fontSize: '15px', lineHeight: '1.65' }}
+                      onMouseEnter={e => (e.currentTarget.style.color = accent)}
+                      onMouseLeave={e => (e.currentTarget.style.color = accentDim)}
+                    >
+                      {example}
+                    </span>
+                  </button>
+                ))}
+              </div>
+            </details>
+          ))}
+        </div>
+
+      </div>
+    </div>
+  );
+}
+
+function ClaudeCodeEmptyState({
+  onSend,
+}: {
+  onSend: (text: string) => void;
+}) {
+  const examples = [
+    'Review this codebase and suggest architectural improvements.',
+    'Write tests for the current module and fix any failures.',
+    'Refactor this file to follow consistent naming conventions.',
+    'Find and fix the bug causing the failing test.',
+  ];
+
+  const accent = '#f4a35a';
+
+  return (
+    <div className="flex flex-col items-center justify-center h-full w-full py-8 text-white select-none">
+
+      {/* Wordmark */}
+      <div className="flex flex-col items-center gap-[5px] mb-10">
+        <div className="flex items-center gap-[9px]">
+          {/* Anthropic asterisk */}
+          <svg width="24" height="24" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+            <g stroke="#f4a35a" strokeWidth="2.2" strokeLinecap="round">
+              <line x1="12" y1="2" x2="12" y2="22"/>
+              <line x1="2" y1="12" x2="22" y2="12"/>
+              <line x1="4.93" y1="4.93" x2="19.07" y2="19.07"/>
+              <line x1="19.07" y1="4.93" x2="4.93" y2="19.07"/>
+            </g>
+          </svg>
+          <span style={{ fontSize: 20, fontWeight: 600, color: 'rgba(255,255,255,0.92)', letterSpacing: '-0.02em' }}>
+            Claude Code
+          </span>
+        </div>
+        <span className="font-mono" style={{ fontSize: 9.5, letterSpacing: '0.2em', textTransform: 'uppercase', color: `${accent}73` }}>
+          powered by Clawdia
+        </span>
+      </div>
+
+      {/* Pixel robot mascot */}
+      <svg
+        width="72"
+        height="72"
+        viewBox="0 0 16 16"
+        xmlns="http://www.w3.org/2000/svg"
+        style={{ imageRendering: 'pixelated', marginBottom: 28 }}
+      >
+        {/* Antenna */}
+        <rect x="7" y="0" width="2" height="2" fill={accent}/>
+        {/* Head */}
+        <rect x="4" y="2" width="8" height="5" fill={accent}/>
+        {/* Eyes */}
+        <rect x="5" y="3" width="2" height="2" fill="#0e0e12"/>
+        <rect x="9" y="3" width="2" height="2" fill="#0e0e12"/>
+        {/* Mouth */}
+        <rect x="5" y="6" width="6" height="1" fill="#0e0e12"/>
+        {/* Body */}
+        <rect x="3" y="5" width="10" height="8" fill={accent}/>
+        {/* Arms */}
+        <rect x="0" y="6" width="3" height="2" fill={accent}/>
+        <rect x="13" y="6" width="3" height="2" fill={accent}/>
+        {/* Legs */}
+        <rect x="4" y="13" width="2" height="3" fill={accent}/>
+        <rect x="10" y="13" width="2" height="3" fill={accent}/>
+      </svg>
+
+      {/* Suggestions */}
+      <div className="flex flex-col items-center gap-[6px] w-full" style={{ maxWidth: 400 }}>
+        {examples.map((example) => (
+          <button
+            key={example}
+            type="button"
+            onClick={() => onSend(example)}
+            className="w-full text-center focus:outline-none"
+            style={{
+              fontSize: 13,
+              color: 'rgba(255,255,255,0.42)',
+              background: 'rgba(255,255,255,0.03)',
+              borderRadius: 8,
+              padding: '8px 16px',
+              transition: 'background 0.15s, color 0.15s',
+              cursor: 'pointer',
+              border: 'none',
+            }}
+            onMouseEnter={e => {
+              (e.currentTarget as HTMLButtonElement).style.background = `${accent}14`;
+              (e.currentTarget as HTMLButtonElement).style.color = `${accent}e6`;
+            }}
+            onMouseLeave={e => {
+              (e.currentTarget as HTMLButtonElement).style.background = 'rgba(255,255,255,0.03)';
+              (e.currentTarget as HTMLButtonElement).style.color = 'rgba(255,255,255,0.42)';
+            }}
+          >
+            {example}
+          </button>
+        ))}
+      </div>
+
+    </div>
+  );
+}
 
 function extractHostname(detail: string): string | null {
   const match = detail?.match(/https?:\/\/([^/\s]+)/);
@@ -547,6 +1023,9 @@ export default function ChatPanel({
   onConversationTitleResolved,
 }: ChatPanelProps) {
   const MIN_THINKING_VISIBLE_MS = 2400;
+  const DEFAULT_CHAT_ZOOM = 100;
+  const MIN_CHAT_ZOOM = 80;
+  const MAX_CHAT_ZOOM = 160;
   const [historyMode, setHistoryMode] = useState(false);
   const [messages, setMessages] = useState<Message[]>([]);
   const [isStreaming, setIsStreaming] = useState(false);
@@ -565,6 +1044,9 @@ export default function ChatPanel({
   const [promptDebug, setPromptDebug] = useState<PromptDebugSnapshot | null>(null);
   const [promptDebugOpen, setPromptDebugOpen] = useState(true);
   const [activeStreamMode, setActiveStreamMode] = useState<'chat' | 'claude_terminal' | 'codex_terminal'>('chat');
+  const [chatZoom, setChatZoom] = useState(DEFAULT_CHAT_ZOOM);
+  const activeStreamModeRef = useRef<'chat' | 'claude_terminal' | 'codex_terminal'>('chat');
+  const chatRootRef = useRef<HTMLDivElement>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
   // Flat append-only feed — each item appended once, never moved
   const feedRef = useRef<FeedItem[]>([]);
@@ -598,6 +1080,22 @@ export default function ChatPanel({
       thinkingAdvanceTimeoutRef.current = null;
     }
   }, []);
+
+  const applyChatZoom = useCallback((nextZoom: number) => {
+    setChatZoom(Math.max(MIN_CHAT_ZOOM, Math.min(MAX_CHAT_ZOOM, nextZoom)));
+  }, []);
+
+  const handleChatZoomIn = useCallback(() => {
+    applyChatZoom(chatZoom + 10);
+  }, [applyChatZoom, chatZoom]);
+
+  const handleChatZoomOut = useCallback(() => {
+    applyChatZoom(chatZoom - 10);
+  }, [applyChatZoom, chatZoom]);
+
+  const handleChatZoomReset = useCallback(() => {
+    applyChatZoom(DEFAULT_CHAT_ZOOM);
+  }, [applyChatZoom]);
 
   const flushStreamUpdate = useCallback(() => {
     if (!assistantMsgIdRef.current) return;
@@ -639,6 +1137,49 @@ export default function ChatPanel({
     return assistantId;
   }, []);
 
+  useEffect(() => {
+    activeStreamModeRef.current = activeStreamMode;
+  }, [activeStreamMode]);
+
+  useEffect(() => {
+    const root = chatRootRef.current;
+    if (!root || historyMode) return;
+
+    const handleWheel = (event: WheelEvent) => {
+      if (!event.ctrlKey && !event.metaKey) return;
+      event.preventDefault();
+      if (event.deltaY < 0) handleChatZoomIn();
+      else if (event.deltaY > 0) handleChatZoomOut();
+    };
+
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (!event.ctrlKey && !event.metaKey) return;
+      if (event.altKey) return;
+
+      if (event.key === '=' || event.key === '+') {
+        event.preventDefault();
+        handleChatZoomIn();
+        return;
+      }
+      if (event.key === '-' || event.key === '_') {
+        event.preventDefault();
+        handleChatZoomOut();
+        return;
+      }
+      if (event.key === '0') {
+        event.preventDefault();
+        handleChatZoomReset();
+      }
+    };
+
+    root.addEventListener('wheel', handleWheel, { passive: false });
+    root.addEventListener('keydown', handleKeyDown, true);
+    return () => {
+      root.removeEventListener('wheel', handleWheel);
+      root.removeEventListener('keydown', handleKeyDown, true);
+    };
+  }, [handleChatZoomIn, handleChatZoomOut, handleChatZoomReset, historyMode]);
+
   const handleStreamTextChunk = useCallback((chunk: string) => {
     ensureAssistantReplayMessage();
     // Clear shimmer when real text arrives so they don't overlap
@@ -652,7 +1193,10 @@ export default function ChatPanel({
     }
 
     const lastIdx = feedRef.current.length - 1;
-    if (lastIdx >= 0 && feedRef.current[lastIdx].kind === 'text') {
+    const shouldSeparateTerminalChunks =
+      activeStreamModeRef.current === 'claude_terminal' || activeStreamModeRef.current === 'codex_terminal';
+
+    if (!shouldSeparateTerminalChunks && lastIdx >= 0 && feedRef.current[lastIdx].kind === 'text') {
       const last = feedRef.current[lastIdx] as { kind: 'text'; text: string; isStreaming?: boolean };
       feedRef.current[lastIdx] = { kind: 'text', text: last.text + chunk, isStreaming: true };
     } else {
@@ -981,12 +1525,9 @@ export default function ChatPanel({
     const nextMode = conversationMode === 'claude_terminal' ? 'chat' : 'claude_terminal';
     const result = await api.chat.setMode(conversationId, nextMode);
     if (result?.error) return;
-    if (nextMode === 'claude_terminal' && !terminalOpen) {
-      onToggleTerminal();
-    }
     setConversationMode(nextMode);
     setClaudeStatus(result.claudeTerminalStatus || (nextMode === 'claude_terminal' ? 'idle' : 'stopped'));
-  }, [conversationMode, loadConversationId, loadedConversationId, onToggleTerminal, terminalOpen]);
+  }, [conversationMode, loadConversationId, loadedConversationId]);
 
   const handleToggleCodexMode = useCallback(async () => {
     const api = (window as any).clawdia;
@@ -1032,7 +1573,10 @@ export default function ChatPanel({
 
     setTimeout(() => {
       setMessages(prev => [...prev, {
-        id: assistantId, role: 'assistant', content: '',
+        id: assistantId,
+        role: 'assistant',
+        type: conversationMode === 'chat' ? 'chat' : 'terminal_transcript',
+        content: '',
         timestamp: new Date().toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' }),
         isStreaming: true,
       }]);
@@ -1052,13 +1596,23 @@ export default function ChatPanel({
 
       if (result.error) {
         setMessages(prev => prev.map(m =>
-          m.id === assistantId ? { ...m, content: `⚠️ ${result.error}`, isStreaming: false, feed: [], toolCalls: [] } : m
+          m.id === assistantId
+            ? {
+                ...m,
+                type: conversationMode === 'chat' ? m.type : 'terminal_transcript',
+                content: `⚠️ ${result.error}`,
+                isStreaming: false,
+                feed: [],
+                toolCalls: [],
+              }
+            : m
         ));
       } else {
         setMessages(prev => prev.map(m =>
           m.id === assistantId
             ? {
                 ...m,
+                type: conversationMode === 'chat' ? m.type : 'terminal_transcript',
                 content: finalContent,
                 toolCalls: finalTools,
                 feed: finalFeed,
@@ -1193,9 +1747,24 @@ export default function ChatPanel({
     ? String(workflowPlanApproval.request.plan)
     : workflowPlanDraft;
   const nonWorkflowApproval = pendingApprovals.find((approval) => approval.actionType !== 'workflow_plan');
+  const showCodexEmptyState =
+    conversationMode === 'codex_terminal'
+    && messages.length === 0
+    && !isStreaming
+    && !historyMode;
+  const showClaudeCodeEmptyState =
+    conversationMode === 'claude_terminal'
+    && messages.length === 0
+    && !isStreaming
+    && !historyMode;
+  const showClawdiaEmptyState =
+    conversationMode === 'chat'
+    && messages.length === 0
+    && !isStreaming
+    && !historyMode;
 
   return (
-    <div className="flex flex-col h-full">
+    <div ref={chatRootRef} className="flex flex-col h-full">
       <TabStrip
         tabs={tabs}
         activeTabId={activeTabId}
@@ -1210,6 +1779,29 @@ export default function ChatPanel({
           background: '#09090c',
         }}
       >
+        <div className="no-drag mr-1 flex items-center gap-1 rounded-lg border border-white/[0.06] bg-white/[0.03] px-1 py-0.5">
+          <button
+            onClick={handleChatZoomOut}
+            title="Zoom out chat"
+            className="flex h-7 w-7 items-center justify-center rounded-md text-[12px] text-text-secondary transition-colors hover:bg-white/[0.06] hover:text-text-primary"
+          >
+            -
+          </button>
+          <button
+            onClick={handleChatZoomReset}
+            title="Reset chat zoom"
+            className="rounded-md px-2 py-1 text-[11px] text-text-secondary transition-colors hover:bg-white/[0.06] hover:text-text-primary"
+          >
+            {chatZoom}%
+          </button>
+          <button
+            onClick={handleChatZoomIn}
+            title="Zoom in chat"
+            className="flex h-7 w-7 items-center justify-center rounded-md text-[12px] text-text-secondary transition-colors hover:bg-white/[0.06] hover:text-text-primary"
+          >
+            +
+          </button>
+        </div>
         <button
           onClick={() => setHistoryMode(m => !m)}
           title={historyMode ? 'Close history' : 'Chat history'}
@@ -1257,12 +1849,34 @@ export default function ChatPanel({
         </div>
       ) : (
         <div ref={scrollRef} onScroll={handleScroll} className="flex-1 overflow-y-auto overflow-x-hidden scroll-smooth">
-          <div className="flex flex-col gap-4 px-4 pt-5 pb-8 max-w-[720px]">
+          <div
+            className={`flex max-w-[720px] flex-col px-4 pt-5 pb-8 ${showCodexEmptyState || showClaudeCodeEmptyState || showClawdiaEmptyState ? '' : 'gap-4'}`}
+            style={{ zoom: chatZoom / 100 }}
+          >
+            {showClawdiaEmptyState && (
+              <ClawdiaEmptyState onSend={(text) => { void handleSend(text); }} />
+            )}
+            {showCodexEmptyState && (
+              <CodexEmptyState onSend={(text) => { void handleSend(text); }} />
+            )}
+            {showClaudeCodeEmptyState && (
+              <ClaudeCodeEmptyState onSend={(text) => { void handleSend(text); }} />
+            )}
             {messages.map(msg =>
               msg.type === 'pipeline'
               ? <PipelineBlock key={msg.id} />
               : msg.role === 'assistant'
-              ? <AssistantMessage key={msg.id} message={msg} shimmerText={msg.isStreaming ? shimmerText : undefined} streamMode={msg.isStreaming ? activeStreamMode : 'chat'} />
+              ? (
+                <AssistantMessage
+                  key={msg.id}
+                  message={msg}
+                  shimmerText={msg.isStreaming ? shimmerText : undefined}
+                  streamMode={msg.isStreaming ? activeStreamMode : conversationMode}
+                  onOpenTerminal={() => {
+                    if (!terminalOpen) onToggleTerminal();
+                  }}
+                />
+              )
               : <UserMessage key={msg.id} message={msg} />
             )}
             {pendingApprovalRunId && nonWorkflowApproval && (
