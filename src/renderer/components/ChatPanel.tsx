@@ -977,18 +977,9 @@ function toolToShimmerLabel(name: string, detail?: string): string {
 
 function InlineShimmer({ text }: { text: string }) {
   return (
-    <div className="flex flex-col gap-2 py-0.5">
-      <div
-        className="thinking-shimmer-line h-[2px] w-full max-w-md rounded-full"
-        aria-hidden
-      />
-      <div className="flex items-start gap-2.5">
-        <span
-          className="mt-1.5 h-2 w-2 shrink-0 rounded-full bg-accent/85 shadow-[0_0_12px_rgba(99,102,241,0.45)] animate-pulse"
-          aria-hidden
-        />
-        <span className="inline-shimmer leading-relaxed line-clamp-1 overflow-hidden text-ellipsis">{text}</span>
-      </div>
+    <div className="flex items-center gap-2 py-1">
+      <span className="text-text-secondary text-[14px] flex-shrink-0" aria-hidden>✱</span>
+      <span className="inline-shimmer leading-relaxed line-clamp-1 overflow-hidden text-ellipsis">{text}</span>
     </div>
   );
 }
