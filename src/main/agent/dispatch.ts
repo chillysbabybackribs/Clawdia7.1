@@ -2,6 +2,8 @@
 import { executeShellTool } from '../core/cli/shellTools';
 import { executeBrowserTool } from '../core/cli/browserTools';
 import { truncateBrowserResult } from '../core/cli/truncate';
+import { executeGuiInteract } from '../core/desktop';
+import { executeDbusControl } from '../core/desktop/dbus';
 import { trackToolCall, trackToolResult } from '../runTracker';
 import type { DispatchContext, ToolUseBlock, ToolCallRecord } from './types';
 
@@ -17,6 +19,11 @@ const BROWSER_TOOL_NAMES = new Set([
   'browser_new_tab', 'browser_switch_tab', 'browser_list_tabs',
   'browser_select', 'browser_hover', 'browser_key_press',
   'browser_close_tab', 'browser_get_element_text', 'browser_back', 'browser_forward',
+]);
+
+const DESKTOP_TOOL_NAMES = new Set([
+  'gui_interact',
+  'dbus_control',
 ]);
 
 export async function dispatch(
@@ -59,6 +66,7 @@ async function executeOne(
     name: block.name,
     status: 'running',
     detail: argsSummary,
+    input: JSON.stringify(block.input, null, 2),
   });
 
   let result: string;
@@ -79,6 +87,7 @@ async function executeOne(
     name: block.name,
     status: isError ? 'error' : 'success',
     detail: result.slice(0, 200),
+    output: result,
     durationMs,
   });
 
@@ -100,6 +109,15 @@ async function routeToolExecution(
     }
     const output = await executeBrowserTool(block.name, block.input, browserService);
     return truncateBrowserResult(JSON.stringify(output));
+  }
+
+  if (DESKTOP_TOOL_NAMES.has(block.name)) {
+    if (block.name === 'gui_interact') {
+      return executeGuiInteract(block.input);
+    }
+    if (block.name === 'dbus_control') {
+      return executeDbusControl(block.input);
+    }
   }
 
   return JSON.stringify({ ok: false, error: `Unknown tool: ${block.name}` });

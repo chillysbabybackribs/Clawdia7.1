@@ -152,7 +152,6 @@ export async function streamGeminiChat({
                 if (signal.aborted) throw new Error('AbortError');
                 if (chunk.text) {
                     turnText += chunk.text;
-                    sendText(chunk.text);
                 }
                 if (chunk.functionCalls && chunk.functionCalls.length > 0) {
                     functionCalls.push(...chunk.functionCalls);
@@ -176,7 +175,16 @@ export async function streamGeminiChat({
             finalResponseText += turnText;
 
             if (functionCalls.length === 0) {
-                break; // Done, no tools called
+                // Final turn — stream as real text content
+                if (turnText) sendText(turnText);
+                break;
+            }
+
+            // Intermediate turn: route narration to shimmer/thinking instead of
+            // content area so it shows as a single rotating status line.
+            if (turnText) {
+                const line = turnText.trim().split(/[\n\r]/)[0].replace(/^[-*>#]+\s*/, '').trim();
+                if (line) sendThinking(line.length > 80 ? line.slice(0, 77) + '…' : line);
             }
 
             // Execute tool calls
@@ -189,7 +197,7 @@ export async function streamGeminiChat({
                 const argsSummary = JSON.stringify(fc.args).slice(0, 120);
                 const eventId = (runId && fc.name !== 'search_tools') ? trackToolCall(runId, fc.name, argsSummary) : '';
 
-                const tcObj = { id: tcId, name: uiName, status: 'running' as const, detail };
+                const tcObj = { id: tcId, name: uiName, status: 'running' as const, detail, input: JSON.stringify(fc.args, null, 2) };
                 allToolCalls.push(tcObj);
 
                 if (!webContents.isDestroyed()) {
@@ -291,7 +299,7 @@ export async function streamGeminiChat({
                     }
                 });
 
-                const successTcObj = { ...tcObj, status: 'success' as const, detail: resultStr.substring(0, 500) };
+                const successTcObj = { ...tcObj, status: 'success' as const, detail: resultStr.substring(0, 500), output: resultStr };
                 if (!webContents.isDestroyed()) {
                     webContents.send(IPC_EVENTS.CHAT_TOOL_ACTIVITY, successTcObj);
                 }

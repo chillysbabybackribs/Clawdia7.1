@@ -142,7 +142,6 @@ export async function streamOpenAIChat({
 
         if (delta.content) {
           turnText += delta.content;
-          sendText(delta.content);
         }
 
         // Accumulate streamed tool call arguments
@@ -180,7 +179,18 @@ export async function streamOpenAIChat({
       }
       loopMessages.push(assistantMsg);
 
-      if (toolCalls.length === 0) break;
+      if (toolCalls.length === 0) {
+        // Final turn — stream as real text content
+        if (turnText) sendText(turnText);
+        break;
+      }
+
+      // Intermediate turn: route narration to shimmer/thinking instead of
+      // content area so it shows as a single rotating status line.
+      if (turnText) {
+        const line = turnText.trim().split(/[\n\r]/)[0].replace(/^[-*>#]+\s*/, '').trim();
+        if (line) sendThinking(line.length > 80 ? line.slice(0, 77) + '…' : line);
+      }
 
       // Execute tools and push results
       for (const [idx, tc] of Object.entries(toolCallAccumulators)) {
@@ -199,6 +209,7 @@ export async function streamOpenAIChat({
             name: tc.name,
             status: 'running',
             detail: tc.args.slice(0, 200),
+            input: tc.args,
           });
         }
 
@@ -256,6 +267,8 @@ export async function streamOpenAIChat({
             name: tc.name,
             status: 'success',
             detail: resultStr.slice(0, 200),
+            input: tc.args,
+            output: resultStr,
             durationMs,
           });
         }

@@ -93,6 +93,75 @@ import { exec } from 'child_process';
 import { promisify } from 'util';
 const execAsync = promisify(exec);
 
+const ANTHROPIC_MAX_RETRIES = 3;
+
+function sleep(ms: number, signal?: AbortSignal): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(resolve, ms);
+    if (!signal) return;
+    const onAbort = () => {
+      clearTimeout(timer);
+      reject(new Error('AbortError'));
+    };
+    if (signal.aborted) {
+      onAbort();
+      return;
+    }
+    signal.addEventListener('abort', onAbort, { once: true });
+  });
+}
+
+function getAnthropicRequestId(err: unknown): string | null {
+  if (!err || typeof err !== 'object') return null;
+  const requestId = (err as { request_id?: unknown }).request_id;
+  return typeof requestId === 'string' ? requestId : null;
+}
+
+function isRetryableAnthropicError(err: unknown): boolean {
+  if (!(err instanceof Error)) return false;
+  const status = (err as { status?: unknown }).status;
+  const code = (err as { code?: unknown }).code;
+  if (typeof status === 'number' && status >= 500) return true;
+  if (code === 'ECONNRESET' || code === 'ETIMEDOUT' || code === 'ECONNREFUSED') return true;
+  return err.name === 'InternalServerError' || err.name === 'APIConnectionError' || err.name === 'APIConnectionTimeoutError';
+}
+
+function formatAnthropicError(err: unknown): Error {
+  if (err instanceof Error) {
+    const requestId = getAnthropicRequestId(err);
+    if (requestId && !err.message.includes(requestId)) {
+      return new Error(`${err.message} (request_id: ${requestId})`);
+    }
+    return err;
+  }
+  return new Error(String(err));
+}
+
+async function withAnthropicRetry<T>(
+  work: () => Promise<T>,
+  signal: AbortSignal | undefined,
+  label: string,
+): Promise<T> {
+  let lastErr: unknown;
+  for (let attempt = 1; attempt <= ANTHROPIC_MAX_RETRIES; attempt++) {
+    try {
+      return await work();
+    } catch (err) {
+      lastErr = err;
+      if ((err as Error)?.name === 'AbortError' || !isRetryableAnthropicError(err) || attempt === ANTHROPIC_MAX_RETRIES) {
+        throw formatAnthropicError(err);
+      }
+      const requestId = getAnthropicRequestId(err);
+      console.warn(
+        `[anthropic] transient ${label} failure on attempt ${attempt}/${ANTHROPIC_MAX_RETRIES}`
+          + `${requestId ? ` request_id=${requestId}` : ''}: ${(err as Error).message}`,
+      );
+      await sleep(400 * attempt, signal);
+    }
+  }
+  throw formatAnthropicError(lastErr);
+}
+
 async function executeToolCall(block: Anthropic.ToolUseBlock): Promise<string> {
   try {
     if (block.name === 'bash') {
@@ -160,7 +229,7 @@ export async function streamAnthropicChat({
 
   const tryThinking = modelSupportsExtendedThinking(apiModelId);
 
-  const messagesForRequest: Anthropic.MessageParam[] = [...sessionMessages, userMessage];
+  const messagesForRequest: Anthropic.MessageParam[] = [...sessionMessages, userMessage].filter((m: any) => m.role !== 'tool') as Anthropic.MessageParam[];
 
   const runStream = async (withThinking: boolean): Promise<string> => {
     const budget = checkBudget(1); // Check with 1 cent minimum
@@ -196,7 +265,11 @@ export async function streamAnthropicChat({
       };
     }
 
-    const stream = client.messages.stream(body, { signal });
+    const stream = await withAnthropicRetry(
+      async () => client.messages.stream(body, { signal }),
+      signal,
+      'stream',
+    );
 
     let fullText = '';
     let sawThinking = false;
@@ -210,7 +283,14 @@ export async function streamAnthropicChat({
       const t = delta.trim();
       if (t) {
         sawThinking = true;
-        sendThinking(t);
+        // Extract a clean, short status line from raw reasoning text.
+        // Take only the first sentence/line, strip markdown artifacts,
+        // and cap length so the shimmer UI stays readable.
+        const firstLine = t.split(/[\n\r]/)[0].replace(/^[-*>#]+\s*/, '').trim();
+        const display = firstLine.length > 80
+          ? firstLine.slice(0, 77) + '…'
+          : firstLine;
+        if (display) sendThinking(display);
       }
     });
 
@@ -281,7 +361,11 @@ export async function streamAnthropicChat({
         ...deferredBrowserTools,
       ] as any,
     };
-    return client.messages.create(body, { signal });
+    return withAnthropicRetry(
+      async () => client.messages.create(body, { signal }),
+      signal,
+      'message.create',
+    );
   };
 
   const SHELL_TOOL_NAMES = new Set(['shell_exec', 'file_edit', 'file_list_directory', 'file_search']);
@@ -346,6 +430,16 @@ export async function streamAnthropicChat({
       }
       // ── End policy gate ──────────────────────────────────────────────────
 
+      if (!webContents.isDestroyed()) {
+        webContents.send(IPC_EVENTS.CHAT_TOOL_ACTIVITY, {
+          id: block.id,
+          name: block.name,
+          status: 'running',
+          detail: argsSummary,
+          input: JSON.stringify(block.input, null, 2),
+        });
+      }
+
       try {
         if (SHELL_TOOL_NAMES.has(block.name)) {
           resultContent = await executeShellTool(block.name, block.input as Record<string, unknown>);
@@ -378,6 +472,8 @@ export async function streamAnthropicChat({
           name: block.name,
           status: isError ? 'error' : 'success',
           detail: resultContent.slice(0, 200),
+          input: JSON.stringify(block.input, null, 2),
+          output: resultContent,
           durationMs,
         });
       }
@@ -427,22 +523,29 @@ export async function streamAnthropicChat({
           (b): b is Anthropic.TextBlock => b.type === 'text',
         );
 
-        // Stream any text content to the renderer
-        for (const block of textBlocks) {
-          if (block.text) {
-            assistantText += block.text;
-            if (!webContents.isDestroyed()) {
-              webContents.send(IPC_EVENTS.CHAT_STREAM_TEXT, block.text);
-            }
-          }
-        }
-
         // Append assistant turn to loop messages
         loopMessages.push({ role: 'assistant', content: response.content });
 
-        // If no tool calls, we're done
+        // If no tool calls this is the final response — stream as real text
         if (toolUseBlocks.length === 0) {
+          for (const block of textBlocks) {
+            if (block.text) {
+              assistantText += block.text;
+              sendText(block.text);
+            }
+          }
           break;
+        }
+
+        // Intermediate turn: model is narrating between tool calls ("Let me
+        // check X…"). Route to shimmer/thinking instead of content area so it
+        // shows as a single rotating status line, not a growing paragraph.
+        for (const block of textBlocks) {
+          if (block.text) {
+            assistantText += block.text;
+            const line = block.text.trim().split(/[\n\r]/)[0].replace(/^[-*>#]+\s*/, '').trim();
+            if (line) sendThinking(line.length > 80 ? line.slice(0, 77) + '…' : line);
+          }
         }
 
         // Execute tools and append results
@@ -505,17 +608,24 @@ export async function streamAnthropicLLM(
   tools: Anthropic.Tool[],
   options: LoopOptions,
 ): Promise<LLMTurn> {
-  const client = new Anthropic({ apiKey: options.apiKey });
+  const client = new Anthropic({ apiKey: options.apiKey, timeout: 120_000 });
+
+  // Filter out OpenAI-format tool messages (role: 'tool') which are invalid for Anthropic
+  const anthropicMessages = (messages as any[]).filter((m: any) => m.role !== 'tool') as Anthropic.MessageParam[];
 
   const body: Anthropic.MessageCreateParams = {
     model: options.model,
     max_tokens: 8192,
-    messages,
+    messages: anthropicMessages,
     system: systemPrompt,
     tools: tools as Anthropic.Tool[],
   };
 
-  const response = await client.messages.create(body, { signal: options.signal });
+  const response = await withAnthropicRetry(
+    async () => client.messages.create(body, { signal: options.signal }),
+    options.signal,
+    'message.create',
+  );
 
   const textBlocks = response.content.filter((b): b is Anthropic.TextBlock => b.type === 'text');
   const toolUseBlocks = response.content.filter((b): b is Anthropic.ToolUseBlock => b.type === 'tool_use');
