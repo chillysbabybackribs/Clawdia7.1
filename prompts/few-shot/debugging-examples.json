@@ -1,0 +1,73 @@
+{
+  "examples": [
+    {
+      "id": "async-error-1",
+      "type": "debugging",
+      "category": "async-await",
+      "input": {
+        "error": "Cannot read property 'status' of undefined",
+        "code": "const response = await fetch(url);\nconst data = response.json();",
+        "context": "Fetching data from API"
+      },
+      "expected_output": {
+        "issue_summary": "response might be undefined or error handling is missing",
+        "analysis": "fetch() doesn't reject on HTTP errors, must check response.ok",
+        "solution": "const response = await fetch(url);\nif (!response.ok) throw new Error(`HTTP ${response.status}`);\nconst data = await response.json();",
+        "explanation": "fetch() resolves even on 404/500. Always check response.ok and await json().",
+        "prevention": "Use try/catch for error handling and always validate API responses"
+      }
+    },
+    
+    {
+      "id": "null-ref-1",
+      "type": "debugging",
+      "category": "null-safety",
+      "input": {
+        "error": "Cannot read property 'map' of undefined",
+        "code": "const items = await getItems();\nreturn items.map(item => item.name);",
+        "context": "Processing API response"
+      },
+      "expected_output": {
+        "issue_summary": "items could be undefined/null",
+        "analysis": "API response might not include expected structure",
+        "solution": "const items = await getItems();\nif (!Array.isArray(items)) return [];\nreturn items.map(item => item.name);",
+        "explanation": "Always validate array type before calling .map()",
+        "prevention": "Add type guards and defensive checks for external data"
+      }
+    },
+    
+    {
+      "id": "react-render-1",
+      "type": "debugging",
+      "category": "react-performance",
+      "input": {
+        "problem": "Component re-renders on every parent update",
+        "code": "function ChildComponent(props) {\n  return <div>{props.value}</div>;\n}",
+        "context": "Child component receiving props from parent"
+      },
+      "expected_output": {
+        "issue_summary": "Component not memoized, rerenders unnecessarily",
+        "solution": "const ChildComponent = React.memo(function Child(props) {\n  return <div>{props.value}</div>;\n});",
+        "explanation": "React.memo prevents re-renders when props haven't changed",
+        "prevention": "Use memo for components passed simple props, useCallback for functions"
+      }
+    },
+    
+    {
+      "id": "type-safety-1",
+      "type": "debugging",
+      "category": "typescript",
+      "input": {
+        "error": "Type 'string | undefined' is not assignable to type 'string'",
+        "code": "const name: string = getValue();",
+        "context": "Function returning optional value"
+      },
+      "expected_output": {
+        "issue_summary": "Function might return undefined",
+        "solution": "const name: string | undefined = getValue();\n// or\nconst name: string = getValue() ?? 'default';",
+        "explanation": "Type system ensures null safety",
+        "prevention": "Use strict TypeScript settings, handle optional values explicitly"
+      }
+    }
+  ]
+}

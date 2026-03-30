@@ -124,12 +124,13 @@ export default function IdentitySection() {
     setCredentials(list || []);
   };
 
-  const accessPill = (accessType: 'session' | 'vault' | 'managed') => {
-    const config = {
+  const accessPill = (accessType: string) => {
+    const config = ({
       session: { color: 'text-[#4ade80]', bg: 'bg-[#4ade80]/10', label: 'Session' },
       vault:   { color: 'text-[#fbbf24]', bg: 'bg-[#fbbf24]/10', label: 'Vault' },
       managed: { color: 'text-accent',    bg: 'bg-accent/10',    label: 'Managed' },
-    }[accessType];
+    } as Record<string, { color: string; bg: string; label: string }>)[accessType]
+      ?? { color: 'text-text-muted', bg: 'bg-white/5', label: accessType };
     return (
       <span className={`inline-flex items-center gap-1.5 text-[11px] px-2 py-0.5 rounded-full ${config.bg} ${config.color}`}>
         <span className="w-1.5 h-1.5 rounded-full bg-current" />

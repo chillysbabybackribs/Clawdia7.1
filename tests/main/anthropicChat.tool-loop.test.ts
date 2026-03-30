@@ -5,6 +5,66 @@
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
+// ── Mock electron (not available in Node/Vitest env) ────────────────────────
+vi.mock('electron', () => ({
+  app: {
+    getPath: vi.fn(() => '/tmp/clawdia-test'),
+    isReady: vi.fn(() => true),
+  },
+  ipcMain: { handle: vi.fn(), on: vi.fn() },
+  ipcRenderer: { on: vi.fn(), send: vi.fn() },
+}));
+
+// ── Mock policy engine to always allow (no DB needed in unit tests) ──────────
+vi.mock('../../src/main/agent/policy-engine', () => ({
+  evaluatePolicy: vi.fn(() => ({
+    effect: 'allow',
+    reason: 'Test: policy engine mocked to allow all',
+    ruleId: null,
+    profileId: 'test',
+    profileName: 'Test',
+  })),
+}));
+
+// ── Mock spending budget — always allow ──────────────────────────────────────
+vi.mock('../../src/main/agent/spending-budget', () => ({
+  checkBudget: vi.fn(() => ({ allowed: true, remaining: 9999, blockedBy: null })),
+  reserveEstimate: vi.fn(() => 1),
+  confirmTransaction: vi.fn(),
+  cancelReservation: vi.fn(),
+  getRemainingBudgets: vi.fn(() => []),
+}));
+
+// ── Mock memory — no facts ───────────────────────────────────────────────────
+vi.mock('../../src/main/db/memory', () => ({
+  getMemoryContext: vi.fn(() => ''),
+  remember: vi.fn(),
+  forget: vi.fn(),
+  searchMemory: vi.fn(() => []),
+}));
+
+// ── Mock renderCapabilities and desktop tools ─────────────────────────────────
+vi.mock('../../src/main/core/desktop', () => ({
+  renderCapabilities: vi.fn(async () => ({ tools: [], systemAddendum: '' })),
+  executeGuiInteract: vi.fn(async () => ({ ok: true })),
+  DESKTOP_TOOL_NAMES: new Set([]),
+}));
+
+// ── Mock system prompt builders ───────────────────────────────────────────────
+vi.mock('../../src/main/core/cli/systemPrompt', () => ({
+  buildSharedSystemPrompt: vi.fn(async () => 'You are a helpful assistant.'),
+  buildAnthropicStreamSystemPrompt: vi.fn(async () => 'You are a helpful assistant.'),
+}));
+
+// ── Mock runTracker — no DB needed ────────────────────────────────────────────
+vi.mock('../../src/main/runTracker', () => ({
+  startRun: vi.fn(() => 'mock-run-id'),
+  trackToolCall: vi.fn(() => 'mock-event-id'),
+  trackToolResult: vi.fn(),
+  completeRun: vi.fn(),
+  failRun: vi.fn(),
+}));
+
 // ── Mock @anthropic-ai/sdk ──────────────────────────────────────────────────
 const mockCreate = vi.fn();
 const mockStream = vi.fn();
@@ -209,5 +269,53 @@ describe('streamAnthropicChat — agentic tool loop', () => {
     expect(mockCreate).not.toHaveBeenCalled();
     expect(mockStream).toHaveBeenCalled();
     expect(result.response).toBe('Hello!');
+  });
+
+  it('repairs stale pending tool_use history before sending a new Anthropic request', async () => {
+    const wc = makeWebContents();
+    const sessionMessages: import('@anthropic-ai/sdk').MessageParam[] = [
+      {
+        role: 'assistant',
+        content: [{ type: 'tool_use', id: 'stale-tu', name: 'browser_get_page_state', input: {} }],
+      } as any,
+    ];
+
+    const streamObj = {
+      on: vi.fn((event: string, cb: (arg: string) => void) => {
+        if (event === 'text') cb('Recovered.');
+      }),
+      finalMessage: vi.fn().mockResolvedValue({}),
+    };
+    mockStream.mockReturnValue(streamObj);
+
+    await streamAnthropicChat({
+      ...BASE_PARAMS,
+      webContents: wc as unknown as import('electron').WebContents,
+      sessionMessages,
+    });
+
+    const body = mockStream.mock.calls[0][0];
+    expect(body.messages).toEqual([
+      {
+        role: 'assistant',
+        content: [{ type: 'tool_use', id: 'stale-tu', name: 'browser_get_page_state', input: {} }],
+      },
+      {
+        role: 'user',
+        content: [{
+          type: 'tool_result',
+          tool_use_id: 'stale-tu',
+          content: JSON.stringify({
+            status: 'interrupted',
+            reason: 'protocol_repair',
+            message: 'Tool run was interrupted before completion.',
+          }),
+        }],
+      },
+      {
+        role: 'user',
+        content: 'navigate to example.com',
+      },
+    ]);
   });
 });

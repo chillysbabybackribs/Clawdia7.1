@@ -110,28 +110,28 @@ export const BROWSER_TOOLS: Anthropic.Tool[] = [
   },
   {
     name: 'browser_new_tab',
-    description: 'Open a new browser tab, optionally navigating to a URL.',
+    description: 'Open a new browser tab, optionally navigating to a URL. This is a web page tab inside the embedded browser, not a Clawdia conversation tab.',
     input_schema: {
       type: 'object' as const,
       properties: {
-        url: { type: 'string', description: 'URL to open in the new tab (optional)' },
+        url: { type: 'string', description: 'URL to open in the new browser tab (optional)' },
       },
     },
   },
   {
     name: 'browser_switch_tab',
-    description: 'Switch to a browser tab by its ID.',
+    description: 'Switch to a browser tab by its ID. This only affects embedded web browser tabs, not conversation tabs.',
     input_schema: {
       type: 'object' as const,
       properties: {
-        id: { type: 'string', description: 'Tab ID to switch to' },
+        id: { type: 'string', description: 'Browser tab ID to switch to' },
       },
       required: ['id'],
     },
   },
   {
     name: 'browser_list_tabs',
-    description: 'List all open browser tabs with their IDs, titles, URLs, and active state.',
+    description: 'List all open browser tabs with their IDs, titles, URLs, and active state. These are embedded web browser tabs, not Clawdia conversation tabs.',
     input_schema: {
       type: 'object' as const,
       properties: {},
@@ -173,11 +173,11 @@ export const BROWSER_TOOLS: Anthropic.Tool[] = [
   },
   {
     name: 'browser_close_tab',
-    description: 'Close a browser tab by its ID. Use browser_list_tabs to get tab IDs.',
+    description: 'Close a browser tab by its ID. Use browser_list_tabs to get browser tab IDs. This does not close a conversation tab.',
     input_schema: {
       type: 'object' as const,
       properties: {
-        id: { type: 'string', description: 'Tab ID to close' },
+        id: { type: 'string', description: 'Browser tab ID to close' },
       },
       required: ['id'],
     },

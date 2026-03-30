@@ -3,9 +3,9 @@
 // Screen mapping session engine.
 //
 // Usage:
-//   const session = await beginSession({ appName: 'obs', description: 'OBS bottom panels' });
+//   const session = await beginSession({ appName: 'myapp', description: 'Main window controls' });
 //   await captureBaseline(session);
-//   await addPoint(session, { x: 22, y: 1030, label: 'Scenes + btn', action: 'click' });
+//   await addPoint(session, { x: 22, y: 1030, label: 'Add button', action: 'click' });
 //   const shot = await captureAtPoint(session, pointId);
 //   const exported = exportSession(session);          // JSON string
 //   saveSession(session, '/path/to/file.json');        // write to disk

@@ -1,6 +1,8 @@
 // src/pilot/obs/obs-verifier.ts
+import * as fs from 'fs';
+import * as os from 'os';
+import * as path from 'path';
 import { GoogleGenAI, Type } from '@google/genai';
-import { loadSettings } from '../../main/settingsStore';
 import { OBS_PILOT_CONFIG } from './obs-config';
 import type { VerifyResult } from './obs-types';
 
@@ -27,14 +29,33 @@ export function pickVerdict(result: VerifyResult): boolean {
   return result.verdict === 'ok';
 }
 
+function loadGeminiKey(): string {
+  // 1. Environment variable (for harness / Node context)
+  if (process.env.GEMINI_API_KEY) return process.env.GEMINI_API_KEY;
+  // 2. Clawdia settings file (works both in Electron and Node if path is known)
+  // Try known Electron userData paths (app name varies by version)
+  const candidates = ['clawdia7', 'Clawdia', 'clawdia'].map(
+    (name) => path.join(os.homedir(), '.config', name, 'clawdia-settings.json'),
+  );
+  const settingsPath = candidates.find((p) => fs.existsSync(p)) ?? candidates[0];
+  try {
+    const raw = fs.readFileSync(settingsPath, 'utf-8');
+    const parsed = JSON.parse(raw) as { providerKeys?: { gemini?: string } };
+    if (parsed.providerKeys?.gemini) return parsed.providerKeys.gemini;
+  } catch {
+    // fall through
+  }
+  return '';
+}
+
 async function callGemini(
   modelId: string,
   postcondition: string,
   screenshotB64: string,
   priorReason?: string,
 ): Promise<VerifyResult> {
-  const apiKey = loadSettings().providerKeys.gemini;
-  if (!apiKey) throw new Error('Gemini API key not configured in Clawdia settings');
+  const apiKey = loadGeminiKey();
+  if (!apiKey) throw new Error('Gemini API key not found — set GEMINI_API_KEY env var or configure it in Clawdia settings');
 
   const ai = new GoogleGenAI({ apiKey });
 

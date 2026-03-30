@@ -13,5 +13,6 @@
     "declaration": false,
     "sourceMap": true
   },
-  "include": ["src/main/**/*", "src/shared/**/*", "src/pilot/**/*"]
+  "include": ["src/main/**/*", "src/shared/**/*", "src/pilot/**/*"],
+  "exclude": ["src/main/core/browser/browserPreload.ts"]
 }

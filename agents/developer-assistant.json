@@ -1,0 +1,103 @@
+{
+  "id": "developer-assistant",
+  "name": "Developer Assistant",
+  "version": "1.0.0",
+  "description": "Helps developers with coding tasks, debugging, and code understanding for the Clawdia project",
+  
+  "system_prompt": {
+    "path": "../prompts/system/developer-assistant.md",
+    "priority": "high",
+    "version": "1.0"
+  },
+  
+  "capabilities": {
+    "tools": [
+      {
+        "name": "read_file",
+        "enabled": true,
+        "description": "Read project files to understand code"
+      },
+      {
+        "name": "write_file",
+        "enabled": true,
+        "description": "Create or modify files (with user approval)"
+      },
+      {
+        "name": "execute_command",
+        "enabled": true,
+        "description": "Run safe commands like npm test, npm run build"
+      },
+      {
+        "name": "analyze_code",
+        "enabled": true,
+        "description": "Perform code analysis and quality checks"
+      },
+      {
+        "name": "search_codebase",
+        "enabled": true,
+        "description": "Search for patterns in the codebase"
+      }
+    ],
+    
+    "max_tokens_output": 2048,
+    "temperature": 0.7,
+    "top_p": 0.9
+  },
+  
+  "context": {
+    "memory_type": "short-term",
+    "conversation_history_limit": 20,
+    "context_window": 8000
+  },
+  
+  "constraints": {
+    "file_operations": {
+      "allowed_paths": [
+        "./src/**",
+        "./tests/**",
+        "./prompts/**",
+        "./agents/**",
+        "./docs/**",
+        "./tools/**"
+      ],
+      "forbidden_paths": [
+        "./node_modules/**",
+        "./.git/**",
+        "./dist/**",
+        "./build/**"
+      ],
+      "require_approval": true
+    },
+    
+    "command_restrictions": {
+      "allowed_patterns": [
+        "npm test",
+        "npm run",
+        "tsc",
+        "eslint",
+        "git status",
+        "git log"
+      ],
+      "forbidden_patterns": [
+        "sudo",
+        "rm -rf",
+        "chmod",
+        "chown",
+        "git push"
+      ]
+    }
+  },
+  
+  "error_handling": {
+    "on_error": "return_error_with_context",
+    "max_retries": 3,
+    "retry_delay_ms": 1000
+  },
+  
+  "success_criteria": {
+    "code_quality": "Code passes eslint checks",
+    "testing": "Tests pass successfully",
+    "documentation": "Changes are documented",
+    "performance": "No performance regressions"
+  }
+}

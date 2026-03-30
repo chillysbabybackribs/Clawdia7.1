@@ -16,6 +16,27 @@ import type { ToolUseBlock, LLMTurn, LoopOptions } from './agent/types';
 
 type OpenAIMessage = OpenAI.Chat.ChatCompletionMessageParam;
 
+const PROTOCOL_REPAIR_RESULT = JSON.stringify({
+  status: 'interrupted',
+  reason: 'protocol_repair',
+  message: 'Tool run was interrupted before completion.',
+});
+
+/**
+ * If the last assistant message has unanswered tool_calls, inject synthetic
+ * tool result messages so the next API call doesn't fail validation.
+ */
+function repairOpenAIHistory(messages: OpenAIMessage[]): void {
+  if (messages.length === 0) return;
+  const last = messages[messages.length - 1] as any;
+  if (last.role !== 'assistant' || !Array.isArray(last.tool_calls)) return;
+  const pendingIds = (last.tool_calls as any[]).map((tc: any) => tc.id as string);
+  if (pendingIds.length === 0) return;
+  for (const id of pendingIds) {
+    messages.push({ role: 'tool', tool_call_id: id, content: PROTOCOL_REPAIR_RESULT } as OpenAIMessage);
+  }
+}
+
 
 function buildUserContent(
   text: string,
@@ -97,14 +118,19 @@ export async function streamOpenAIChat({
       return { response: '', error: `Budget exceeded: ${budget.periodLimit} cents limit reached for ${budget.blockedBy} period.` };
     }
 
-    sessionMessages.push(userMessage);
-
     const caps = await renderCapabilities();
-    const systemPrompt = await buildSharedSystemPrompt(unrestrictedMode, caps);
+    const systemPrompt = await Promise.resolve(buildSharedSystemPrompt(unrestrictedMode)) + (caps ? `\n\nOS CONTEXT:\n${caps}` : '');
+
+    // Repair stale tool history before appending the new user message
+    const repairedSession = [...sessionMessages];
+    repairOpenAIHistory(repairedSession);
+    repairedSession.push(userMessage);
+
+    sessionMessages.push(userMessage);
 
     const loopMessages: OpenAIMessage[] = [
       { role: 'system', content: systemPrompt },
-      ...sessionMessages,
+      ...repairedSession,
     ];
 
     // Start with only the search meta-tool; tools are loaded on demand
@@ -123,7 +149,7 @@ export async function streamOpenAIChat({
       const stream = await client.chat.completions.create(
         {
           model: modelRegistryId,
-          messages: loopMessages,
+          messages: [...loopMessages],
           tools: activeTools,
           tool_choice: 'auto',
           stream: true,
@@ -286,8 +312,9 @@ export async function streamOpenAIChat({
       sendText(fullText);
     }
 
-    // Sync canonical session: skip system message (index 0) and original session messages
-    for (let i = 1 + sessionMessages.length; i < loopMessages.length; i++) {
+    // Sync canonical session: skip system (index 0) and repairedSession entries,
+    // then append only the new loop turns (assistant + tool results).
+    for (let i = 1 + repairedSession.length; i < loopMessages.length; i++) {
       sessionMessages.push(loopMessages[i]);
     }
 

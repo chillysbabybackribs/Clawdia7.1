@@ -37,8 +37,8 @@ describe('runTracker', () => {
     expect(typeof eventId).toBe('string');
     const events = getRunEvents(runId);
     expect(events).toHaveLength(1);
-    expect(events[0].type).toBe('tool_call');
-    const payload = JSON.parse(events[0].payload);
+    expect(events[0].kind).toBe('tool_call');
+    const payload = JSON.parse(events[0].payload_json);
     expect(payload.toolName).toBe('bash');
     expect(payload.argsSummary).toBe('ls -la');
   });
@@ -49,8 +49,8 @@ describe('runTracker', () => {
     trackToolResult(runId, eventId, 'file.txt', 45);
     const events = getRunEvents(runId);
     expect(events).toHaveLength(2);
-    expect(events[1].type).toBe('tool_result');
-    const payload = JSON.parse(events[1].payload);
+    expect(events[1].kind).toBe('tool_result');
+    const payload = JSON.parse(events[1].payload_json);
     expect(payload.duration_ms).toBe(45);
     expect(payload.resultSummary).toBe('file.txt');
   });
@@ -62,7 +62,8 @@ describe('runTracker', () => {
     expect(runs[0].status).toBe('completed');
     expect(runs[0].total_tokens).toBe(1200);
     expect(runs[0].estimated_cost_usd).toBeCloseTo(0.012);
-    expect(runs[0].completed_at).toBeGreaterThan(0);
+    expect(runs[0].completed_at).toBeTruthy();
+    expect(typeof runs[0].completed_at).toBe('string');
   });
 
   it('failRun updates status to failed', () => {
@@ -70,6 +71,7 @@ describe('runTracker', () => {
     failRun(runId, 'API timeout');
     const runs = getRuns('c1');
     expect(runs[0].status).toBe('failed');
-    expect(runs[0].completed_at).toBeGreaterThan(0);
+    expect(runs[0].completed_at).toBeTruthy();
+    expect(typeof runs[0].completed_at).toBe('string');
   });
 });

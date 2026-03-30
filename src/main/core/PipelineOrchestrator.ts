@@ -26,36 +26,236 @@ interface Subtask {
 const MAX_WORKERS = 5;
 const MAX_WORKER_ITERATIONS = 30;
 
+function extractFirstJsonArray(text: string): string | null {
+  const fenceMatch = text.match(/```(?:json)?\s*([\s\S]*?)```/i);
+  const source = fenceMatch?.[1] ?? text;
+  const start = source.indexOf('[');
+  if (start === -1) return null;
+
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+
+  for (let i = start; i < source.length; i++) {
+    const ch = source[i];
+
+    if (inString) {
+      if (escaped) {
+        escaped = false;
+      } else if (ch === '\\') {
+        escaped = true;
+      } else if (ch === '"') {
+        inString = false;
+      }
+      continue;
+    }
+
+    if (ch === '"') {
+      inString = true;
+      continue;
+    }
+
+    if (ch === '[') depth++;
+    if (ch === ']') {
+      depth--;
+      if (depth === 0) return source.slice(start, i + 1);
+    }
+  }
+
+  return null;
+}
+
+function extractFirstJsonObject(text: string): string | null {
+  const fenceMatch = text.match(/```(?:json)?\s*([\s\S]*?)```/i);
+  const source = fenceMatch?.[1] ?? text;
+  const start = source.indexOf('{');
+  if (start === -1) return null;
+
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+
+  for (let i = start; i < source.length; i++) {
+    const ch = source[i];
+
+    if (inString) {
+      if (escaped) {
+        escaped = false;
+      } else if (ch === '\\') {
+        escaped = true;
+      } else if (ch === '"') {
+        inString = false;
+      }
+      continue;
+    }
+
+    if (ch === '"') {
+      inString = true;
+      continue;
+    }
+
+    if (ch === '{') depth++;
+    if (ch === '}') {
+      depth--;
+      if (depth === 0) return source.slice(start, i + 1);
+    }
+  }
+
+  return null;
+}
+
+function normalizePlannerSubtasks(value: unknown): Subtask[] {
+  if (!Array.isArray(value)) return [];
+
+  return value
+    .map((item, index) => {
+      if (!item || typeof item !== 'object') return null;
+
+      const candidate = item as Record<string, unknown>;
+      const id = typeof candidate.id === 'string' && candidate.id.trim()
+        ? candidate.id.trim()
+        : `sub-${index + 1}`;
+      const subtask = typeof candidate.subtask === 'string' && candidate.subtask.trim()
+        ? candidate.subtask.trim()
+        : typeof candidate.title === 'string' && candidate.title.trim()
+          ? candidate.title.trim()
+          : typeof candidate.name === 'string' && candidate.name.trim()
+            ? candidate.name.trim()
+            : '';
+      const goal = typeof candidate.goal === 'string' && candidate.goal.trim()
+        ? candidate.goal.trim()
+        : typeof candidate.task === 'string' && candidate.task.trim()
+          ? candidate.task.trim()
+          : typeof candidate.description === 'string' && candidate.description.trim()
+            ? candidate.description.trim()
+            : '';
+
+      if (!subtask || !goal) return null;
+      return { id, subtask, goal };
+    })
+    .filter((item): item is Subtask => Boolean(item));
+}
+
+function stripMarkdownEmphasis(value: string): string {
+  return value
+    .replace(/\*\*(.*?)\*\*/g, '$1')
+    .replace(/\*(.*?)\*/g, '$1')
+    .replace(/`(.*?)`/g, '$1')
+    .trim();
+}
+
+function parsePlannerListLine(line: string, index: number): Subtask | null {
+  const cleaned = stripMarkdownEmphasis(line)
+    .replace(/^\s*(?:[-*+•]|\d+[.)])\s+/, '')
+    .trim();
+
+  if (!cleaned) return null;
+
+  const separatorPatterns = [
+    /\s+[-:]\s+/,
+    /\s+[–—]\s+/,
+    /:\s+/,
+  ];
+
+  for (const pattern of separatorPatterns) {
+    const parts = cleaned.split(pattern).map(part => part.trim()).filter(Boolean);
+    if (parts.length >= 2) {
+      const [subtask, ...goalParts] = parts;
+      const goal = goalParts.join(' - ');
+      if (subtask && goal) {
+        return { id: `sub-${index + 1}`, subtask, goal };
+      }
+    }
+  }
+
+  return {
+    id: `sub-${index + 1}`,
+    subtask: cleaned.length <= 80 ? cleaned : `${cleaned.slice(0, 77).trimEnd()}...`,
+    goal: cleaned,
+  };
+}
+
+function extractPlannerSubtasksFromList(text: string): Subtask[] {
+  const lines = text
+    .split('\n')
+    .map(line => line.trim())
+    .filter(line => /^(?:[-*+•]|\d+[.)])\s+/.test(line));
+
+  if (lines.length < 2) return [];
+
+  return lines
+    .map((line, index) => parsePlannerListLine(line, index))
+    .filter((item): item is Subtask => Boolean(item));
+}
+
+function parsePlannerSubtasks(text: string): Subtask[] {
+  const jsonArray = extractFirstJsonArray(text);
+  if (jsonArray) {
+    return normalizePlannerSubtasks(JSON.parse(jsonArray));
+  }
+
+  const listSubtasks = extractPlannerSubtasksFromList(text);
+  if (listSubtasks.length > 0) return listSubtasks;
+
+  const jsonObject = extractFirstJsonObject(text);
+  if (!jsonObject) {
+    throw new Error('Planner did not return JSON');
+  }
+
+  const parsed = JSON.parse(jsonObject) as Record<string, unknown>;
+  const candidateArrays = [
+    parsed.subtasks,
+    parsed.tasks,
+    parsed.plan,
+    parsed.steps,
+    parsed.items,
+  ];
+
+  for (const candidate of candidateArrays) {
+    const subtasks = normalizePlannerSubtasks(candidate);
+    if (subtasks.length > 0) return subtasks;
+  }
+
+  throw new Error('Planner JSON did not contain a valid subtask array');
+}
+
 export class PipelineOrchestrator {
+  private static shouldUsePipelineHeuristic(goal: string): boolean {
+    const text = goal.trim();
+    const lower = text.toLowerCase();
+
+    if (!text || text.length < 80) return false;
+    if (/^(hi|hello|hey|thanks|thank you|bye|goodbye)\b/.test(lower)) return false;
+
+    const hasStructuredList =
+      (text.match(/^\s*(?:[-*]|\d+\.)\s+/gm) ?? []).length >= 2;
+    const hasMultiTargetCompare =
+      /\b(compare|contrast|benchmark|evaluate|rank)\b/.test(lower)
+      && /\b(and|vs\.?|versus)\b/.test(lower);
+    const hasResearchCue =
+      /\b(audit|investigate|research|analyze|analysis|survey|synthesize)\b/.test(lower);
+    const hasParallelCue =
+      /\b(multiple|several|across|parallel|independent|different|various)\b/.test(lower);
+    const hasMultiPartRequest =
+      /\b(1\.|2\.|first\b.*second\b|both\b.*and\b)\b/.test(lower);
+    const hasManyQuestions = (text.match(/\?/g) ?? []).length >= 2;
+
+    if (hasStructuredList) return true;
+    if (hasMultiTargetCompare) return true;
+    if (hasResearchCue && (hasParallelCue || hasMultiPartRequest || hasManyQuestions || text.length > 220)) {
+      return true;
+    }
+
+    return false;
+  }
+
   /**
    * Classify whether the user's goal warrants a multi-agent pipeline.
-   * Returns false on any error (fail-safe: fall back to single agent).
+   * Use a local heuristic so normal chat does not pay an extra model round trip
+   * before the first response token can arrive.
    */
-  static async classifyIntent(
-    goal: string,
-    opts: Pick<PipelineRunOptions, 'provider' | 'apiKey' | 'model' | 'signal'>,
-  ): Promise<boolean> {
-    const systemPrompt =
-      'You are a task classifier. Decide if the user goal is complex enough to benefit from being broken into 2–5 independent parallel subtasks. ' +
-      'Answer ONLY with JSON: {"pipeline": true|false, "reason": "one sentence"}. ' +
-      'Return pipeline:true only if parallel execution genuinely helps (multi-source research, multi-entity analysis, staged work). ' +
-      'Return pipeline:false for simple questions, single-step tasks, or greetings.';
-    try {
-      const { text } = await streamLLM(
-        [{ role: 'user', content: goal }],
-        systemPrompt,
-        '',
-        { toolGroup: 'core', modelTier: 'fast', isGreeting: false },
-        { ...opts, onText: () => {}, maxIterations: 1 } as any,
-      );
-      // Extract JSON — model may wrap in markdown fences
-      const jsonMatch = text.match(/\{[\s\S]*\}/);
-      if (!jsonMatch) return false;
-      const parsed = JSON.parse(jsonMatch[0]);
-      return parsed.pipeline === true;
-    } catch {
-      return false;
-    }
+  static classifyIntent(goal: string): boolean {
+    return PipelineOrchestrator.shouldUsePipelineHeuristic(goal);
   }
 
   /**
@@ -117,10 +317,8 @@ export class PipelineOrchestrator {
         { ...opts, onText: () => {}, maxIterations: 1 } as any,
       );
 
-      const jsonMatch = text.match(/\[[\s\S]*\]/);
-      if (!jsonMatch) throw new Error('Planner did not return a JSON array');
-      subtasks = JSON.parse(jsonMatch[0]);
-      if (!Array.isArray(subtasks) || subtasks.length < 2) throw new Error('Planner returned fewer than 2 subtasks');
+      subtasks = parsePlannerSubtasks(text);
+      if (subtasks.length < 2) throw new Error('Planner returned fewer than 2 subtasks');
       subtasks = subtasks.slice(0, MAX_WORKERS);
     } catch (e: any) {
       // Planner failed — mark failed and rethrow so caller can surface error

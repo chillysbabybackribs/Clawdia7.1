@@ -19,6 +19,8 @@ export interface ConversationRow {
   claude_terminal_session_id?: string | null;
   claude_terminal_status?: string;
   claude_terminal_last_activity?: string;
+  claude_code_session_id?: string | null;
+  codex_chat_thread_id?: string | null;
 }
 
 export interface MessageRow {
@@ -54,6 +56,7 @@ export interface RunRow {
   total_tokens?: number; // mapped to DB if needed, or handled separately
   estimated_cost_usd?: number;
   parent_run_id?: string | null;
+  system_prompt?: string | null;
 }
 
 export interface RunEventRow {
@@ -81,13 +84,21 @@ function resolveDbPath(): string {
 
 let db: Database.Database | null = null;
 
+function formatInitDbError(err: unknown): string {
+  if (!(err instanceof Error)) return 'Unknown database initialization error.';
+  if (err.message.includes('NODE_MODULE_VERSION') || (err as NodeJS.ErrnoException).code === 'ERR_DLOPEN_FAILED') {
+    return `${err.message}\n[db] Native module mismatch detected. Run "npm run rebuild:native" to rebuild Electron-native addons (better-sqlite3, node-pty).`;
+  }
+  return err.stack ?? err.message;
+}
+
 /** @internal — exposed for tests only; do not use in production code. */
 export function getDb(): Database.Database {
   if (!db) throw new Error('db not initialized — call initDb() first');
   return db;
 }
 
-export function initDb(): void {
+export function initDb(): boolean {
   try {
     const dbPath = resolveDbPath();
     db = new Database(dbPath);
@@ -105,7 +116,9 @@ export function initDb(): void {
         mode              TEXT NOT NULL DEFAULT 'chat',
         claude_terminal_session_id TEXT,
         claude_terminal_status TEXT NOT NULL DEFAULT 'idle',
-        claude_terminal_last_activity TEXT
+        claude_terminal_last_activity TEXT,
+        claude_code_session_id TEXT,
+        codex_chat_thread_id TEXT
       );
 
       CREATE TABLE IF NOT EXISTS messages (
@@ -202,6 +215,21 @@ export function initDb(): void {
         INSERT INTO messages_fts(messages_fts, rowid, content) VALUES ('delete', old.rowid, old.content);
         INSERT INTO messages_fts(rowid, content) VALUES (new.rowid, new.content);
       END;
+
+      CREATE TABLE IF NOT EXISTS streaming_responses (
+        id            TEXT PRIMARY KEY,
+        conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+        run_id        TEXT,
+        partial_text  TEXT NOT NULL DEFAULT '',
+        started_at    TEXT NOT NULL DEFAULT (datetime('now')),
+        updated_at    TEXT NOT NULL DEFAULT (datetime('now'))
+      );
+
+      CREATE TABLE IF NOT EXISTS loop_state (
+        run_id        TEXT PRIMARY KEY,
+        is_paused     INTEGER NOT NULL DEFAULT 0,
+        updated_at    TEXT NOT NULL DEFAULT (datetime('now'))
+      );
     `);
 
     // Evolution: Add token tracking to runs if missing
@@ -214,6 +242,15 @@ export function initDb(): void {
     try {
       db.prepare(`ALTER TABLE runs ADD COLUMN parent_run_id TEXT REFERENCES runs(id) ON DELETE CASCADE`).run();
     } catch { }
+    try {
+      db.prepare(`ALTER TABLE runs ADD COLUMN system_prompt TEXT`).run();
+    } catch { }
+    try {
+      db.prepare(`ALTER TABLE conversations ADD COLUMN claude_code_session_id TEXT`).run();
+    } catch { }
+    try {
+      db.prepare(`ALTER TABLE conversations ADD COLUMN codex_chat_thread_id TEXT`).run();
+    } catch { }
 
     // Mark orphaned runs as failed (app was killed mid-run)
     db.prepare(`UPDATE runs SET status = 'failed' WHERE status = 'running'`).run();
@@ -223,9 +260,11 @@ export function initDb(): void {
     initPolicies(db);
     initSpending(db);
     initAgents(db);
+    return true;
   } catch (err) {
-    console.error('[db] Failed to initialize database:', err);
+    console.error('[db] Failed to initialize database:', formatInitDbError(err));
     db = null;
+    return false;
   }
 }
 
@@ -261,7 +300,14 @@ export function getConversation(id: string): ConversationRow | null {
   }
 }
 
-const CONVERSATION_COLUMNS = new Set<string>(['title', 'mode', 'created_at', 'updated_at']);
+const CONVERSATION_COLUMNS = new Set<string>([
+  'title',
+  'mode',
+  'created_at',
+  'updated_at',
+  'claude_code_session_id',
+  'codex_chat_thread_id',
+]);
 
 export function updateConversation(id: string, patch: Partial<ConversationRow>): void {
   try {
@@ -312,8 +358,8 @@ export function createRun(run: RunRow): void {
   try {
     getDb()
       .prepare(
-        `INSERT INTO runs (id, conversation_id, title, goal, status, started_at, updated_at, completed_at, tool_call_count, error, was_detached, provider, model, workflow_stage, scenario_id, tool_completed_count, tool_failed_count, estimated_cost_usd, total_tokens, parent_run_id)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+        `INSERT INTO runs (id, conversation_id, title, goal, status, started_at, updated_at, completed_at, tool_call_count, error, was_detached, provider, model, workflow_stage, scenario_id, tool_completed_count, tool_failed_count, estimated_cost_usd, total_tokens, parent_run_id, system_prompt)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
       )
       .run(
         run.id,
@@ -336,13 +382,14 @@ export function createRun(run: RunRow): void {
         run.estimated_cost_usd ?? null,
         run.total_tokens ?? null,
         run.parent_run_id ?? null,
+        run.system_prompt ?? null,
       );
   } catch (err) {
     console.error('[db] createRun failed:', err);
   }
 }
 
-const RUN_COLUMNS = new Set<string>(['status', 'title', 'goal', 'updated_at', 'completed_at', 'tool_call_count', 'error', 'was_detached', 'provider', 'model', 'workflow_stage', 'tool_completed_count', 'tool_failed_count', 'estimated_cost_usd', 'total_tokens']);
+const RUN_COLUMNS = new Set<string>(['status', 'title', 'goal', 'updated_at', 'completed_at', 'tool_call_count', 'error', 'was_detached', 'provider', 'model', 'workflow_stage', 'tool_completed_count', 'tool_failed_count', 'estimated_cost_usd', 'total_tokens', 'system_prompt']);
 
 export function updateRun(id: string, patch: Partial<RunRow>): void {
   try {
@@ -387,5 +434,60 @@ export function getRunEvents(runId: string): RunEventRow[] {
   } catch (err) {
     console.error('[db] getRunEvents failed:', err);
     return [];
+  }
+}
+
+// ── Streaming Responses ────────────────────────────────────────────────────
+
+export function upsertStreamingResponse(id: string, conversationId: string, runId: string | null, partialText: string): void {
+  try {
+    getDb()
+      .prepare(`INSERT INTO streaming_responses (id, conversation_id, run_id, partial_text, started_at, updated_at)
+                VALUES (?, ?, ?, ?, datetime('now'), datetime('now'))
+                ON CONFLICT(id) DO UPDATE SET partial_text = excluded.partial_text, updated_at = datetime('now')`)
+      .run(id, conversationId, runId ?? null, partialText);
+  } catch { /* best effort */ }
+}
+
+export function deleteStreamingResponse(id: string): void {
+  try {
+    getDb().prepare(`DELETE FROM streaming_responses WHERE id = ?`).run(id);
+  } catch { /* best effort */ }
+}
+
+export function getOrphanedStreamingResponses(conversationId: string): Array<{ id: string; partial_text: string; run_id: string | null }> {
+  try {
+    return getDb()
+      .prepare(`SELECT id, partial_text, run_id FROM streaming_responses WHERE conversation_id = ? ORDER BY started_at ASC`)
+      .all(conversationId) as Array<{ id: string; partial_text: string; run_id: string | null }>;
+  } catch {
+    return [];
+  }
+}
+
+// ── Loop State ─────────────────────────────────────────────────────────────
+
+export function setLoopPaused(runId: string, isPaused: boolean): void {
+  try {
+    getDb()
+      .prepare(`INSERT INTO loop_state (run_id, is_paused, updated_at)
+                VALUES (?, ?, datetime('now'))
+                ON CONFLICT(run_id) DO UPDATE SET is_paused = excluded.is_paused, updated_at = excluded.updated_at`)
+      .run(runId, isPaused ? 1 : 0);
+  } catch { /* best effort */ }
+}
+
+export function deleteLoopState(runId: string): void {
+  try {
+    getDb().prepare(`DELETE FROM loop_state WHERE run_id = ?`).run(runId);
+  } catch { /* best effort */ }
+}
+
+export function getLoopPaused(runId: string): boolean {
+  try {
+    const row = getDb().prepare(`SELECT is_paused FROM loop_state WHERE run_id = ?`).get(runId) as { is_paused: number } | undefined;
+    return row ? row.is_paused === 1 : false;
+  } catch {
+    return false;
   }
 }

@@ -13,6 +13,67 @@ import { buildAppMappingSystemPrompt } from './appMapping';
 
 const MAX_ITERATIONS = 50;
 
+// ── Token-aware history trimming ──────────────────────────────────────────────
+// Estimates token count as Math.ceil(chars / 4) — avoids a tiktoken dependency
+// while remaining within ~10% of real counts for typical prose + JSON content.
+// Drops middle messages (oldest non-first) until the estimate is under budget,
+// always preserving message[0] (original task) and the most recent message.
+const TOKEN_BUDGET = 28_000;   // leave headroom for tool schemas + response
+const CHARS_PER_TOKEN = 4;
+
+function estimateTokens(messages: any[]): number {
+  return Math.ceil(JSON.stringify(messages).length / CHARS_PER_TOKEN);
+}
+
+function trimMessageHistory(messages: any[]): void {
+  if (estimateTokens(messages) <= TOKEN_BUDGET) return;
+
+  // Drop oldest non-first messages until under budget.
+  // IMPORTANT: Anthropic requires that every tool_use assistant message is
+  // immediately followed by its tool_result user message. Dropping one without
+  // the other produces an API error. We detect and drop such pairs together.
+  while (messages.length > 2 && estimateTokens(messages) > TOKEN_BUDGET) {
+    const candidate = messages[1];
+    const isPairedToolUse =
+      candidate?.role === 'assistant' &&
+      Array.isArray(candidate?.content) &&
+      candidate.content.some((b: any) => b?.type === 'tool_use') &&
+      messages[2]?.role === 'user' &&
+      Array.isArray(messages[2]?.content) &&
+      messages[2].content.some((b: any) => b?.type === 'tool_result');
+
+    if (isPairedToolUse && messages.length > 3) {
+      // Drop the assistant tool_use AND the following tool_result together.
+      messages.splice(1, 2);
+    } else {
+      messages.splice(1, 1);
+    }
+  }
+}
+
+// ── Browser completion heuristic ─────────────────────────────────────────────
+// After a browser_extract_text result with substantial non-truncated content,
+// the model has enough evidence to synthesize — force a no-tools final answer.
+const BROWSER_EXTRACT_TOOL = 'browser_extract_text';
+const BROWSER_COMPLETE_MIN_CHARS = 200;
+
+function hasSufficientBrowserContent(allToolCalls: DispatchContext['allToolCalls']): boolean {
+  for (const call of allToolCalls) {
+    if (call.name !== BROWSER_EXTRACT_TOOL) continue;
+    try {
+      const parsed = JSON.parse(call.result);
+      if (
+        typeof parsed.text === 'string'
+        && parsed.text.length >= BROWSER_COMPLETE_MIN_CHARS
+        && parsed.truncated === false
+      ) {
+        return true;
+      }
+    } catch { /* not JSON — ignore */ }
+  }
+  return false;
+}
+
 export async function agentLoop(
   userMessage: string,
   messages: any[],
@@ -41,7 +102,9 @@ export async function agentLoop(
     toolCallCount: 0,
     allToolCalls: [],
     browserBudget: initBrowserBudget(),
+    browserMode: 'plan',
     options,
+    messages,
   };
 
   // Push current user message onto session history
@@ -88,23 +151,29 @@ export async function agentLoop(
       };
 
       // Call LLM
-      const { text, toolBlocks } = await streamLLM(
+      const { text, toolBlocks, stopReason, rawContent } = await streamLLM(
         messages, staticPrompt, dynamicPrompt, profile,
         iterOptions,
       );
 
       if (text) finalText = text;
 
-      // No tools → LLM is done; text was already streamed live
+      // pause_turn: server-side tool loop hit its iteration limit — append
+      // the full raw content and re-send so the server can resume.
+      if (stopReason === 'pause_turn' && rawContent) {
+        messages.push({ role: 'assistant', content: rawContent });
+        continue;
+      }
+
+      // No client-side tools → LLM is done; text was already streamed live
       if (toolBlocks.length === 0) {
         break;
       }
 
-      // Intermediate turn: narration between tool calls was already
-      // streamed to content area. Also show first line as shimmer hint.
-      if (turnText) {
-        const line = turnText.trim().split(/[\n\r]/)[0].replace(/^[-*>#]+\s*/, '').trim();
-        if (line) options.onThinking?.(line.length > 80 ? line.slice(0, 77) + '…' : line);
+      // Intermediate text was already streamed live to the chat panel via onText.
+      // Only update the shimmer if the LLM produced no narration at all this turn.
+      if (!turnText) {
+        options.onThinking?.(`Working… (step ${i + 1})`);
       }
 
       // Policy checks before execution
@@ -117,16 +186,22 @@ export async function agentLoop(
         continue;
       }
 
-      // Push assistant turn with tool calls
-      const assistantMsg = buildAssistantContent(text, toolBlocks, options.provider);
-      if (Array.isArray(assistantMsg) && options.provider === 'anthropic') {
-        messages.push({ role: 'assistant', content: assistantMsg });
+      // Push assistant turn — use rawContent when available (Anthropic) so that
+      // any server_tool_use/web_search_result blocks are preserved correctly.
+      if (rawContent && options.provider === 'anthropic') {
+        messages.push({ role: 'assistant', content: rawContent });
       } else {
-        messages.push(assistantMsg);
+        const assistantMsg = buildAssistantContent(text, toolBlocks, options.provider);
+        if (Array.isArray(assistantMsg) && options.provider === 'anthropic') {
+          messages.push({ role: 'assistant', content: assistantMsg });
+        } else {
+          messages.push(assistantMsg);
+        }
       }
 
       // Execute tools in parallel
-      const results = await dispatch(toolBlocks, ctx);
+      const dispatchResult = await dispatch(toolBlocks, ctx);
+      const results = dispatchResult.results;
 
       // Update browser budget
       updateBrowserBudget(toolBlocks, results, ctx.browserBudget);
@@ -142,6 +217,25 @@ export async function agentLoop(
 
       if (profile.specialMode === 'app_mapping' && options.provider !== 'anthropic') {
         compactAppMappingHistory(messages, profile, ctx);
+      }
+
+      // Trim history to prevent context blowup
+      trimMessageHistory(messages);
+
+      // Browser completion heuristic: enough page content extracted — synthesize
+      // a final answer using the existing session with no tools (toolMode: 'none').
+      // This reuses the same LLM connection and session; no separate API call.
+      if (profile.toolGroup === 'browser' && hasSufficientBrowserContent(ctx.allToolCalls)) {
+        options.onThinking?.('Synthesizing…');
+        const finalOptions = {
+          ...options,
+          currentIteration: i + 2,
+          signal: control.signal,
+          onText: (delta: string) => { options.onText(delta); },
+        };
+        const { text } = await streamLLM(messages, staticPrompt, '', profile, finalOptions, [], 'none');
+        if (text) finalText = text;
+        break;
       }
     }
 
@@ -341,3 +435,7 @@ function buildToolResultMessage(toolBlocks: ToolUseBlock[], results: string[], p
     })),
   };
 }
+
+// ── Test exports (tree-shaken in production builds) ───────────────────────────
+export const trimMessageHistoryForTest = trimMessageHistory;
+export const estimateTokensForTest = estimateTokens;

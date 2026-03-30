@@ -14,6 +14,10 @@ vi.mock('child_process', () => ({
   spawn: vi.fn(() => mockChild),
 }));
 
+vi.mock('../../src/main/mcpBridge', () => ({
+  getClaudeMcpConfigPath: vi.fn(async () => '/tmp/clawdia-claude-mcp-test.json'),
+}));
+
 import { spawn } from 'child_process';
 import { runClaudeCode, clearSessions } from '../../src/main/claudeCodeClient';
 
@@ -28,6 +32,7 @@ beforeEach(() => {
 describe('runClaudeCode', () => {
   it('spawns claude with required flags', async () => {
     const promise = runClaudeCode({ conversationId: 'conv-1', prompt: 'hello', onText: () => {} });
+    await Promise.resolve();
     mockStdout.emit('data', Buffer.from(''));
     mockChild.emit('close', 0);
     await promise;
@@ -36,16 +41,33 @@ describe('runClaudeCode', () => {
       expect.stringContaining('claude'),
       expect.arrayContaining([
         '--print',
-        '--dangerously-skip-permissions',
         '--output-format', 'stream-json',
+        '--verbose',
         '--include-partial-messages',
         '--input-format', 'text',
+        '--mcp-config', '/tmp/clawdia-claude-mcp-test.json',
       ]),
       expect.any(Object),
     );
     // Prompt should NOT be in args
     const callArgs = (spawn as any).mock.calls[0][1] as string[];
     expect(callArgs).not.toContain('hello');
+  });
+
+  it('only passes --dangerously-skip-permissions when explicitly enabled', async () => {
+    process.env.CLAUDE_SKIP_PERMISSIONS = '1';
+    try {
+      const promise = runClaudeCode({ conversationId: 'conv-1', prompt: 'hello', onText: () => {} });
+      await Promise.resolve();
+      mockStdout.emit('data', Buffer.from(''));
+      mockChild.emit('close', 0);
+      await promise;
+
+      const callArgs = (spawn as any).mock.calls[0][1] as string[];
+      expect(callArgs).toContain('--dangerously-skip-permissions');
+    } finally {
+      delete process.env.CLAUDE_SKIP_PERMISSIONS;
+    }
   });
 
   it('calls onText for each assistant text chunk', async () => {
@@ -55,6 +77,7 @@ describe('runClaudeCode', () => {
       prompt: 'hello',
       onText: (t) => chunks.push(t),
     });
+    await Promise.resolve();
 
     const line = JSON.stringify({
       type: 'assistant',
@@ -70,6 +93,7 @@ describe('runClaudeCode', () => {
   it('stores session_id and passes --resume on second call', async () => {
     // First call — no resume
     const p1 = runClaudeCode({ conversationId: 'conv-1', prompt: 'first', onText: () => {} });
+    await Promise.resolve();
     const resultLine = JSON.stringify({ type: 'result', session_id: 'sess-abc', result: 'done' });
     mockStdout.emit('data', Buffer.from(resultLine + '\n'));
     mockChild.emit('close', 0);
@@ -77,6 +101,7 @@ describe('runClaudeCode', () => {
 
     // Second call — should resume
     const p2 = runClaudeCode({ conversationId: 'conv-1', prompt: 'second', onText: () => {} });
+    await Promise.resolve();
     mockStdout.emit('data', Buffer.from(''));
     mockChild.emit('close', 0);
     await p2;
@@ -88,12 +113,14 @@ describe('runClaudeCode', () => {
 
   it('does not pass --resume for a new conversationId', async () => {
     const p1 = runClaudeCode({ conversationId: 'conv-1', prompt: 'first', onText: () => {} });
+    await Promise.resolve();
     const resultLine = JSON.stringify({ type: 'result', session_id: 'sess-abc', result: 'done' });
     mockStdout.emit('data', Buffer.from(resultLine + '\n'));
     mockChild.emit('close', 0);
     await p1;
 
     const p2 = runClaudeCode({ conversationId: 'conv-NEW', prompt: 'hi', onText: () => {} });
+    await Promise.resolve();
     mockStdout.emit('data', Buffer.from(''));
     mockChild.emit('close', 0);
     await p2;
@@ -104,6 +131,7 @@ describe('runClaudeCode', () => {
 
   it('rejects when claude exits with non-zero code', async () => {
     const promise = runClaudeCode({ conversationId: 'conv-1', prompt: 'hello', onText: () => {} });
+    await Promise.resolve();
     mockChild.emit('close', 1);
     await expect(promise).rejects.toThrow();
   });
@@ -115,6 +143,7 @@ describe('runClaudeCode', () => {
       prompt: 'hello',
       onText: (t) => chunks.push(t),
     });
+    await Promise.resolve();
 
     const resultLine = JSON.stringify({
       type: 'result',
@@ -130,6 +159,7 @@ describe('runClaudeCode', () => {
 
   it('returns finalText and sessionId in the result', async () => {
     const promise = runClaudeCode({ conversationId: 'conv-1', prompt: 'hello', onText: () => {} });
+    await Promise.resolve();
 
     const assistantLine = JSON.stringify({
       type: 'assistant',

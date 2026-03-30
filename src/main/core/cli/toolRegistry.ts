@@ -5,6 +5,10 @@ import type OpenAI from 'openai';
 import { BROWSER_TOOLS } from './browserTools';
 import { MEMORY_TOOLS } from './memoryTools';
 import { SHELL_TOOLS_OPENAI } from './shellTools';
+import { DESKTOP_TOOLS } from '../desktop/tools';
+import { WORKSPACE_TOOLS } from './workspaceTools';
+import { SELF_AWARE_TOOLS } from './selfAwareTools';
+import { UI_STATE_TOOLS } from './uiStateTools';
 
 type OAITool = OpenAI.Chat.Completions.ChatCompletionTool;
 
@@ -22,6 +26,10 @@ const ALL_TOOLS: Anthropic.Tool[] = [
   ...SHELL_TOOLS_CANONICAL,
   ...BROWSER_TOOLS,
   ...MEMORY_TOOLS,
+  ...DESKTOP_TOOLS,
+  ...WORKSPACE_TOOLS,
+  ...SELF_AWARE_TOOLS,
+  ...UI_STATE_TOOLS,
 ];
 
 const TOOL_INDEX: Map<string, Anthropic.Tool> = new Map(

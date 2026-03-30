@@ -6,6 +6,7 @@ export const IPC = {
   CHAT_ADD_CONTEXT: 'chat:add-context',
   CHAT_RATE_TOOL: 'chat:rate-tool',
   CHAT_NEW: 'chat:new',
+  CHAT_CREATE: 'chat:create',
   CHAT_LIST: 'chat:list',
   CHAT_LOAD: 'chat:load',
   CHAT_GET_MODE: 'chat:get-mode',
@@ -97,6 +98,10 @@ export const IPC = {
   // Browser sessions
   BROWSER_LIST_SESSIONS: 'browser:list-sessions',
   BROWSER_CLEAR_SESSION: 'browser:clear-session',
+  // Browser extensions
+  BROWSER_EXT_LIST: 'browser:ext:list',
+  BROWSER_EXT_INSTALL: 'browser:ext:install',
+  BROWSER_EXT_REMOVE: 'browser:ext:remove',
   // Identity settings
   IDENTITY_PROFILE_GET: 'identity:profile:get',
   IDENTITY_PROFILE_SET: 'identity:profile:set',
@@ -126,6 +131,12 @@ export const IPC = {
   TASKS_RUNS: 'tasks:runs',
   TASKS_RUN_NOW: 'tasks:run-now',
   TASKS_SUMMARY: 'tasks:summary',
+  // VPN
+  VPN_STATUS: 'vpn:status',
+  VPN_TOGGLE: 'vpn:toggle',
+  // UI state — renderer pushes live layout state; agent tools read it
+  UI_STATE_PUSH: 'ui-state:push',
+  UI_STATE_GET: 'ui-state:get',
 } as const;
 
 export const IPC_EVENTS = {
@@ -135,6 +146,7 @@ export const IPC_EVENTS = {
   CHAT_WORKFLOW_PLAN_TEXT: 'chat:workflow-plan:text',
   CHAT_WORKFLOW_PLAN_END: 'chat:workflow-plan:end',
   CHAT_THINKING: 'chat:thinking',
+  CHAT_PROMPT_DEBUG: 'chat:prompt-debug',
   CHAT_TOOL_ACTIVITY: 'chat:tool-activity',
   CHAT_TOOL_STREAM: 'chat:tool-stream',
   CHAT_CLAUDE_STATUS: 'chat:claude-status',

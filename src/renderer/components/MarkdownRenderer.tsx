@@ -1,4 +1,4 @@
-import React, { useMemo, useState, useCallback, useRef, useEffect } from 'react';
+import React, { useMemo, useState, useCallback } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 
@@ -6,18 +6,6 @@ interface MarkdownRendererProps {
   content: string;
   isStreaming?: boolean;
 }
-
-/**
- * Throttled markdown rendering.
- *
- * Always uses ReactMarkdown (consistent DOM structure), but during streaming
- * we throttle content updates to once per THROTTLE_MS. This prevents expensive
- * re-parses on every chunk while keeping the visual output stable — no jumping
- * between raw text and formatted markdown.
- *
- * On stream end, we do one final render with the complete content.
- */
-const THROTTLE_MS = 120;
 
 /** Copy button for code blocks */
 function CopyButton({ text }: { text: string }) {
@@ -55,48 +43,19 @@ export default function MarkdownRenderer({ content, isStreaming }: MarkdownRende
 
   const plugins = useMemo(() => [remarkGfm], []);
 
-  // Throttled content: during streaming, only update every THROTTLE_MS.
-  // This reduces ReactMarkdown re-parses from ~30/s to ~8/s while keeping
-  // the same DOM structure (no visual jumping).
-  const [throttledContent, setThrottledContent] = useState(content);
-  const lastUpdateRef = useRef(Date.now());
-  const pendingRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const latestContentRef = useRef(content);
-
-  // Always track the latest content
-  latestContentRef.current = content;
-
-  useEffect(() => {
-    if (!isStreaming) {
-      // Streaming ended — render final content immediately
-      if (pendingRef.current) { clearTimeout(pendingRef.current); pendingRef.current = null; }
-      setThrottledContent(content);
-      return;
-    }
-
-    const now = Date.now();
-    const elapsed = now - lastUpdateRef.current;
-
-    if (elapsed >= THROTTLE_MS) {
-      // Enough time has passed — update now
-      lastUpdateRef.current = now;
-      setThrottledContent(content);
-    } else if (!pendingRef.current) {
-      // Schedule an update for when the throttle window expires
-      pendingRef.current = setTimeout(() => {
-        pendingRef.current = null;
-        lastUpdateRef.current = Date.now();
-        setThrottledContent(latestContentRef.current);
-      }, THROTTLE_MS - elapsed);
-    }
-
-    return () => {
-      if (pendingRef.current) { clearTimeout(pendingRef.current); pendingRef.current = null; }
-    };
-  }, [content, isStreaming]);
+  // During streaming: render plain text with no markdown parse overhead.
+  // Text updates flow through at RAF rate (~60fps) with no throttle.
+  // When streaming ends: one-shot ReactMarkdown render of the final content.
+  if (isStreaming) {
+    return (
+      <div className="markdown-prose streaming-plain">
+        <p style={{ whiteSpace: 'pre-wrap', margin: 0 }}>{content}</p>
+      </div>
+    );
+  }
 
   return (
-    <div className={`markdown-prose ${isStreaming ? 'streaming-cursor' : ''}`}>
+    <div className="markdown-prose animate-md-in">
       <ReactMarkdown
         remarkPlugins={plugins}
         components={{
@@ -117,7 +76,7 @@ export default function MarkdownRenderer({ content, isStreaming }: MarkdownRende
                     <span className="text-[10px] font-mono text-text-muted/60 uppercase tracking-wider">{lang}</span>
                   </div>
                 )}
-                {!isStreaming && <CopyButton text={childText} />}
+                <CopyButton text={childText} />
                 <code className={className} {...props}>
                   {children}
                 </code>
@@ -151,7 +110,7 @@ export default function MarkdownRenderer({ content, isStreaming }: MarkdownRende
           },
         }}
       >
-        {throttledContent}
+        {content}
       </ReactMarkdown>
     </div>
   );

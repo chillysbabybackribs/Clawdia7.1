@@ -44,8 +44,11 @@ export class ElectronBrowserService implements BrowserService {
   private readonly history = new Set<string>();
   private activeTabId: string | null = null;
   private bounds: BrowserViewportBounds = { x: 0, y: 0, width: 0, height: 0 };
-  private visible = true;
+  private visible = false;
   private readonly mode: BrowserExecutionMode = 'headed';
+  // Deduplicates concurrent "ensure a default tab exists" calls so two BrowserPanel
+  // instances mounting at the same time never both create a tab.
+  private defaultTabPromise: Promise<void> | null = null;
 
   constructor(
     private readonly window: BrowserWindow,
@@ -65,7 +68,6 @@ export class ElectronBrowserService implements BrowserService {
 
     const validTabs = persisted.filter(t => t.url && t.url.startsWith('http'));
     if (validTabs.length === 0) {
-      await this.newTab('https://www.google.com');
       return;
     }
 
@@ -173,6 +175,14 @@ export class ElectronBrowserService implements BrowserService {
   }
 
   async listTabs(): Promise<BrowserTabState[]> {
+    // Ensure at least one tab exists. The promise is shared so concurrent calls
+    // (e.g. two BrowserPanel instances mounting simultaneously) only create one tab.
+    if (this.tabs.size === 0) {
+      if (!this.defaultTabPromise) {
+        this.defaultTabPromise = this.newTab().then(() => { this.defaultTabPromise = null; });
+      }
+      await this.defaultTabPromise;
+    }
     return [...this.tabs.values()].map((tab) => ({ ...tab.state }));
   }
 

@@ -5,6 +5,7 @@ import {
   addTab,
   closeTab,
   switchTab,
+  getTabDisplayTitle,
   type ConversationTab,
 } from '../../src/renderer/tabLogic';
 
@@ -77,5 +78,13 @@ describe('switchTab', () => {
     const t2 = makeTab('conv-2');
     const result = switchTab([t1, t2], t2.id);
     expect(result.activeTabId).toBe(t2.id);
+  });
+});
+
+describe('getTabDisplayTitle', () => {
+  it('formats tab labels as numbered chats', () => {
+    expect(getTabDisplayTitle(0)).toBe('Chat 1');
+    expect(getTabDisplayTitle(1)).toBe('Chat 2');
+    expect(getTabDisplayTitle(2)).toBe('Chat 3');
   });
 });

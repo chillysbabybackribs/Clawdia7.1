@@ -215,4 +215,52 @@ describe('ChatExecutor multi-turn loop', () => {
     expect(block.type).toBe('tool_result');
     expect(block.tool_use_id).toBe('tc-feed-1');
   });
+
+  it('repairs stale anthropic tool history before calling the provider', async () => {
+    const broker = makeBroker();
+
+    const turn1: ProviderTurnResult = {
+      assistantMessage: makeAssistantText('Recovered.'),
+      text: 'Recovered.',
+      toolCalls: [],
+      stopReason: 'end_turn',
+    };
+
+    const provider = makeSequentialProvider([turn1]);
+    const executor = new ChatExecutor(broker, provider);
+
+    const handle = await executor.startRun({
+      runId: 'run-stale-history',
+      conversationId: 'conv-stale',
+      providerId: 'anthropic',
+      modelId: 'claude-sonnet-4-6',
+      input: 'continue',
+      history: [
+        { role: 'assistant', content: [{ type: 'tool_use', id: 'stale-tu', name: 'shell_exec', input: { command: 'pwd' } }] },
+      ],
+    });
+
+    await waitForCompletion(executor, handle.runId);
+
+    expect(provider.calls).toHaveLength(1);
+    expect(provider.calls[0].messages).toEqual([
+      {
+        role: 'assistant',
+        content: [{ type: 'tool_use', id: 'stale-tu', name: 'shell_exec', input: { command: 'pwd' } }],
+      },
+      {
+        role: 'user',
+        content: [{
+          type: 'tool_result',
+          tool_use_id: 'stale-tu',
+          content: JSON.stringify({
+            status: 'interrupted',
+            reason: 'protocol_repair',
+            message: 'Tool run was interrupted before completion.',
+          }),
+        }],
+      },
+      { role: 'user', content: [{ type: 'text', text: 'continue' }] },
+    ]);
+  });
 });

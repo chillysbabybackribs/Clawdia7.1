@@ -197,9 +197,9 @@ export class TerminalSessionController extends EventEmitter {
     const session = this.sessions.get(id);
     if (!session || session.kind !== 'live') return false;
     session.owner = owner;
-    session.mode = 'agent_owned';
+    session.mode = meta?.mode ?? (owner === 'clawdia_agent' ? 'agent_owned' : 'user_owned');
     if (meta?.runId) session.runId = meta.runId;
-    if (meta?.conversationId) session.conversationId = meta.conversationId;
+    if (typeof meta?.conversationId === 'string') session.conversationId = meta.conversationId;
     this.emit('sessionState', this._toState(session));
     return true;
   }

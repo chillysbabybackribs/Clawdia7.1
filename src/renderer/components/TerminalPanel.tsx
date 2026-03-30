@@ -27,6 +27,9 @@ const TERMINAL_THEME = {
 };
 
 const MAX_HYDRATE_CHARS = 64_000;
+const DEFAULT_TERMINAL_FONT_SIZE = 13;
+const MIN_TERMINAL_FONT_SIZE = 10;
+const MAX_TERMINAL_FONT_SIZE = 24;
 
 type XTermTerminal = import('xterm').Terminal;
 type FitAddon = import('@xterm/addon-fit').FitAddon;
@@ -41,13 +44,33 @@ function sliceRecentOutput(output: string): string {
 // ─── TerminalPane ─────────────────────────────────────────────────────────────
 
 interface TerminalPaneProps {
+  paneId: string;
   sessionId: string;
   conversationId?: string | null;
   isObserving?: boolean; // read-only observe mode — no PTY spawn
   onSpawnError?: (sessionId: string) => void;
+  fontSize: number;
+  onFontSizeChange: (paneId: string, nextFontSize: number) => void;
+  onClose?: () => void;
+  closeTitle?: string;
 }
 
-function TerminalPane({ sessionId, conversationId, isObserving = false, onSpawnError }: TerminalPaneProps) {
+interface TerminalContextMenuState {
+  x: number;
+  y: number;
+}
+
+function TerminalPane({
+  paneId,
+  sessionId,
+  conversationId,
+  isObserving = false,
+  onSpawnError,
+  fontSize,
+  onFontSizeChange,
+  onClose,
+  closeTitle = 'Close terminal',
+}: TerminalPaneProps) {
   const api = window.clawdia;
   const containerRef = React.useRef<HTMLDivElement>(null);
   const termRef = React.useRef<XTermTerminal | null>(null);
@@ -62,10 +85,59 @@ function TerminalPane({ sessionId, conversationId, isObserving = false, onSpawnE
   const [sessionMode, setSessionMode] = React.useState<string>('user_owned');
   const [activeRun, setActiveRun] = React.useState<string | null>(null);
   const [takeoverRequestedBy, setTakeoverRequestedBy] = React.useState<string | null>(null);
+  const [contextMenu, setContextMenu] = React.useState<TerminalContextMenuState | null>(null);
 
   React.useEffect(() => {
     sessionModeRef.current = sessionMode;
   }, [sessionMode]);
+
+  const applyFontSize = React.useCallback((nextFontSize: number) => {
+    const clamped = Math.max(MIN_TERMINAL_FONT_SIZE, Math.min(MAX_TERMINAL_FONT_SIZE, nextFontSize));
+    onFontSizeChange(paneId, clamped);
+  }, [onFontSizeChange, paneId]);
+
+  const handleZoomIn = React.useCallback(() => {
+    applyFontSize(fontSize + 1);
+  }, [applyFontSize, fontSize]);
+
+  const handleZoomOut = React.useCallback(() => {
+    applyFontSize(fontSize - 1);
+  }, [applyFontSize, fontSize]);
+
+  const handleZoomReset = React.useCallback(() => {
+    applyFontSize(DEFAULT_TERMINAL_FONT_SIZE);
+  }, [applyFontSize]);
+
+  const canPaste = !isObserving && sessionMode !== 'agent_owned' && sessionMode !== 'observe_only' && sessionMode !== 'handoff_pending';
+
+  const closeContextMenu = React.useCallback(() => {
+    setContextMenu(null);
+  }, []);
+
+  const handleCopy = React.useCallback(async () => {
+    const selection = termRef.current?.getSelection() ?? '';
+    if (!selection) return;
+    await navigator.clipboard.writeText(selection);
+    closeContextMenu();
+  }, [closeContextMenu]);
+
+  const handlePaste = React.useCallback(async () => {
+    if (!canPaste) return;
+    const text = await navigator.clipboard.readText();
+    if (!text) return;
+    await api?.terminal?.write(sessionId, text, { source: 'user', conversationId: conversationId ?? undefined });
+    closeContextMenu();
+  }, [api, canPaste, closeContextMenu, conversationId, sessionId]);
+
+  const handleSelectAll = React.useCallback(() => {
+    termRef.current?.selectAll();
+    closeContextMenu();
+  }, [closeContextMenu]);
+
+  const handleClear = React.useCallback(() => {
+    termRef.current?.clear();
+    closeContextMenu();
+  }, [closeContextMenu]);
 
   React.useEffect(() => {
     if (!containerRef.current) return;
@@ -86,7 +158,7 @@ function TerminalPane({ sessionId, conversationId, isObserving = false, onSpawnE
       const term = new Terminal({
         theme: TERMINAL_THEME,
         fontFamily: '"JetBrains Mono", "Fira Code", "SF Mono", "Cascadia Code", Menlo, monospace',
-        fontSize: 13,
+        fontSize,
         lineHeight: 1.4,
         cursorBlink: true,
         cursorStyle: 'bar',
@@ -148,6 +220,13 @@ function TerminalPane({ sessionId, conversationId, isObserving = false, onSpawnE
         setSessionMode(snapshot?.mode ?? 'user_owned');
         setActiveRun(snapshot?.runId ?? null);
         setTakeoverRequestedBy(null);
+      }
+
+      if (conversationId) {
+        await api.terminal.acquire(sessionId, 'user', {
+          mode: 'user_owned',
+          conversationId,
+        }).catch(() => false);
       }
 
       // Wire input (disabled in observe or agent_owned/handoff modes)
@@ -228,7 +307,91 @@ function TerminalPane({ sessionId, conversationId, isObserving = false, onSpawnE
     };
   // Re-run only when sessionId or observing mode changes
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [sessionId, isObserving]);
+  }, [isObserving, sessionId]);
+
+  React.useEffect(() => {
+    const term = termRef.current;
+    const fitAddon = fitAddonRef.current;
+    if (!term || !fitAddon) return;
+    term.options.fontSize = fontSize;
+    fitAddon.fit();
+    const dims = fitAddon.proposeDimensions();
+    if (dims) void api?.terminal?.resize(sessionId, dims.cols, dims.rows);
+    term.scrollToBottom();
+  }, [api, fontSize, sessionId]);
+
+  React.useEffect(() => {
+    const container = containerRef.current;
+    if (!container) return;
+
+    const handleWheel = (event: WheelEvent) => {
+      if (!event.ctrlKey && !event.metaKey) return;
+      event.preventDefault();
+      if (event.deltaY < 0) handleZoomIn();
+      else if (event.deltaY > 0) handleZoomOut();
+    };
+
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (!event.ctrlKey && !event.metaKey) return;
+      if (event.altKey) return;
+
+      const key = event.key;
+      if (key === '=' || key === '+') {
+        event.preventDefault();
+        handleZoomIn();
+        return;
+      }
+      if (key === '-' || key === '_') {
+        event.preventDefault();
+        handleZoomOut();
+        return;
+      }
+      if (key === '0') {
+        event.preventDefault();
+        handleZoomReset();
+      }
+    };
+
+    container.addEventListener('wheel', handleWheel, { passive: false });
+    container.addEventListener('keydown', handleKeyDown, true);
+    return () => {
+      container.removeEventListener('wheel', handleWheel);
+      container.removeEventListener('keydown', handleKeyDown, true);
+    };
+  }, [handleZoomIn, handleZoomOut, handleZoomReset]);
+
+  React.useEffect(() => {
+    const container = containerRef.current;
+    if (!container) return;
+
+    const handleContextMenu = (event: MouseEvent) => {
+      event.preventDefault();
+      setContextMenu({ x: event.clientX, y: event.clientY });
+    };
+
+    container.addEventListener('contextmenu', handleContextMenu);
+    return () => {
+      container.removeEventListener('contextmenu', handleContextMenu);
+    };
+  }, []);
+
+  React.useEffect(() => {
+    if (!contextMenu) return;
+
+    const handlePointerDown = () => setContextMenu(null);
+    const handleEscape = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') setContextMenu(null);
+    };
+
+    window.addEventListener('mousedown', handlePointerDown);
+    window.addEventListener('scroll', handlePointerDown, true);
+    window.addEventListener('keydown', handleEscape);
+    return () => {
+      window.removeEventListener('mousedown', handlePointerDown);
+      window.removeEventListener('scroll', handlePointerDown, true);
+      window.removeEventListener('keydown', handleEscape);
+    };
+  }, [contextMenu]);
 
   const handleRestart = React.useCallback(async () => {
     setSpawnError(false);
@@ -287,6 +450,38 @@ function TerminalPane({ sessionId, conversationId, isObserving = false, onSpawnE
           )}
         </div>
         <div className="flex items-center gap-2">
+          <div className="flex items-center gap-1 rounded border border-white/[0.06] bg-white/[0.03] px-1 py-0.5">
+            <button
+              onClick={handleZoomOut}
+              className="rounded px-1 text-[11px] leading-none text-text-secondary transition-colors hover:bg-white/[0.06] hover:text-text-primary"
+              title="Zoom out"
+            >
+              -
+            </button>
+            <button
+              onClick={handleZoomReset}
+              className="rounded px-1 text-[10px] font-medium text-text-secondary transition-colors hover:bg-white/[0.06] hover:text-text-primary"
+              title="Reset zoom"
+            >
+              {fontSize}px
+            </button>
+            <button
+              onClick={handleZoomIn}
+              className="rounded px-1 text-[11px] leading-none text-text-secondary transition-colors hover:bg-white/[0.06] hover:text-text-primary"
+              title="Zoom in"
+            >
+              +
+            </button>
+          </div>
+          {onClose && (
+            <button
+              onClick={onClose}
+              className="rounded px-1.5 py-0.5 text-[11px] leading-none text-text-secondary transition-colors hover:bg-white/[0.06] hover:text-text-primary"
+              title={closeTitle}
+            >
+              ×
+            </button>
+          )}
           {sessionMode === 'agent_owned' && !isObserving && (
             <button
               onClick={handleRequestTakeover}
@@ -343,6 +538,40 @@ function TerminalPane({ sessionId, conversationId, isObserving = false, onSpawnE
           </button>
         </div>
       )}
+
+      {contextMenu && (
+        <div
+          className="fixed z-50 min-w-[148px] overflow-hidden rounded border border-white/[0.08] bg-[#111216] py-1 shadow-[0_12px_32px_rgba(0,0,0,0.45)]"
+          style={{ left: contextMenu.x, top: contextMenu.y }}
+          onMouseDown={(event) => event.stopPropagation()}
+        >
+          <button
+            onClick={() => { void handleCopy(); }}
+            className="block w-full px-3 py-1.5 text-left text-[12px] text-text-primary transition-colors hover:bg-white/[0.06]"
+          >
+            Copy
+          </button>
+          <button
+            onClick={() => { void handlePaste(); }}
+            disabled={!canPaste}
+            className="block w-full px-3 py-1.5 text-left text-[12px] text-text-primary transition-colors hover:bg-white/[0.06] disabled:cursor-not-allowed disabled:text-text-secondary disabled:hover:bg-transparent"
+          >
+            Paste
+          </button>
+          <button
+            onClick={handleSelectAll}
+            className="block w-full px-3 py-1.5 text-left text-[12px] text-text-primary transition-colors hover:bg-white/[0.06]"
+          >
+            Select all
+          </button>
+          <button
+            onClick={handleClear}
+            className="block w-full px-3 py-1.5 text-left text-[12px] text-text-primary transition-colors hover:bg-white/[0.06]"
+          >
+            Clear
+          </button>
+        </div>
+      )}
     </div>
   );
 }
@@ -353,6 +582,9 @@ interface TerminalTab {
   id: string;        // unique UI identifier
   sessionId: string; // PTY session ID sent to backend
   title: string;     // display label e.g. "Terminal 1"
+  splitSessionId: string | null;
+  splitRatio: number;
+  splitIsObserving: boolean;
 }
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
@@ -363,6 +595,9 @@ function makeTab(index: number): TerminalTab {
     id: `tab-${ts}`,
     sessionId: `terminal-tab-${ts}`,
     title: `Terminal ${index}`,
+    splitSessionId: null,
+    splitRatio: 0.5,
+    splitIsObserving: false,
   };
 }
 
@@ -468,6 +703,10 @@ interface TerminalSplitContainerProps {
   splitRatio: number;             // 0.0–1.0
   splitIsObserving: boolean;
   conversationId?: string | null;
+  getFontSize: (paneId: string) => number;
+  onFontSizeChange: (paneId: string, nextFontSize: number) => void;
+  onCloseTop?: () => void;
+  onCloseBottom?: () => void;
   onSplitRatioChange: (ratio: number) => void;
 }
 
@@ -479,6 +718,10 @@ function TerminalSplitContainer({
   splitRatio,
   splitIsObserving,
   conversationId,
+  getFontSize,
+  onFontSizeChange,
+  onCloseTop,
+  onCloseBottom,
   onSplitRatioChange,
 }: TerminalSplitContainerProps) {
   const containerRef = React.useRef<HTMLDivElement>(null);
@@ -533,7 +776,15 @@ function TerminalSplitContainer({
   if (!bottomSessionId) {
     return (
       <div ref={containerRef} className="flex flex-1 flex-col overflow-hidden min-h-0">
-        <TerminalPane sessionId={topSessionId} conversationId={conversationId} />
+        <TerminalPane
+          paneId={`primary:${topSessionId}`}
+          sessionId={topSessionId}
+          conversationId={conversationId}
+          fontSize={getFontSize(`primary:${topSessionId}`)}
+          onFontSizeChange={onFontSizeChange}
+          onClose={onCloseTop}
+          closeTitle="Close terminal tab"
+        />
       </div>
     );
   }
@@ -542,7 +793,15 @@ function TerminalSplitContainer({
     <div ref={containerRef} className="flex flex-1 flex-col overflow-hidden min-h-0">
       {/* Top pane */}
       <div style={{ height: `${splitRatio * 100}%` }} className="flex flex-col overflow-hidden min-h-0">
-        <TerminalPane sessionId={topSessionId} conversationId={conversationId} />
+        <TerminalPane
+          paneId={`primary:${topSessionId}`}
+          sessionId={topSessionId}
+          conversationId={conversationId}
+          fontSize={getFontSize(`primary:${topSessionId}`)}
+          onFontSizeChange={onFontSizeChange}
+          onClose={onCloseTop}
+          closeTitle="Close terminal tab"
+        />
       </div>
 
       {/* Draggable divider */}
@@ -555,9 +814,14 @@ function TerminalSplitContainer({
       {/* Bottom pane */}
       <div style={{ height: `${(1 - splitRatio) * 100}%` }} className="flex flex-col overflow-hidden min-h-0">
         <TerminalPane
+          paneId={splitIsObserving ? `split-observe:${bottomSessionId}` : `split-shell:${bottomSessionId}`}
           sessionId={bottomSessionId}
           conversationId={conversationId}
           isObserving={splitIsObserving}
+          fontSize={getFontSize(splitIsObserving ? `split-observe:${bottomSessionId}` : `split-shell:${bottomSessionId}`)}
+          onFontSizeChange={onFontSizeChange}
+          onClose={onCloseBottom}
+          closeTitle={splitIsObserving ? 'Close observed pane' : 'Close split terminal'}
         />
       </div>
     </div>
@@ -578,10 +842,8 @@ export default function TerminalPanel({ visible, conversationId }: TerminalPanel
   const [tabs, setTabs] = React.useState<TerminalTab[]>([initialTab]);
   const [activeTabId, setActiveTabId] = React.useState<string>(initialTab.id);
   const tabCounterRef = React.useRef(2); // next tab will be "Terminal 2"
-  const [splitSessionId, setSplitSessionId] = React.useState<string | null>(null);
-  const [splitRatio, setSplitRatio] = React.useState(0.5);
-  const [splitIsObserving, setSplitIsObserving] = React.useState(false);
   const [isAvailable, setIsAvailable] = React.useState<boolean | null>(null);
+  const [terminalFontSizes, setTerminalFontSizes] = React.useState<Record<string, number>>({});
 
   React.useEffect(() => {
     let cancelled = false;
@@ -593,30 +855,112 @@ export default function TerminalPanel({ visible, conversationId }: TerminalPanel
 
   // Kill all sessions when panel unmounts
   const tabsRef = React.useRef(tabs);
-  const splitSessionIdRef = React.useRef(splitSessionId);
   React.useEffect(() => { tabsRef.current = tabs; }, [tabs]);
-  React.useEffect(() => { splitSessionIdRef.current = splitSessionId; }, [splitSessionId]);
 
   React.useEffect(() => {
     return () => {
       tabsRef.current.forEach((tab) => {
         void api?.terminal?.kill(tab.sessionId);
+        if (tab.splitSessionId && !tab.splitIsObserving) void api?.terminal?.kill(tab.splitSessionId);
       });
-      if (splitSessionIdRef.current && !tabsRef.current.some(t => t.sessionId === splitSessionIdRef.current)) {
-        void api?.terminal?.kill(splitSessionIdRef.current);
-      }
     };
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [api]);
 
   const activeTab = tabs.find((t) => t.id === activeTabId) ?? tabs[0];
 
-  // Keep observe mode pointing at the current active tab when switching tabs
-  React.useEffect(() => {
-    if (splitIsObserving && activeTab) {
-      setSplitSessionId(activeTab.sessionId);
+  const updateTab = React.useCallback((tabId: string, updater: (tab: TerminalTab) => TerminalTab) => {
+    setTabs((prev) => prev.map((tab) => (tab.id === tabId ? updater(tab) : tab)));
+  }, []);
+
+  const createFreshTab = React.useCallback(() => makeTab(tabCounterRef.current++), []);
+
+  const getFontSize = React.useCallback((sessionId: string) => {
+    return terminalFontSizes[sessionId] ?? DEFAULT_TERMINAL_FONT_SIZE;
+  }, [terminalFontSizes]);
+
+  const handleFontSizeChange = React.useCallback((sessionId: string, nextFontSize: number) => {
+    setTerminalFontSizes((prev) => {
+      const clamped = Math.max(MIN_TERMINAL_FONT_SIZE, Math.min(MAX_TERMINAL_FONT_SIZE, nextFontSize));
+      if ((prev[sessionId] ?? DEFAULT_TERMINAL_FONT_SIZE) === clamped) return prev;
+      return { ...prev, [sessionId]: clamped };
+    });
+  }, []);
+
+  const handleAddTab = React.useCallback(() => {
+    const tab = createFreshTab();
+    setTabs((prev) => [...prev, tab]);
+    setActiveTabId(tab.id);
+  }, [createFreshTab]);
+
+  const handleCloseTab = React.useCallback((id: string) => {
+    setTabs((prev) => {
+      const idx = prev.findIndex((t) => t.id === id);
+      if (idx === -1) return prev;
+
+      const tab = prev[idx];
+      void api?.terminal?.kill(tab.sessionId);
+      if (tab.splitSessionId && !tab.splitIsObserving) void api?.terminal?.kill(tab.splitSessionId);
+
+      if (prev.length === 1) {
+        const replacement = createFreshTab();
+        setActiveTabId(replacement.id);
+        return [replacement];
+      }
+
+      const next = prev[idx + 1] ?? prev[idx - 1];
+      if (id === activeTabId) setActiveTabId(next.id);
+      return prev.filter((t) => t.id !== id);
+    });
+  }, [activeTabId, api, createFreshTab]);
+
+  const handleCloseSplit = React.useCallback(() => {
+    if (!activeTab?.splitSessionId) return;
+    if (!activeTab.splitIsObserving) void api?.terminal?.kill(activeTab.splitSessionId);
+    updateTab(activeTab.id, (tab) => ({
+      ...tab,
+      splitSessionId: null,
+      splitIsObserving: false,
+      splitRatio: 0.5,
+    }));
+  }, [activeTab, api, updateTab]);
+
+  const handleToggleSplit = React.useCallback(() => {
+    if (!activeTab) return;
+    if (activeTab.splitSessionId !== null) {
+      handleCloseSplit();
+      return;
     }
-  }, [activeTab, splitIsObserving]);
+
+    const newId = `terminal-split-${Date.now()}`;
+    updateTab(activeTab.id, (tab) => ({
+      ...tab,
+      splitSessionId: newId,
+      splitRatio: 0.5,
+      splitIsObserving: false,
+    }));
+  }, [activeTab, handleCloseSplit, updateTab]);
+
+  const handleToggleObserve = React.useCallback(() => {
+    if (!activeTab) return;
+
+    if (activeTab.splitIsObserving) {
+      const newId = `terminal-split-${Date.now()}`;
+      updateTab(activeTab.id, (tab) => ({
+        ...tab,
+        splitSessionId: newId,
+        splitIsObserving: false,
+      }));
+      return;
+    }
+
+    if (activeTab.splitSessionId) void api?.terminal?.kill(activeTab.splitSessionId);
+    updateTab(activeTab.id, (tab) => ({
+      ...tab,
+      splitSessionId: tab.sessionId,
+      splitIsObserving: true,
+    }));
+  }, [activeTab, api, updateTab]);
 
   if (isAvailable === null) return null;
 
@@ -633,54 +977,6 @@ export default function TerminalPanel({ visible, conversationId }: TerminalPanel
     );
   }
 
-  const handleAddTab = () => {
-    const tab = makeTab(tabCounterRef.current++);
-    setTabs((prev) => [...prev, tab]);
-    setActiveTabId(tab.id);
-  };
-
-  const handleCloseTab = (id: string) => {
-    if (tabs.length <= 1) return;
-    const idx = tabs.findIndex((t) => t.id === id);
-    const tab = tabs[idx];
-    void api?.terminal?.kill(tab.sessionId);
-    const next = tabs[idx + 1] ?? tabs[idx - 1];
-    setTabs((prev) => prev.filter((t) => t.id !== id));
-    if (id === activeTabId) setActiveTabId(next.id);
-    // Close split if it was observing the closed tab
-    if (splitIsObserving && id === activeTabId) {
-      setSplitSessionId(null);
-      setSplitIsObserving(false);
-    }
-  };
-
-  const handleToggleSplit = () => {
-    if (splitSessionId !== null) {
-      void api?.terminal?.kill(splitSessionId);
-      setSplitSessionId(null);
-      setSplitIsObserving(false);
-    } else {
-      const newId = `terminal-split-${Date.now()}`;
-      setSplitSessionId(newId);
-      setSplitRatio(0.5);
-      setSplitIsObserving(false);
-    }
-  };
-
-  const handleToggleObserve = () => {
-    if (splitIsObserving) {
-      // Revert to independent shell
-      const newId = `terminal-split-${Date.now()}`;
-      setSplitSessionId(newId);
-      setSplitIsObserving(false);
-    } else {
-      // Kill the current split session, switch to observe mode (no PTY)
-      if (splitSessionId) void api?.terminal?.kill(splitSessionId);
-      setSplitSessionId(activeTab.sessionId); // observe the active tab
-      setSplitIsObserving(true);
-    }
-  };
-
   if (!visible) return null;
 
   return (
@@ -688,8 +984,8 @@ export default function TerminalPanel({ visible, conversationId }: TerminalPanel
       <TerminalTabBar
         tabs={tabs}
         activeTabId={activeTabId}
-        splitActive={splitSessionId !== null}
-        splitIsObserving={splitIsObserving}
+        splitActive={activeTab.splitSessionId !== null}
+        splitIsObserving={activeTab.splitIsObserving}
         onSelectTab={setActiveTabId}
         onAddTab={handleAddTab}
         onCloseTab={handleCloseTab}
@@ -698,11 +994,17 @@ export default function TerminalPanel({ visible, conversationId }: TerminalPanel
       />
       <TerminalSplitContainer
         topSessionId={activeTab.sessionId}
-        bottomSessionId={splitSessionId}
-        splitRatio={splitRatio}
-        splitIsObserving={splitIsObserving}
+        bottomSessionId={activeTab.splitSessionId}
+        splitRatio={activeTab.splitRatio}
+        splitIsObserving={activeTab.splitIsObserving}
         conversationId={conversationId}
-        onSplitRatioChange={setSplitRatio}
+        getFontSize={getFontSize}
+        onFontSizeChange={handleFontSizeChange}
+        onCloseTop={() => handleCloseTab(activeTab.id)}
+        onCloseBottom={handleCloseSplit}
+        onSplitRatioChange={(ratio) => {
+          updateTab(activeTab.id, (tab) => ({ ...tab, splitRatio: ratio }));
+        }}
       />
     </div>
   );

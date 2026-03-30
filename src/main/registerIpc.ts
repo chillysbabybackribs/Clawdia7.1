@@ -1,4 +1,7 @@
-import { BrowserWindow, ipcMain } from 'electron';
+import { BrowserWindow, ipcMain, shell } from 'electron';
+import * as fs from 'fs';
+import * as path from 'path';
+import { execFile } from 'child_process';
 import Anthropic from '@anthropic-ai/sdk';
 import { ElectronBrowserService } from './core/browser/ElectronBrowserService';
 import { IPC, IPC_EVENTS } from './ipc-channels';
@@ -6,6 +9,8 @@ import { DEFAULT_MODEL_BY_PROVIDER } from '../shared/model-registry';
 import type { Message } from '../shared/types';
 import type { MessageAttachment } from '../shared/types';
 import type { PromptDebugSnapshot } from '../shared/types';
+import type { FeedItem, ToolCall } from '../shared/types';
+import type { AgentDefinition, AgentBuilderCompileInput } from '../shared/types';
 import { agentLoop } from './agent/agentLoop';
 import { PipelineOrchestrator } from './core/PipelineOrchestrator';
 import { isAppMappingRequest, isContinuationRequest, extractAppMappingTarget } from './agent/classify';
@@ -21,6 +26,11 @@ import {
   getMessages,
   getRuns,
   getRunEvents,
+  updateRun,
+  getDb,
+  upsertStreamingResponse,
+  deleteStreamingResponse,
+  getOrphanedStreamingResponses,
 } from './db';
 import { listPolicyProfiles } from './db/policies';
 import {
@@ -30,11 +40,20 @@ import {
   updateAgent,
   deleteAgent,
 } from './db/agents';
+import { listActiveBudgets, insertTransaction, sumPeriodSpend } from './db/spending';
 import { evaluatePolicy } from './agent/policy-engine';
 import { a11yListApps } from './core/desktop/a11y';
 import { smartFocus } from './core/desktop/smartFocus';
-import { getRemainingBudgets } from './agent/spending-budget';
+import { getRemainingBudgets, checkBudget } from './agent/spending-budget';
 import { runClaudeCode } from './claudeCodeClient';
+import { runCodexCli } from './codexCliClient';
+import { registerWorkspaceStateAccessor } from './core/cli/workspaceState';
+import { setUIState } from './core/cli/uiStateAccessor';
+import { TerminalSessionController } from './core/terminal/TerminalSessionController';
+import {
+  closePendingAnthropicToolUses,
+  normalizeAnthropicMessages,
+} from './core/providers/anthropicMessageProtocol';
 
 function getMainWindow(): BrowserWindow | undefined {
   return BrowserWindow.getAllWindows()[0];
@@ -42,8 +61,29 @@ function getMainWindow(): BrowserWindow | undefined {
 
 const sessions = new Map<string, any[]>();
 let activeConversationId: string | null = null;
-let chatAbort: AbortController | null = null;
-let activeRunId: string | null = null;
+
+// Per-conversation agent controllers — allows multiple tabs to run agents in parallel.
+interface ConvAgent {
+  abort: AbortController;
+  runId: string | null;
+}
+const convAgents = new Map<string, ConvAgent>();
+
+// Expose live state to the workspace awareness tools without circular imports.
+registerWorkspaceStateAccessor({
+  getActiveConversationIds: () => [...sessions.keys()],
+  isConversationRunning: (id) => convAgents.has(id),
+  getSessionMessages: (id) => sessions.get(id) ?? [],
+});
+
+function getOrCreateConvAgent(conversationId: string): ConvAgent {
+  let agent = convAgents.get(conversationId);
+  if (!agent) {
+    agent = { abort: new AbortController(), runId: null };
+    convAgents.set(conversationId, agent);
+  }
+  return agent;
+}
 
 const MAX_SESSION_TURNS = 20; // max user+assistant turn PAIRS to keep
 const MAX_MAPPING_SESSION_TURNS = 6;
@@ -68,90 +108,37 @@ function getOrCreateSession(id: string): any[] {
   return sessions.get(id)!;
 }
 
-function findPendingAnthropicToolUseIds(messages: any[]): string[] {
-  const pending = new Set<string>();
-
-  for (const message of messages) {
-    if (message?.role === 'assistant' && Array.isArray(message.content)) {
-      for (const block of message.content) {
-        if (block?.type === 'tool_use' && typeof block.id === 'string') {
-          pending.add(block.id);
-        }
-      }
-    }
-
-    if (message?.role === 'user' && Array.isArray(message.content)) {
-      for (const block of message.content) {
-        if (block?.type === 'tool_result' && typeof block.tool_use_id === 'string') {
-          pending.delete(block.tool_use_id);
-        }
-      }
-    }
-  }
-
-  return [...pending];
+function formatPromptBlock(title: string, lines: string[]): string {
+  return [
+    '\r\n',
+    `\x1b[36m=== ${title} ===\x1b[0m`,
+    ...lines,
+    `\x1b[36m=== END ${title} ===\x1b[0m`,
+    '',
+  ].join('\r\n');
 }
 
-function closePendingAnthropicToolUses(
-  messages: any[],
-  reason: 'user_interrupted' | 'session_recovery' = 'user_interrupted',
-): boolean {
-  const pendingIds = findPendingAnthropicToolUseIds(messages);
-  if (pendingIds.length === 0) return false;
+function formatPromptDebugForTerminal(snapshot: PromptDebugSnapshot): string {
+  const messageLines = snapshot.messages.flatMap((message, index) => ([
+    `[#${index + 1}] ${message.role}`,
+    message.content || '(empty)',
+  ]));
 
-  messages.push({
-    role: 'user',
-    content: pendingIds.map((toolUseId) => ({
-      type: 'tool_result',
-      tool_use_id: toolUseId,
-      content: JSON.stringify({
-        status: 'interrupted',
-        reason,
-        message: 'Tool run was interrupted before completion.',
-      }),
-    })),
-  });
-  return true;
+  return formatPromptBlock(`PromptDebug ${snapshot.provider}/${snapshot.model} iteration ${snapshot.iteration}`, [
+    `tools=${snapshot.toolNames.join(', ') || 'none'}`,
+    '--- SYSTEM PROMPT ---',
+    snapshot.systemPrompt || '(empty)',
+    '--- MESSAGES ---',
+    ...messageLines,
+  ]);
 }
 
-function sanitizeAnthropicSession(messages: any[]): any[] {
-  const sanitized: any[] = [];
-  const openToolUses = new Set<string>();
+function formatSystemPromptForTerminal(provider: string, model: string, prompt: string): string {
+  return formatPromptBlock(`SystemPrompt ${provider}/${model}`, [prompt || '(empty)']);
+}
 
-  for (const message of messages) {
-    if (message?.role === 'assistant' && Array.isArray(message.content)) {
-      const content = [];
-      for (const block of message.content) {
-        if (block?.type === 'tool_use' && typeof block.id === 'string') {
-          openToolUses.add(block.id);
-          content.push(block);
-          continue;
-        }
-        content.push(block);
-      }
-      sanitized.push({ ...message, content });
-      continue;
-    }
-
-    if (message?.role === 'user' && Array.isArray(message.content)) {
-      const content = [];
-      for (const block of message.content) {
-        if (block?.type === 'tool_result' && typeof block.tool_use_id === 'string') {
-          if (!openToolUses.has(block.tool_use_id)) continue;
-          openToolUses.delete(block.tool_use_id);
-          content.push(block);
-          continue;
-        }
-        content.push(block);
-      }
-      if (content.length > 0) sanitized.push({ ...message, content });
-      continue;
-    }
-
-    sanitized.push(message);
-  }
-
-  return sanitized;
+function formatExternalPromptForTerminal(label: string, prompt: string): string {
+  return formatPromptBlock(`${label} Prompt`, [prompt || '(empty)']);
 }
 
 function ensureConversation(): string {
@@ -257,7 +244,60 @@ function toUiMessages(params: Anthropic.MessageParam[]): Message[] {
   return out;
 }
 
-export function registerIpc(browserService: ElectronBrowserService): void {
+function appendFeedText(feed: FeedItem[], chunk: string): void {
+  if (!chunk) return;
+  const last = feed[feed.length - 1];
+  if (last?.kind === 'text' && last.isStreaming) {
+    last.text += chunk;
+    return;
+  }
+  feed.push({ kind: 'text', text: chunk, isStreaming: true });
+}
+
+function upsertFeedTool(feed: FeedItem[], activity: ToolCall): void {
+  const last = feed[feed.length - 1];
+  if (activity.status === 'running') {
+    if (last?.kind === 'text' && last.isStreaming) {
+      last.isStreaming = false;
+    }
+    feed.push({ kind: 'tool', tool: activity });
+    return;
+  }
+
+  const idx = feed.findIndex((item) => item.kind === 'tool' && item.tool.id === activity.id);
+  if (idx >= 0) {
+    const existingTool = (feed[idx] as Extract<FeedItem, { kind: 'tool' }>).tool;
+    feed[idx] = { kind: 'tool', tool: { ...existingTool, ...activity } };
+    return;
+  }
+
+  feed.push({ kind: 'tool', tool: activity });
+}
+
+function finalizeFeed(feed: FeedItem[]): FeedItem[] {
+  return feed.map((item) => item.kind === 'text' ? { ...item, isStreaming: false } : item);
+}
+
+export function registerIpc(
+  browserService: ElectronBrowserService,
+  terminalController?: TerminalSessionController,
+): void {
+  const findConversationTerminalSessionId = (conversationId: string): string | null => {
+    if (!terminalController) return null;
+    const sessionsForConversation = terminalController
+      .list()
+      .filter((session) => session.conversationId === conversationId);
+    const live = sessionsForConversation.find((session) => session.connected);
+    return live?.sessionId ?? sessionsForConversation[0]?.sessionId ?? null;
+  };
+
+  const appendPromptTail = (conversationId: string, text: string): void => {
+    if (!terminalController || !text.trim()) return;
+    const sessionId = findConversationTerminalSessionId(conversationId);
+    if (!sessionId) return;
+    terminalController.appendOutput(sessionId, text);
+  };
+
   ipcMain.handle(IPC.WINDOW_MINIMIZE, () => {
     getMainWindow()?.minimize();
   });
@@ -324,12 +364,30 @@ export function registerIpc(browserService: ElectronBrowserService): void {
 
   ipcMain.handle(IPC.POLICY_LIST, () => listPolicyProfiles());
 
+  // CHAT_NEW: aborts only the currently active conversation's agent (the one in the same tab),
+  // then resets that tab to a new conversation. Does NOT abort agents in other tabs.
   ipcMain.handle(IPC.CHAT_NEW, () => {
-    chatAbort?.abort();
+    if (activeConversationId) {
+      const agent = convAgents.get(activeConversationId);
+      if (agent) {
+        agent.abort.abort();
+        convAgents.delete(activeConversationId);
+      }
+    }
     const now = new Date().toISOString();
     const id = `conv-${Date.now()}`;
     createConversation({ id, title: 'New conversation', mode: 'chat', created_at: now, updated_at: now });
     activeConversationId = id;
+    sessions.set(id, []);
+    return { id };
+  });
+
+  // CHAT_CREATE: creates a new conversation without aborting any running agent.
+  // Used when opening a new tab while another tab has a running agent.
+  ipcMain.handle(IPC.CHAT_CREATE, () => {
+    const now = new Date().toISOString();
+    const id = `conv-${Date.now()}`;
+    createConversation({ id, title: 'New conversation', mode: 'chat', created_at: now, updated_at: now });
     sessions.set(id, []);
     return { id };
   });
@@ -382,6 +440,7 @@ export function registerIpc(browserService: ElectronBrowserService): void {
       mode: conv?.mode ?? ('chat' as const),
       claudeTerminalStatus: 'idle' as const,
       title: conv?.title ?? null,
+      isRunning: convAgents.has(id),
     };
   });
 
@@ -391,24 +450,45 @@ export function registerIpc(browserService: ElectronBrowserService): void {
     return { mode, claudeTerminalStatus: 'idle' as const };
   });
   ipcMain.handle(IPC.CHAT_SET_MODE, (_e, id: string, mode: string) => {
-    if (id) updateConversation(id, { mode });
-    return { ok: true, mode };
+    if (id) {
+      // If the conversation doesn't exist in DB yet, create it so the mode isn't lost
+      if (!getConversation(id)) {
+        const now = new Date().toISOString();
+        createConversation({ id, title: 'New conversation', mode, created_at: now, updated_at: now });
+      } else {
+        updateConversation(id, { mode });
+      }
+    }
+    return { ok: true, mode, claudeTerminalStatus: mode === 'chat' ? 'stopped' as const : 'idle' as const };
   });
-  ipcMain.handle(IPC.CHAT_GET_ACTIVE_TERMINAL_SESSION, () => ({ sessionId: null }));
+  ipcMain.handle(IPC.CHAT_GET_ACTIVE_TERMINAL_SESSION, (_e, conversationId?: string | null) => ({
+    sessionId: conversationId ? findConversationTerminalSessionId(conversationId) : null,
+  }));
 
-  ipcMain.handle(IPC.CHAT_SEND, async (event, payload: { text: string; attachments?: MessageAttachment[] }) => {
-    const { text, attachments } = payload || { text: '' };
-    const settings = loadSettings();
-    if (settings.provider !== 'anthropic' && settings.provider !== 'gemini' && settings.provider !== 'openai') {
-      return { response: '', error: 'Select a provider in Settings to use chat.' };
-    }
-    const apiKey = settings.providerKeys[settings.provider as keyof typeof settings.providerKeys]?.trim();
-    if (!apiKey) {
-      return { response: '', error: `Add a ${settings.provider} API key in Settings.` };
-    }
-    const model = settings.models[settings.provider as keyof typeof settings.models] ?? DEFAULT_MODEL_BY_PROVIDER[settings.provider as keyof typeof DEFAULT_MODEL_BY_PROVIDER];
+  ipcMain.handle(IPC.CHAT_SEND, async (event, payload: { text: string; attachments?: MessageAttachment[]; conversationId?: string | null }) => {
+    const { text, attachments, conversationId } = payload || { text: '' };
 
-    ensureConversation();
+    if (conversationId) {
+      activeConversationId = conversationId;
+      if (!sessions.has(conversationId)) {
+        // Hydrate from DB so prior history is available to the LLM even if CHAT_LOAD was never called
+        const rows = getMessages(conversationId);
+        const apiMessages: any[] = rows
+          .filter((r) => r.role === 'user' || r.role === 'assistant')
+          .map((r) => {
+            try {
+              const parsed = JSON.parse(r.content);
+              return { role: r.role, content: parsed.content ?? r.content };
+            } catch {
+              return { role: r.role, content: r.content };
+            }
+          });
+        sessions.set(conversationId, apiMessages);
+      }
+    } else {
+      ensureConversation();
+    }
+
     const id = activeConversationId!;
 
     // Ensure conversation exists in DB (handles legacy in-memory-only convs)
@@ -425,19 +505,30 @@ export function registerIpc(browserService: ElectronBrowserService): void {
     addMessage({ id: userMsgId, conversation_id: id, role: 'user', content: JSON.stringify(userMsg), created_at: nowTs });
     updateConversation(id, { updated_at: nowTs });
 
-    // ── Claude Code path ──────────────────────────────────────────────────────
+    // Helper: broadcast events tagged with conversationId.
+    // Defined early so claude_terminal/codex paths can also use it.
+    const winEarly = getMainWindow();
+    const sendEarly = (channel: string, payload: unknown) => {
+      if (winEarly && !winEarly.isDestroyed()) winEarly.webContents.send(channel, payload);
+    };
+
+    // ── Claude Code path — uses claude CLI with user's account (no API key needed) ──
     const conv = getConversation(id);
     if (conv?.mode === 'claude_terminal') {
+      sendEarly(IPC_EVENTS.CHAT_THINKING, { thought: 'Claude Code is thinking…', conversationId: id });
+      appendPromptTail(id, formatExternalPromptForTerminal('Claude Code', text));
+
       try {
         const { finalText } = await runClaudeCode({
           conversationId: id,
           prompt: text,
+          skipPermissions: loadSettings().unrestrictedMode,
           onText: (delta) => {
-            if (!event.sender.isDestroyed()) event.sender.send(IPC_EVENTS.CHAT_STREAM_TEXT, delta);
+            sendEarly(IPC_EVENTS.CHAT_STREAM_TEXT, { delta, conversationId: id });
           },
         });
 
-        if (!event.sender.isDestroyed()) event.sender.send(IPC_EVENTS.CHAT_STREAM_END, { ok: true });
+        sendEarly(IPC_EVENTS.CHAT_STREAM_END, { ok: true, conversationId: id });
 
         if (finalText) {
           const assistantMsgId = `msg-a-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
@@ -447,15 +538,57 @@ export function registerIpc(browserService: ElectronBrowserService): void {
           addMessage({ id: assistantMsgId, conversation_id: id, role: 'assistant', content: JSON.stringify(assistantMsg), created_at: nowStr });
           updateConversation(id, { updated_at: nowStr });
         }
-
-        return { response: finalText };
+        return { response: finalText, conversationId: id };
       } catch (e: unknown) {
         const err = e instanceof Error ? e : new Error(String(e));
-        if (!event.sender.isDestroyed()) event.sender.send(IPC_EVENTS.CHAT_STREAM_END, { ok: false, error: err.message });
-        return { response: '', error: err.message };
+        sendEarly(IPC_EVENTS.CHAT_STREAM_END, { ok: false, error: err.message, conversationId: id });
+        return { response: '', error: err.message, conversationId: id };
       }
     }
     // ── End Claude Code path ──────────────────────────────────────────────────
+
+    // ── Codex path — uses codex CLI with OpenAI API key ──────────────────────
+    if (conv?.mode === 'codex_terminal') {
+      sendEarly(IPC_EVENTS.CHAT_THINKING, { thought: 'Codex is thinking…', conversationId: id });
+      appendPromptTail(id, formatExternalPromptForTerminal('Codex', text));
+
+      try {
+        const { finalText } = await runCodexCli({
+          conversationId: id,
+          prompt: text,
+          onText: (delta) => {
+            sendEarly(IPC_EVENTS.CHAT_STREAM_TEXT, { delta, conversationId: id });
+          },
+        });
+
+        sendEarly(IPC_EVENTS.CHAT_STREAM_END, { ok: true, conversationId: id });
+
+        if (finalText) {
+          const assistantMsgId = `msg-a-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+          const assistantMsgTs = new Date().toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+          const assistantMsg: Message = { id: assistantMsgId, role: 'assistant', content: finalText, timestamp: assistantMsgTs };
+          const nowStr = new Date().toISOString();
+          addMessage({ id: assistantMsgId, conversation_id: id, role: 'assistant', content: JSON.stringify(assistantMsg), created_at: nowStr });
+          updateConversation(id, { updated_at: nowStr });
+        }
+        return { response: finalText, conversationId: id };
+      } catch (e: unknown) {
+        const err = e instanceof Error ? e : new Error(String(e));
+        sendEarly(IPC_EVENTS.CHAT_STREAM_END, { ok: false, error: err.message, conversationId: id });
+        return { response: '', error: err.message, conversationId: id };
+      }
+    }
+    // ── End Codex path ───────────────────────────────────────────────────────
+
+    const settings = loadSettings();
+    if (settings.provider !== 'anthropic' && settings.provider !== 'gemini' && settings.provider !== 'openai') {
+      return { response: '', error: 'Select a provider in Settings to use chat.' };
+    }
+    const apiKey = settings.providerKeys[settings.provider as keyof typeof settings.providerKeys]?.trim();
+    if (!apiKey) {
+      return { response: '', error: `Add a ${settings.provider} API key in Settings.` };
+    }
+    const model = settings.models[settings.provider as keyof typeof settings.models] ?? DEFAULT_MODEL_BY_PROVIDER[settings.provider as keyof typeof DEFAULT_MODEL_BY_PROVIDER];
 
     const settings_provider = settings.provider as 'anthropic' | 'openai' | 'gemini';
 
@@ -467,16 +600,33 @@ export function registerIpc(browserService: ElectronBrowserService): void {
       sessionMessages = pruned;
     }
     if (settings_provider === 'anthropic') {
-      const sanitized = sanitizeAnthropicSession(sessionMessages);
-      if (sanitized.length !== sessionMessages.length) {
-        sessions.set(id, sanitized);
-        sessionMessages = sanitized;
+      const repaired = normalizeAnthropicMessages(sessionMessages, {
+        closePendingToolUses: true,
+        pendingToolUseReason: 'session_recovery',
+      });
+      if (repaired.repaired) {
+        sessions.set(id, repaired.messages);
+        sessionMessages = repaired.messages;
       }
       closePendingAnthropicToolUses(sessionMessages, 'session_recovery');
     }
 
-    chatAbort?.abort();
-    chatAbort = new AbortController();
+    // Abort any existing agent for THIS conversation only (re-send in same tab).
+    // Agents running in other conversations (other tabs) are unaffected.
+    const existingAgent = convAgents.get(id);
+    if (existingAgent) {
+      existingAgent.abort.abort();
+      convAgents.delete(id);
+    }
+    const convAgent = getOrCreateConvAgent(id);
+    activeConversationId = id;
+
+    // Broadcast stream events tagged with conversationId so each ChatPanel
+    // can filter to its own conversation, even when multiple tabs are running.
+    const win = getMainWindow();
+    const send = (channel: string, payload: unknown) => {
+      if (win && !win.isDestroyed()) win.webContents.send(channel, payload);
+    };
 
     const continuationForcedProfile = buildContinuationForcedProfile(text, sessionMessages);
 
@@ -487,9 +637,8 @@ export function registerIpc(browserService: ElectronBrowserService): void {
 
     if (usePipeline) {
       // ── Multi-agent pipeline path ─────────────────────────────────────────
-      // Insert a synthetic pipeline message into the conversation so PipelineBlock renders
       const pipelineMsgId = `msg-pipe-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
-      if (!event.sender.isDestroyed()) event.sender.send(IPC_EVENTS.CHAT_STREAM_END, { ok: true, pipelineMessageId: pipelineMsgId, isPipelineStart: true });
+      send(IPC_EVENTS.CHAT_STREAM_END, { ok: true, pipelineMessageId: pipelineMsgId, isPipelineStart: true, conversationId: id });
 
       try {
         const response = await PipelineOrchestrator.run(text, {
@@ -497,21 +646,20 @@ export function registerIpc(browserService: ElectronBrowserService): void {
           apiKey,
           model,
           conversationId: id,
-          signal: chatAbort!.signal,
+          signal: convAgent.abort.signal,
           browserService,
           unrestrictedMode: settings.unrestrictedMode,
           onStateChanged: (state) => {
-            if (!event.sender.isDestroyed()) event.sender.send(IPC_EVENTS.SWARM_STATE_CHANGED, state);
+            send(IPC_EVENTS.SWARM_STATE_CHANGED, { ...state, conversationId: id });
           },
           onText: (delta) => {
-            if (!event.sender.isDestroyed()) event.sender.send(IPC_EVENTS.CHAT_STREAM_TEXT, delta);
+            send(IPC_EVENTS.CHAT_STREAM_TEXT, { delta, conversationId: id });
           },
         });
 
         result = { response };
-        if (!event.sender.isDestroyed()) event.sender.send(IPC_EVENTS.CHAT_STREAM_END, { ok: true });
+        send(IPC_EVENTS.CHAT_STREAM_END, { ok: true, conversationId: id });
 
-        // Persist synthesizer output as assistant message
         if (response) {
           const assistantMsgId = `msg-a-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
           const assistantMsgTs = new Date().toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
@@ -520,7 +668,6 @@ export function registerIpc(browserService: ElectronBrowserService): void {
           addMessage({ id: assistantMsgId, conversation_id: id, role: 'assistant', content: JSON.stringify(assistantMsg), created_at: nowStr });
           updateConversation(id, { updated_at: nowStr, title: text.slice(0, 60) || 'New conversation' });
 
-          // Update session so follow-up messages have pipeline context
           const session = sessions.get(id) ?? [];
           session.push({ role: 'user', content: text });
           session.push({ role: 'assistant', content: response });
@@ -529,14 +676,29 @@ export function registerIpc(browserService: ElectronBrowserService): void {
       } catch (e: unknown) {
         const err = e instanceof Error ? e : new Error(String(e));
         result = { response: '', error: err.message };
-        if (!event.sender.isDestroyed()) event.sender.send(IPC_EVENTS.CHAT_STREAM_END, { ok: false, error: err.message });
+        send(IPC_EVENTS.CHAT_STREAM_END, { ok: false, error: err.message, conversationId: id });
       } finally {
-        activeRunId = null;
+        convAgents.delete(id);
       }
     } else {
-      // ── Single agent path (unchanged) ────────────────────────────────────
+      // ── Single agent path ─────────────────────────────────────────────────
       const runId = `run-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
-      activeRunId = runId;
+      convAgent.runId = runId;
+      const assistantFeed: FeedItem[] = [];
+      const assistantToolCalls = new Map<string, ToolCall>();
+
+      // Streaming checkpoint: write accumulated text to DB periodically so
+      // a crash doesn't lose the entire in-progress response.
+      const streamingId = `stream-${runId}`;
+      let streamingBuffer = '';
+      let streamingFlushTimer: ReturnType<typeof setTimeout> | null = null;
+      const flushStreamingBuffer = () => {
+        if (streamingBuffer) upsertStreamingResponse(streamingId, id, runId, streamingBuffer);
+        streamingFlushTimer = null;
+      };
+      const scheduleFlush = () => {
+        if (!streamingFlushTimer) streamingFlushTimer = setTimeout(flushStreamingBuffer, 1500);
+      };
 
       try {
         const response = await agentLoop(text, sessionMessages, {
@@ -544,26 +706,40 @@ export function registerIpc(browserService: ElectronBrowserService): void {
           apiKey,
           model,
           runId,
-          signal: chatAbort!.signal,
+          signal: convAgent.abort.signal,
           forcedProfile: continuationForcedProfile,
           unrestrictedMode: settings.unrestrictedMode,
           browserService,
           attachments,
           onText: (delta) => {
-            if (!event.sender.isDestroyed()) event.sender.send(IPC_EVENTS.CHAT_STREAM_TEXT, delta);
+            streamingBuffer += delta;
+            appendFeedText(assistantFeed, delta);
+            scheduleFlush();
+            send(IPC_EVENTS.CHAT_STREAM_TEXT, { delta, conversationId: id });
           },
           onThinking: (t) => {
-            if (!event.sender.isDestroyed()) event.sender.send(IPC_EVENTS.CHAT_THINKING, t);
+            send(IPC_EVENTS.CHAT_THINKING, { thought: t, conversationId: id });
           },
           onPromptDebug: (snapshot: PromptDebugSnapshot) => {
-            if (!event.sender.isDestroyed()) event.sender.send(IPC_EVENTS.CHAT_PROMPT_DEBUG, snapshot);
+            appendPromptTail(id, formatPromptDebugForTerminal(snapshot));
+            send(IPC_EVENTS.CHAT_PROMPT_DEBUG, { ...snapshot, conversationId: id });
           },
           onToolActivity: (activity) => {
-            if (!event.sender.isDestroyed()) event.sender.send(IPC_EVENTS.CHAT_TOOL_ACTIVITY, activity);
+            const normalizedActivity: ToolCall = { ...activity };
+            assistantToolCalls.set(normalizedActivity.id, {
+              ...(assistantToolCalls.get(normalizedActivity.id) ?? {}),
+              ...normalizedActivity,
+            });
+            upsertFeedTool(assistantFeed, normalizedActivity);
+            send(IPC_EVENTS.CHAT_TOOL_ACTIVITY, { ...activity, conversationId: id });
+          },
+          onSystemPrompt: (prompt) => {
+            appendPromptTail(id, formatSystemPromptForTerminal(settings_provider, model, prompt));
+            updateRun(runId, { system_prompt: prompt });
           },
         });
         result = { response };
-        if (!event.sender.isDestroyed()) event.sender.send(IPC_EVENTS.CHAT_STREAM_END, { ok: true });
+        send(IPC_EVENTS.CHAT_STREAM_END, { ok: true, conversationId: id });
       } catch (e: unknown) {
         const err = e instanceof Error ? e : new Error(String(e));
         if (err.name === 'AbortError' || err.message === 'AbortError') {
@@ -571,49 +747,73 @@ export function registerIpc(browserService: ElectronBrowserService): void {
             closePendingAnthropicToolUses(sessionMessages, 'user_interrupted');
           }
           result = { response: '', error: 'Stopped' };
-          if (!event.sender.isDestroyed()) event.sender.send(IPC_EVENTS.CHAT_STREAM_END, { ok: false, cancelled: true });
+          send(IPC_EVENTS.CHAT_STREAM_END, { ok: false, cancelled: true, conversationId: id });
         } else {
           result = { response: '', error: err.message };
-          if (!event.sender.isDestroyed()) event.sender.send(IPC_EVENTS.CHAT_STREAM_END, { ok: false, error: err.message });
+          send(IPC_EVENTS.CHAT_STREAM_END, { ok: false, error: err.message, conversationId: id });
         }
       } finally {
-        activeRunId = null;
+        if (streamingFlushTimer) { clearTimeout(streamingFlushTimer); streamingFlushTimer = null; }
+        convAgents.delete(id);
       }
 
-      // Persist assistant message
+      // Persist assistant message and clear streaming checkpoint
       if (result.response && !result.error) {
         const assistantMsgId = `msg-a-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
         const assistantMsgTs = new Date().toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
-        const assistantMsg: Message = { id: assistantMsgId, role: 'assistant', content: result.response, timestamp: assistantMsgTs };
+        const finalizedFeed = finalizeFeed(assistantFeed);
+        const assistantMsg: Message = {
+          id: assistantMsgId,
+          role: 'assistant',
+          content: result.response,
+          timestamp: assistantMsgTs,
+          feed: finalizedFeed,
+          toolCalls: Array.from(assistantToolCalls.values()),
+        };
         const nowStr = new Date().toISOString();
         addMessage({ id: assistantMsgId, conversation_id: id, role: 'assistant', content: JSON.stringify(assistantMsg), created_at: nowStr });
         updateConversation(id, { updated_at: nowStr, title: text.slice(0, 60) || 'New conversation' });
+        deleteStreamingResponse(streamingId);
       }
     }
 
-    return result;
+    return { ...result, conversationId: id };
   });
 
-  ipcMain.handle(IPC.CHAT_STOP, () => {
-    chatAbort?.abort();
-    chatAbort = null;
-    if (activeRunId) cancelLoop(activeRunId);
-    if (activeConversationId) {
-      const sessionMessages = sessions.get(activeConversationId);
-      if (sessionMessages) {
-        closePendingAnthropicToolUses(sessionMessages, 'user_interrupted');
-      }
+  // CHAT_STOP: accepts an optional conversationId. If provided, stops only that
+  // conversation's agent. If omitted (legacy), stops the most recently active one.
+  ipcMain.handle(IPC.CHAT_STOP, (_e, conversationId?: string) => {
+    const targetId = conversationId ?? activeConversationId;
+    if (!targetId) return;
+    const agent = convAgents.get(targetId);
+    if (agent) {
+      agent.abort.abort();
+      if (agent.runId) cancelLoop(agent.runId);
+      convAgents.delete(targetId);
+    }
+    const sessionMessages = sessions.get(targetId);
+    if (sessionMessages) {
+      closePendingAnthropicToolUses(sessionMessages, 'user_interrupted');
     }
   });
 
-  ipcMain.handle(IPC.CHAT_PAUSE, () => {
-    if (activeRunId) pauseLoop(activeRunId);
+  ipcMain.handle(IPC.CHAT_PAUSE, (_e, conversationId?: string) => {
+    const targetId = conversationId ?? activeConversationId;
+    if (!targetId) return;
+    const agent = convAgents.get(targetId);
+    if (agent?.runId) pauseLoop(agent.runId);
   });
-  ipcMain.handle(IPC.CHAT_RESUME, () => {
-    if (activeRunId) resumeLoop(activeRunId);
+  ipcMain.handle(IPC.CHAT_RESUME, (_e, conversationId?: string) => {
+    const targetId = conversationId ?? activeConversationId;
+    if (!targetId) return;
+    const agent = convAgents.get(targetId);
+    if (agent?.runId) resumeLoop(agent.runId);
   });
-  ipcMain.handle(IPC.CHAT_ADD_CONTEXT, (_e, text: string) => {
-    if (activeRunId) addContext(activeRunId, text);
+  ipcMain.handle(IPC.CHAT_ADD_CONTEXT, (_e, text: string, conversationId?: string) => {
+    const targetId = conversationId ?? activeConversationId;
+    if (!targetId) return;
+    const agent = convAgents.get(targetId);
+    if (agent?.runId) addContext(agent.runId, text);
   });
   ipcMain.handle(IPC.CHAT_RATE_TOOL, () => { });
 
@@ -629,9 +829,7 @@ export function registerIpc(browserService: ElectronBrowserService): void {
     sessions.delete(id);
     if (activeConversationId === id) activeConversationId = null;
   });
-  ipcMain.handle(IPC.CHAT_OPEN_ATTACHMENT, () => { });
-
-  ipcMain.handle(IPC.TASKS_SUMMARY, () => ({ runningCount: 0, completedCount: 0 }));
+  // (CHAT_OPEN_ATTACHMENT and TASKS_SUMMARY are registered at the end of this function)
 
   const sendToRenderer = (channel: string, payload: unknown): void => {
     const w = getMainWindow();
@@ -759,19 +957,604 @@ export function registerIpc(browserService: ElectronBrowserService): void {
     }
   });
 
-  ipcMain.handle(IPC.AGENT_RUN_CURRENT_PAGE, () => {
-    return { ok: false, error: 'Agent execution not yet implemented' };
+  // ── Agent: Run on Current Page ──────────────────────────────────────────────
+  ipcMain.handle(IPC.AGENT_RUN_CURRENT_PAGE, async (_e, id: string) => {
+    const agentDef = getAgent(id);
+    if (!agentDef) return { ok: false, error: 'Agent not found' };
+    const settings = loadSettings();
+    const provider = settings.provider as 'anthropic' | 'openai' | 'gemini';
+    const apiKey = settings.providerKeys[provider]?.trim();
+    if (!apiKey) return { ok: false, error: 'No API key configured' };
+    const model = settings.models[provider] ?? DEFAULT_MODEL_BY_PROVIDER[provider];
+
+    // Get current page context from the browser
+    let pageUrl = '';
+    let pageTitle = '';
+    try {
+      const tabs = await browserService.listTabs();
+      const activeTab = tabs.find((t: any) => t.active);
+      if (activeTab) {
+        pageUrl = activeTab.url || '';
+        pageTitle = activeTab.title || '';
+      }
+    } catch { /* browser may not be available */ }
+
+    if (!pageUrl) return { ok: false, error: 'No active browser page found' };
+
+    const abort = new AbortController();
+    const convId = `conv-agent-${Date.now()}`;
+    const runId = `run-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+    const now = new Date().toISOString();
+    createConversation({ id: convId, title: `${agentDef.name} — ${pageTitle || pageUrl}`, mode: 'chat', created_at: now, updated_at: now });
+
+    const goal = `${agentDef.goal}\n\nContext: Run this agent on the currently open browser page.\nPage URL: ${pageUrl}\nPage Title: ${pageTitle}`;
+
+    try {
+      const sessionMessages = getOrCreateSession(convId);
+      await agentLoop(goal, sessionMessages, {
+        provider, apiKey, model, runId,
+        signal: abort.signal,
+        browserService,
+        unrestrictedMode: settings.unrestrictedMode,
+        onText: (delta) => {
+          getMainWindow()?.webContents.send(IPC_EVENTS.CHAT_STREAM_TEXT, delta);
+        },
+        onThinking: (t) => {
+          getMainWindow()?.webContents.send(IPC_EVENTS.CHAT_THINKING, t);
+        },
+        onToolActivity: (activity) => {
+          getMainWindow()?.webContents.send(IPC_EVENTS.CHAT_TOOL_ACTIVITY, activity);
+        },
+      });
+      return { ok: true, runId, conversationId: convId };
+    } catch (e: any) {
+      return { ok: false, error: e.message };
+    }
   });
 
-  ipcMain.handle(IPC.AGENT_RUN_URLS, () => {
-    return { ok: false, error: 'Agent execution not yet implemented' };
+  // ── Agent: Run on URLs ─────────────────────────────────────────────────────
+  ipcMain.handle(IPC.AGENT_RUN_URLS, async (_e, id: string, urls: string[]) => {
+    const agentDef = getAgent(id);
+    if (!agentDef) return { ok: false, error: 'Agent not found' };
+    if (!urls || urls.length === 0) return { ok: false, error: 'No URLs provided' };
+    const settings = loadSettings();
+    const provider = settings.provider as 'anthropic' | 'openai' | 'gemini';
+    const apiKey = settings.providerKeys[provider]?.trim();
+    if (!apiKey) return { ok: false, error: 'No API key configured' };
+    const model = settings.models[provider] ?? DEFAULT_MODEL_BY_PROVIDER[provider];
+
+    const abort = new AbortController();
+    const convId = `conv-agent-${Date.now()}`;
+    const runId = `run-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+    const now = new Date().toISOString();
+    createConversation({ id: convId, title: `${agentDef.name} — ${urls.length} URL(s)`, mode: 'chat', created_at: now, updated_at: now });
+
+    const urlList = urls.map((u, i) => `${i + 1}. ${u}`).join('\n');
+    const goal = `${agentDef.goal}\n\nProcess the following URLs:\n${urlList}`;
+
+    try {
+      const sessionMessages = getOrCreateSession(convId);
+      await agentLoop(goal, sessionMessages, {
+        provider, apiKey, model, runId,
+        signal: abort.signal,
+        browserService,
+        unrestrictedMode: settings.unrestrictedMode,
+        onText: (delta) => {
+          getMainWindow()?.webContents.send(IPC_EVENTS.CHAT_STREAM_TEXT, delta);
+        },
+        onThinking: (t) => {
+          getMainWindow()?.webContents.send(IPC_EVENTS.CHAT_THINKING, t);
+        },
+        onToolActivity: (activity) => {
+          getMainWindow()?.webContents.send(IPC_EVENTS.CHAT_TOOL_ACTIVITY, activity);
+        },
+      });
+      return { ok: true, runId, conversationId: convId };
+    } catch (e: any) {
+      return { ok: false, error: e.message };
+    }
   });
 
-  ipcMain.handle(IPC.AGENT_TEST, () => {
-    return { ok: false, error: 'Agent testing not yet implemented' };
+  // ── Agent: Test ────────────────────────────────────────────────────────────
+  ipcMain.handle(IPC.AGENT_TEST, async (_e, id: string) => {
+    const agentDef = getAgent(id);
+    if (!agentDef) return { ok: false, error: 'Agent not found' };
+    const settings = loadSettings();
+    const provider = settings.provider as 'anthropic' | 'openai' | 'gemini';
+    const apiKey = settings.providerKeys[provider]?.trim();
+    if (!apiKey) return { ok: false, error: 'No API key configured' };
+    const model = settings.models[provider] ?? DEFAULT_MODEL_BY_PROVIDER[provider];
+
+    const abort = new AbortController();
+    const convId = `conv-agent-test-${Date.now()}`;
+    const runId = `run-test-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+    const now = new Date().toISOString();
+    createConversation({ id: convId, title: `[Test] ${agentDef.name}`, mode: 'chat', created_at: now, updated_at: now });
+
+    // Build a test-specific goal with dry-run constraints
+    const testGoal = `[DRY RUN / TEST MODE] You are testing the following agent definition. Validate that each step is achievable, the tools are accessible, and the scope is correct. Do NOT make any real modifications — only read and verify.\n\nAgent: ${agentDef.name}\nGoal: ${agentDef.goal}\n${agentDef.blueprint ? `Steps:\n${agentDef.blueprint.steps.map((s, i) => `${i + 1}. ${s}`).join('\n')}` : ''}\n\nReport: Is this agent ready to run? List any issues found.`;
+
+    try {
+      const sessionMessages = getOrCreateSession(convId);
+      const result = await agentLoop(testGoal, sessionMessages, {
+        provider, apiKey, model, runId,
+        signal: abort.signal,
+        browserService,
+        unrestrictedMode: false, // tests always run restricted
+        onText: (delta) => {
+          getMainWindow()?.webContents.send(IPC_EVENTS.CHAT_STREAM_TEXT, delta);
+        },
+        onThinking: (t) => {
+          getMainWindow()?.webContents.send(IPC_EVENTS.CHAT_THINKING, t);
+        },
+        onToolActivity: (activity) => {
+          getMainWindow()?.webContents.send(IPC_EVENTS.CHAT_TOOL_ACTIVITY, activity);
+        },
+      });
+
+      // Update agent with test result
+      const passed = !result.toLowerCase().includes('fail') && !result.toLowerCase().includes('error') && !result.toLowerCase().includes('cannot');
+      updateAgent(id, {
+        lastTestStatus: passed ? 'passed' : 'failed',
+        lastTestSummary: result.slice(0, 500),
+      });
+
+      return { ok: true, runId, conversationId: convId };
+    } catch (e: any) {
+      updateAgent(id, { lastTestStatus: 'failed', lastTestSummary: e.message });
+      return { ok: false, error: e.message };
+    }
   });
 
-  ipcMain.handle(IPC.AGENT_COMPILE, () => {
-    return { ok: false, definition: null, error: 'Agent compilation not yet implemented' };
+  // ── Agent: Compile (LLM-powered blueprint generation) ─────────────────────
+  ipcMain.handle(IPC.AGENT_COMPILE, async (_e, input: AgentBuilderCompileInput) => {
+    const settings = loadSettings();
+    const provider = settings.provider as 'anthropic' | 'openai' | 'gemini';
+    const apiKey = settings.providerKeys[provider]?.trim();
+    if (!apiKey) return { ok: false, definition: null, error: 'No API key configured' };
+    const model = settings.models[provider] ?? DEFAULT_MODEL_BY_PROVIDER[provider];
+
+    const compilePrompt = `You are an agent architect. Given the user's goal, generate a structured agent blueprint as JSON.
+
+Respond ONLY with a JSON object in this exact format:
+{
+  "name": "concise agent name",
+  "description": "one-line description",
+  "agentType": "web_data|spreadsheet|email|files|research|general",
+  "outputMode": "preview|csv|json|spreadsheet|chat_message|file_output",
+  "outputTarget": "optional file path or destination",
+  "resourceScope": {
+    "browserDomains": ["domain.com"],
+    "urls": [],
+    "folders": [],
+    "files": [],
+    "apps": []
+  },
+  "blueprint": {
+    "objective": "what this agent achieves",
+    "inputs": ["what it needs from the user"],
+    "scope": ["what resources it accesses"],
+    "constraints": ["guardrails and limits"],
+    "steps": ["step 1", "step 2", "step 3"],
+    "output": { "mode": "csv", "summary": "outputs a CSV of extracted data" },
+    "successCriteria": ["how we know it worked"],
+    "assumptions": ["what we assume is true"],
+    "openQuestions": ["things to clarify"]
+  },
+  "questions": ["clarifying questions for the user, if any"],
+  "warnings": ["potential issues or risks"]
+}`;
+
+    const userInput = input.refinement
+      ? `Original goal: ${input.goal}\n\nRefinement: ${input.refinement}\n\n${input.currentBlueprint ? `Current blueprint: ${JSON.stringify(input.currentBlueprint)}` : ''}`
+      : input.goal;
+
+    try {
+      const { streamLLM } = await import('./agent/streamLLM');
+      const { text } = await streamLLM(
+        [{ role: 'user', content: userInput }],
+        compilePrompt,
+        '',
+        { toolGroup: 'core', modelTier: 'standard', isGreeting: false },
+        {
+          provider, apiKey, model,
+          runId: `compile-${Date.now()}`,
+          onText: () => {},
+          maxIterations: 1,
+        } as any,
+      );
+
+      // Parse the JSON response
+      const jsonMatch = text.match(/\{[\s\S]*\}/);
+      if (!jsonMatch) return { ok: false, definition: null, error: 'Model did not return valid JSON' };
+
+      const parsed = JSON.parse(jsonMatch[0]);
+      return {
+        ok: true,
+        ...parsed,
+        model,
+      };
+    } catch (e: any) {
+      return { ok: false, definition: null, error: e.message };
+    }
+  });
+
+  // ── Filesystem ──────────────────────────────────────────────────────────────
+  ipcMain.handle(IPC.FS_READ_DIR, async (_e, dirPath: string) => {
+    try {
+      const entries = await fs.promises.readdir(dirPath, { withFileTypes: true });
+      return entries.map((e) => ({
+        name: e.name,
+        type: e.isDirectory() ? 'directory' : 'file',
+        path: path.join(dirPath, e.name),
+      }));
+    } catch (err: any) {
+      return [];
+    }
+  });
+
+  ipcMain.handle(IPC.FS_READ_FILE, async (_e, filePath: string) => {
+    try {
+      const content = await fs.promises.readFile(filePath, 'utf-8');
+      return content;
+    } catch {
+      return null;
+    }
+  });
+
+  ipcMain.handle(IPC.FS_WRITE_FILE, async (_e, filePath: string, content: string) => {
+    try {
+      await fs.promises.writeFile(filePath, content, 'utf-8');
+      return { ok: true };
+    } catch (err: any) {
+      return { ok: false, error: err.message };
+    }
+  });
+
+  // ── Editor ─────────────────────────────────────────────────────────────────
+  ipcMain.handle(IPC.EDITOR_OPEN_FILE, (_e, filePath: string) => {
+    getMainWindow()?.webContents.send(IPC_EVENTS.EDITOR_OPEN_FILE, { filePath });
+  });
+
+  ipcMain.handle(IPC.EDITOR_WATCH_FILE, (_e, filePath: string) => {
+    try {
+      const watcher = fs.watch(filePath, () => {
+        getMainWindow()?.webContents.send(IPC_EVENTS.EDITOR_FILE_CHANGED, { filePath });
+      });
+      // Store watcher so it can be cleaned up
+      (ipcMain as any).__editorWatcher = watcher;
+      return { ok: true };
+    } catch {
+      return { ok: false };
+    }
+  });
+
+  ipcMain.handle(IPC.EDITOR_UNWATCH_FILE, () => {
+    const watcher = (ipcMain as any).__editorWatcher;
+    if (watcher) { watcher.close(); (ipcMain as any).__editorWatcher = null; }
+  });
+
+  ipcMain.handle(IPC.EDITOR_SET_STATE, (_e, state: any) => {
+    (ipcMain as any).__editorState = state;
+  });
+
+  ipcMain.handle(IPC.EDITOR_GET_STATE, () => {
+    return (ipcMain as any).__editorState ?? null;
+  });
+
+  // ── Chat: Open Attachment ─────────────────────────────────────────────────
+  ipcMain.handle(IPC.CHAT_OPEN_ATTACHMENT, (_e, filePath: string) => {
+    if (filePath && typeof filePath === 'string') {
+      shell.openPath(filePath).catch(() => {});
+    }
+  });
+
+  // ── Desktop: Kill App ──────────────────────────────────────────────────────
+  ipcMain.handle(IPC.DESKTOP_KILL_APP, async (_e, pid: number) => {
+    try {
+      process.kill(pid, 'SIGTERM');
+      return { ok: true };
+    } catch (err: any) {
+      return { ok: false, error: err.message };
+    }
+  });
+
+  // ── Wallet / Spending ──────────────────────────────────────────────────────
+  ipcMain.handle(IPC.WALLET_GET_BUDGETS, () => {
+    return listActiveBudgets();
+  });
+
+  ipcMain.handle(IPC.WALLET_GET_TRANSACTIONS, (_e, args?: { limit?: number }) => {
+    try {
+      const db = require('./db').getDb();
+      const limit = args?.limit ?? 50;
+      return db.prepare('SELECT * FROM spending_transactions ORDER BY created_at DESC LIMIT ?').all(limit);
+    } catch {
+      return [];
+    }
+  });
+
+  ipcMain.handle(IPC.WALLET_SET_BUDGET, (_e, input: { period: string; limitUsd: number; resetDay?: number }) => {
+    try {
+      const db = require('./db').getDb();
+      db.prepare(`
+        INSERT INTO spending_budgets (period, limit_usd, reset_day)
+        VALUES (?, ?, ?)
+        ON CONFLICT(period) DO UPDATE SET limit_usd = excluded.limit_usd, reset_day = excluded.reset_day, is_active = 1
+      `).run(input.period, input.limitUsd, input.resetDay ?? 1);
+      return { ok: true };
+    } catch (err: any) {
+      return { ok: false, error: err.message };
+    }
+  });
+
+  ipcMain.handle(IPC.WALLET_DISABLE_BUDGET, (_e, period: string) => {
+    try {
+      const db = require('./db').getDb();
+      db.prepare('UPDATE spending_budgets SET is_active = 0 WHERE period = ?').run(period);
+      return { ok: true };
+    } catch (err: any) {
+      return { ok: false, error: err.message };
+    }
+  });
+
+  // ── Process Management ─────────────────────────────────────────────────────
+  ipcMain.handle(IPC.PROCESS_LIST, () => {
+    // Return active agent run processes
+    const runs = getRuns('');  // empty string → get all
+    return runs.filter(r => r.status === 'running').map(r => ({
+      id: r.id,
+      title: r.title,
+      status: r.status,
+      startedAt: r.started_at,
+    }));
+  });
+
+  ipcMain.handle(IPC.PROCESS_CANCEL, (_e, processId: string) => {
+    // Cancel an active agent run
+    cancelLoop(processId);
+    return { ok: true };
+  });
+
+  ipcMain.handle(IPC.PROCESS_DISMISS, (_e, processId: string) => {
+    updateRun(processId, { status: 'dismissed' });
+    return { ok: true };
+  });
+
+  // ── Run Tracking ───────────────────────────────────────────────────────────
+  // Note: RUN_LIST and RUN_EVENTS already registered above; these are the
+  // remaining run-related handlers.
+  ipcMain.handle(IPC.RUN_GET, (_e, runId: string) => {
+    try {
+      const db = require('./db').getDb();
+      return db.prepare('SELECT * FROM runs WHERE id = ?').get(runId) ?? null;
+    } catch { return null; }
+  });
+
+  ipcMain.handle(IPC.RUN_ARTIFACTS, (_e, runId: string) => {
+    try {
+      const events = getRunEvents(runId);
+      return events.filter((e: any) => e.event_type === 'artifact');
+    } catch { return []; }
+  });
+
+  ipcMain.handle(IPC.RUN_CHANGES, (_e, runId: string) => {
+    try {
+      const events = getRunEvents(runId);
+      return events.filter((e: any) => e.event_type === 'file_change');
+    } catch { return []; }
+  });
+
+  ipcMain.handle(IPC.RUN_SCORECARD, () => {
+    try {
+      const db = require('./db').getDb();
+      const total = (db.prepare('SELECT COUNT(*) as n FROM runs').get() as any)?.n ?? 0;
+      const completed = (db.prepare("SELECT COUNT(*) as n FROM runs WHERE status = 'completed'").get() as any)?.n ?? 0;
+      const failed = (db.prepare("SELECT COUNT(*) as n FROM runs WHERE status = 'failed'").get() as any)?.n ?? 0;
+      return { total, completed, failed, successRate: total > 0 ? (completed / total * 100).toFixed(1) : '0' };
+    } catch { return null; }
+  });
+
+  // ── Tasks Summary ──────────────────────────────────────────────────────────
+  ipcMain.handle(IPC.TASKS_SUMMARY, () => ({ runningCount: 0, completedCount: 0 }));
+
+  // ══════════════════════════════════════════════════════════════════════════
+  // Remaining IPC handlers — lightweight stubs for features not yet backed
+  // by full subsystems.
+  // ══════════════════════════════════════════════════════════════════════════
+
+  // ── Terminal helpers not owned by registerTerminalIpc ────────────────────
+  ipcMain.handle(IPC.TERMINAL_SPAWN_CLAUDE_CODE, async (_e: any, sessionId: string, task: string, opts?: any) => {
+    try {
+      const { finalText: result } = await runClaudeCode({
+        conversationId: sessionId,
+        prompt: task,
+        onText: () => {},
+      });
+      return { sessionId, exitCode: 0, output: result };
+    } catch (err: any) {
+      return { sessionId, exitCode: 1, output: err.message };
+    }
+  });
+
+  // ── Identity (settings-backed key-value store) ────────────────────────────
+  // Profile and accounts stored in a JSON settings file for now
+  const identityPath = path.join(require('electron').app.getPath('userData'), 'identity.json');
+
+  function loadIdentity(): any {
+    try { return JSON.parse(fs.readFileSync(identityPath, 'utf-8')); }
+    catch { return { profile: null, accounts: [], credentials: [] }; }
+  }
+  function saveIdentity(data: any): void {
+    fs.writeFileSync(identityPath, JSON.stringify(data, null, 2), 'utf-8');
+  }
+
+  ipcMain.handle(IPC.IDENTITY_PROFILE_GET, () => loadIdentity().profile ?? null);
+  ipcMain.handle(IPC.IDENTITY_PROFILE_SET, (_e: any, input: any) => {
+    const id = loadIdentity(); id.profile = input; saveIdentity(id);
+  });
+  ipcMain.handle(IPC.IDENTITY_ACCOUNTS_LIST, () => loadIdentity().accounts ?? []);
+  ipcMain.handle(IPC.IDENTITY_ACCOUNT_ADD, (_e: any, input: any) => {
+    const id = loadIdentity();
+    id.accounts = id.accounts || [];
+    id.accounts.push(input);
+    saveIdentity(id);
+  });
+  ipcMain.handle(IPC.IDENTITY_ACCOUNT_DELETE, (_e: any, serviceName: string) => {
+    const id = loadIdentity();
+    id.accounts = (id.accounts || []).filter((a: any) => a.serviceName !== serviceName);
+    saveIdentity(id);
+  });
+  ipcMain.handle(IPC.IDENTITY_CREDENTIALS_LIST, () => {
+    // Return credentials with values redacted
+    return (loadIdentity().credentials ?? []).map((c: any) => ({
+      ...c, valuePlain: undefined, hasValue: true,
+    }));
+  });
+  ipcMain.handle(IPC.IDENTITY_CREDENTIAL_ADD, (_e: any, label: string, type: string, service: string, valuePlain: string) => {
+    const id = loadIdentity();
+    id.credentials = id.credentials || [];
+    id.credentials.push({ label, type, service, valuePlain, createdAt: new Date().toISOString() });
+    saveIdentity(id);
+  });
+  ipcMain.handle(IPC.IDENTITY_CREDENTIAL_DELETE, (_e: any, label: string, service: string) => {
+    const id = loadIdentity();
+    id.credentials = (id.credentials || []).filter((c: any) => !(c.label === label && c.service === service));
+    saveIdentity(id);
+  });
+
+  // ── Calendar (stub — reads from local .ics or returns empty) ──────────────
+  ipcMain.handle(IPC.CALENDAR_LIST, (_e: any, _from?: string, _to?: string) => {
+    // Future: parse ~/.local/share/gnome-calendar or similar
+    return [];
+  });
+
+  // ── Tasks (stub — scheduled agent runs, not yet backed by cron) ───────────
+  const tasksPath = path.join(require('electron').app.getPath('userData'), 'tasks.json');
+
+  function loadTasks(): any[] {
+    try { return JSON.parse(fs.readFileSync(tasksPath, 'utf-8')); }
+    catch { return []; }
+  }
+  function saveTasks(tasks: any[]): void {
+    fs.writeFileSync(tasksPath, JSON.stringify(tasks, null, 2), 'utf-8');
+  }
+
+  ipcMain.handle(IPC.TASKS_LIST, () => loadTasks());
+  ipcMain.handle(IPC.TASKS_CREATE, (_e: any, input: any) => {
+    const tasks = loadTasks();
+    const task = { ...input, id: Date.now(), enabled: true, createdAt: new Date().toISOString(), runs: [] };
+    tasks.push(task);
+    saveTasks(tasks);
+    return task;
+  });
+  ipcMain.handle(IPC.TASKS_ENABLE, (_e: any, id: number, enabled: boolean) => {
+    const tasks = loadTasks();
+    const t = tasks.find((t: any) => t.id === id);
+    if (t) { t.enabled = enabled; saveTasks(tasks); }
+  });
+  ipcMain.handle(IPC.TASKS_DELETE, (_e: any, id: number) => {
+    saveTasks(loadTasks().filter((t: any) => t.id !== id));
+  });
+  ipcMain.handle(IPC.TASKS_RUNS, (_e: any, id: number) => {
+    const task = loadTasks().find((t: any) => t.id === id);
+    return task?.runs ?? [];
+  });
+  ipcMain.handle(IPC.TASKS_RUN_NOW, (_e: any, _id: number) => {
+    // Future: actually trigger an agent run for the task
+    return { ok: true, message: 'Task execution not yet implemented' };
+  });
+
+  // ── Wallet / Payment Methods (stub — no real payment backend) ─────────────
+  const walletPath = path.join(require('electron').app.getPath('userData'), 'wallet.json');
+
+  function loadWallet(): any {
+    try { return JSON.parse(fs.readFileSync(walletPath, 'utf-8')); }
+    catch { return { paymentMethods: [] }; }
+  }
+  function saveWallet(data: any): void {
+    fs.writeFileSync(walletPath, JSON.stringify(data, null, 2), 'utf-8');
+  }
+
+  ipcMain.handle(IPC.WALLET_GET_PAYMENT_METHODS, () => loadWallet().paymentMethods ?? []);
+  ipcMain.handle(IPC.WALLET_ADD_MANUAL_CARD, (_e: any, input: any) => {
+    const w = loadWallet();
+    w.paymentMethods.push({ ...input, id: Date.now(), source: 'manual', createdAt: new Date().toISOString() });
+    saveWallet(w);
+  });
+  ipcMain.handle(IPC.WALLET_IMPORT_BROWSER_CARDS, () => {
+    // Future: use browser session to detect saved cards
+    return [];
+  });
+  ipcMain.handle(IPC.WALLET_CONFIRM_IMPORT, (_e: any, candidates: any[]) => {
+    const w = loadWallet();
+    for (const c of candidates) {
+      w.paymentMethods.push({ ...c, id: Date.now(), source: 'imported', createdAt: new Date().toISOString() });
+    }
+    saveWallet(w);
+  });
+  ipcMain.handle(IPC.WALLET_SET_PREFERRED, (_e: any, id: number) => {
+    const w = loadWallet();
+    for (const pm of w.paymentMethods) { pm.isPreferred = pm.id === id; }
+    saveWallet(w);
+  });
+  ipcMain.handle(IPC.WALLET_SET_BACKUP, (_e: any, id: number) => {
+    const w = loadWallet();
+    for (const pm of w.paymentMethods) { pm.isBackup = pm.id === id; }
+    saveWallet(w);
+  });
+  ipcMain.handle(IPC.WALLET_REMOVE_CARD, (_e: any, id: number) => {
+    const w = loadWallet();
+    w.paymentMethods = w.paymentMethods.filter((pm: any) => pm.id !== id);
+    saveWallet(w);
+  });
+  // ── Process Management (remaining) ────────────────────────────────────────
+  ipcMain.handle(IPC.PROCESS_DETACH, () => { /* no-op for now */ });
+  ipcMain.handle(IPC.PROCESS_ATTACH, (_e: any, _processId: string) => { /* no-op */ });
+
+  // ── Run Management (remaining) ────────────────────────────────────────────
+  ipcMain.handle(IPC.RUN_APPROVALS, (_e: any, _runId: string) => []);
+  ipcMain.handle(IPC.RUN_APPROVE, (_e: any, _approvalId: number) => {});
+  ipcMain.handle(IPC.RUN_REVISE, (_e: any, _approvalId: number) => {});
+  ipcMain.handle(IPC.RUN_DENY, (_e: any, _approvalId: number) => {});
+  ipcMain.handle(IPC.RUN_HUMAN_INTERVENTIONS, (_e: any, _runId: string) => []);
+  ipcMain.handle(IPC.RUN_RESOLVE_HUMAN_INTERVENTION, (_e: any, _interventionId: number) => {});
+
+  // ── VPN ───────────────────────────────────────────────────────────────────
+  const VPN_IFACE = 'proton-denver';
+  const VPN_CONF = '/etc/wireguard/proton-denver.conf';
+
+  function vpnStatus(): Promise<boolean> {
+    return new Promise((resolve) => {
+      // `wg show` requires root; use `ip link show` which works without elevated privileges
+      execFile('ip', ['link', 'show', VPN_IFACE], (_err, stdout) => {
+        resolve(stdout.includes('UP'));
+      });
+    });
+  }
+
+  ipcMain.handle(IPC.VPN_STATUS, async () => {
+    return vpnStatus();
+  });
+
+  ipcMain.handle(IPC.VPN_TOGGLE, async () => {
+    const connected = await vpnStatus();
+    return new Promise<boolean>((resolve, reject) => {
+      const args = connected ? ['down', VPN_IFACE] : ['up', VPN_CONF];
+      execFile('wg-quick', args, (err) => {
+        if (err) reject(err);
+        else resolve(!connected);
+      });
+    });
+  });
+
+  // UI state — renderer pushes its live layout; agent tools read via getUIState()
+  ipcMain.handle(IPC.UI_STATE_PUSH, (_event, state: any) => {
+    setUIState({ ...state, updatedAt: Date.now() });
+  });
+
+  ipcMain.handle(IPC.UI_STATE_GET, () => {
+    const { getUIState } = require('./core/cli/uiStateAccessor');
+    return getUIState();
   });
 }

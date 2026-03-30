@@ -55,7 +55,7 @@ describe('executeShellTool truncation', () => {
 
   it('does not truncate short output', async () => {
     const result = await executeShellTool('shell_exec', { command: 'echo hello' });
-    expect(result.trim()).toBe('hello');
+    expect(JSON.parse(result).stdout).toBe('hello');
   });
 
   it('truncates file view over FILE_MAX', async () => {

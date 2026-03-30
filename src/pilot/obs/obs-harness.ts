@@ -3,7 +3,8 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { runOBSWorkflow } from './obs-workflow';
 import { OBS_PILOT_CONFIG } from './obs-config';
-import type { StepResult } from './obs-types';
+import { createOBSRuntimeState } from './obs-state';
+import type { OBSRuntimeState, StepResult } from './obs-types';
 
 export interface StepSummary {
   passed: number;
@@ -88,21 +89,30 @@ function printSummary(summary: Record<string, StepSummary>, runCount: number, wa
   console.log('═'.repeat(88) + '\n');
 }
 
-export async function runHarness(opts: { runCount?: number; logPath?: string } = {}): Promise<boolean> {
+function resetRuntimeStateForNextRun(state: OBSRuntimeState): void {
+  state.settingsOpen = false;
+  state.currentScene = null;
+}
+
+export async function runHarness(opts: { runCount?: number; logPath?: string; reuseSession?: boolean } = {}): Promise<boolean> {
   const runCount = opts.runCount ?? OBS_PILOT_CONFIG.defaultRunCount;
   const logPath  = opts.logPath  ?? OBS_PILOT_CONFIG.logPath;
+  const reuseSession = opts.reuseSession ?? runCount > 1;
   const runId    = `pilot-${Date.now()}`;
   const wallStart = Date.now();
+  const runtimeState = createOBSRuntimeState();
 
   console.log(`\n[Harness] OBS pilot — ${runCount} run(s), id=${runId}`);
   console.log(`[Harness] Log: ${logPath}\n`);
+  console.log(`[Harness] Session reuse: ${reuseSession ? 'enabled' : 'disabled'}\n`);
 
   const allRuns: StepResult[][] = [];
   for (let i = 1; i <= runCount; i++) {
     console.log(`\n[Harness] ── Run ${i}/${runCount} ──`);
-    const results = await runOBSWorkflow();
+    const results = await runOBSWorkflow({ runtimeState: reuseSession ? runtimeState : createOBSRuntimeState() });
     allRuns.push(results);
     appendJsonl(logPath, i, runId, results);
+    if (reuseSession) resetRuntimeStateForNextRun(runtimeState);
   }
 
   const summary = computeSummary(allRuns);

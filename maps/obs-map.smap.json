@@ -1,20 +1,13 @@
 {
-  "id": "smap-1774600826630-1",
-  "createdAt": "2026-03-27T08:40:26.630Z",
-  "updatedAt": "2026-03-27T08:40:28.455Z",
+  "id": "smap-1774601819548-1",
+  "createdAt": "2026-03-27T08:56:59.548Z",
+  "updatedAt": "2026-03-27T08:56:59.948Z",
   "appName": "obs",
-  "description": "OBS bottom panel calibration",
+  "description": "OBS 1920x1080 re-map",
   "monitors": [
     {
       "name": "eDP",
       "width": 1920,
-      "height": 1080,
-      "originX": 397,
-      "originY": 1080
-    },
-    {
-      "name": "HDMI-1-0",
-      "width": 2560,
       "height": 1080,
       "originX": 0,
       "originY": 0
@@ -22,409 +15,173 @@
   ],
   "points": [
     {
-      "id": "pt-1774600827460-2",
+      "id": "pt-1774601819735-2",
       "x": 22,
-      "y": 1030,
-      "timestampMs": 1774600827460,
-      "label": "Scenes + btn",
+      "y": 930,
+      "timestampMs": 1774601819735,
+      "label": "sceneAddBtn",
       "action": "click",
-      "monitorName": "HDMI-1-0",
+      "monitorName": "eDP",
       "windowContext": {
         "appName": "obs",
         "windowTitle": "OBS 30.0.2.1-3build1 - Profile: Untitled - Scenes: Untitled",
         "bounds": {
           "x": 0,
-          "y": 74,
-          "width": 2560,
-          "height": 1043
+          "y": 106,
+          "width": 1920,
+          "height": 1011
         }
       },
-      "screenshotPath": "/tmp/clawdia-screenshot-1774600827064.png",
       "relativeX": 22,
-      "relativeY": 956
+      "relativeY": 824
     },
     {
-      "id": "pt-1774600827513-3",
-      "x": 52,
-      "y": 1030,
-      "timestampMs": 1774600827513,
-      "label": "Scenes - btn",
+      "id": "pt-1774601819760-3",
+      "x": 50,
+      "y": 930,
+      "timestampMs": 1774601819760,
+      "label": "sceneRemoveBtn",
       "action": "click",
-      "monitorName": "HDMI-1-0",
+      "monitorName": "eDP",
       "windowContext": {
         "appName": "obs",
         "windowTitle": "OBS 30.0.2.1-3build1 - Profile: Untitled - Scenes: Untitled",
         "bounds": {
           "x": 0,
-          "y": 74,
-          "width": 2560,
-          "height": 1043
+          "y": 106,
+          "width": 1920,
+          "height": 1011
         }
       },
-      "relativeX": 52,
-      "relativeY": 956
+      "relativeX": 50,
+      "relativeY": 824
     },
     {
-      "id": "pt-1774600827546-4",
-      "x": 94,
-      "y": 1030,
-      "timestampMs": 1774600827546,
-      "label": "Scenes gear",
+      "id": "pt-1774601819788-4",
+      "x": 330,
+      "y": 920,
+      "timestampMs": 1774601819788,
+      "label": "sourceAddBtn",
       "action": "click",
-      "monitorName": "HDMI-1-0",
+      "monitorName": "eDP",
       "windowContext": {
         "appName": "obs",
         "windowTitle": "OBS 30.0.2.1-3build1 - Profile: Untitled - Scenes: Untitled",
         "bounds": {
           "x": 0,
-          "y": 74,
-          "width": 2560,
-          "height": 1043
+          "y": 106,
+          "width": 1920,
+          "height": 1011
         }
       },
-      "relativeX": 94,
-      "relativeY": 956
+      "relativeX": 330,
+      "relativeY": 814
     },
     {
-      "id": "pt-1774600827577-5",
-      "x": 155,
-      "y": 840,
-      "timestampMs": 1774600827577,
-      "label": "Scene item: Scene",
+      "id": "pt-1774601819818-5",
+      "x": 358,
+      "y": 920,
+      "timestampMs": 1774601819818,
+      "label": "sourceRemoveBtn",
       "action": "click",
-      "monitorName": "HDMI-1-0",
+      "monitorName": "eDP",
       "windowContext": {
         "appName": "obs",
         "windowTitle": "OBS 30.0.2.1-3build1 - Profile: Untitled - Scenes: Untitled",
         "bounds": {
           "x": 0,
-          "y": 74,
-          "width": 2560,
-          "height": 1043
+          "y": 106,
+          "width": 1920,
+          "height": 1011
         }
       },
-      "relativeX": 155,
-      "relativeY": 766
+      "relativeX": 358,
+      "relativeY": 814
     },
     {
-      "id": "pt-1774600827611-6",
-      "x": 155,
-      "y": 868,
-      "timestampMs": 1774600827611,
-      "label": "Scene item: PilotScene",
+      "id": "pt-1774601819846-6",
+      "x": 1280,
+      "y": 830,
+      "timestampMs": 1774601819846,
+      "label": "micMuteBtn",
       "action": "click",
-      "monitorName": "HDMI-1-0",
+      "monitorName": "eDP",
       "windowContext": {
         "appName": "obs",
         "windowTitle": "OBS 30.0.2.1-3build1 - Profile: Untitled - Scenes: Untitled",
         "bounds": {
           "x": 0,
-          "y": 74,
-          "width": 2560,
-          "height": 1043
+          "y": 106,
+          "width": 1920,
+          "height": 1011
         }
       },
-      "relativeX": 155,
-      "relativeY": 794
+      "relativeX": 1280,
+      "relativeY": 724
     },
     {
-      "id": "pt-1774600827646-7",
-      "x": 536,
-      "y": 1030,
-      "timestampMs": 1774600827646,
-      "label": "Sources + btn",
+      "id": "pt-1774601819879-7",
+      "x": 1280,
+      "y": 790,
+      "timestampMs": 1774601819879,
+      "label": "desktopMuteBtn",
       "action": "click",
-      "monitorName": "HDMI-1-0",
+      "monitorName": "eDP",
       "windowContext": {
         "appName": "obs",
         "windowTitle": "OBS 30.0.2.1-3build1 - Profile: Untitled - Scenes: Untitled",
         "bounds": {
           "x": 0,
-          "y": 74,
-          "width": 2560,
-          "height": 1043
+          "y": 106,
+          "width": 1920,
+          "height": 1011
         }
       },
-      "relativeX": 536,
-      "relativeY": 956
+      "relativeX": 1280,
+      "relativeY": 684
     },
     {
-      "id": "pt-1774600827681-8",
-      "x": 566,
-      "y": 1030,
-      "timestampMs": 1774600827681,
-      "label": "Sources - btn",
+      "id": "pt-1774601819916-8",
+      "x": 1400,
+      "y": 800,
+      "timestampMs": 1774601819916,
+      "label": "transitionCombo",
       "action": "click",
-      "monitorName": "HDMI-1-0",
+      "monitorName": "eDP",
       "windowContext": {
         "appName": "obs",
         "windowTitle": "OBS 30.0.2.1-3build1 - Profile: Untitled - Scenes: Untitled",
         "bounds": {
           "x": 0,
-          "y": 74,
-          "width": 2560,
-          "height": 1043
+          "y": 106,
+          "width": 1920,
+          "height": 1011
         }
       },
-      "relativeX": 566,
-      "relativeY": 956
+      "relativeX": 1400,
+      "relativeY": 694
     },
     {
-      "id": "pt-1774600827712-9",
-      "x": 610,
-      "y": 1030,
-      "timestampMs": 1774600827712,
-      "label": "Sources gear",
+      "id": "pt-1774601819948-9",
+      "x": 1700,
+      "y": 870,
+      "timestampMs": 1774601819948,
+      "label": "settingsBtn",
       "action": "click",
-      "monitorName": "HDMI-1-0",
+      "monitorName": "eDP",
       "windowContext": {
         "appName": "obs",
         "windowTitle": "OBS 30.0.2.1-3build1 - Profile: Untitled - Scenes: Untitled",
         "bounds": {
           "x": 0,
-          "y": 74,
-          "width": 2560,
-          "height": 1043
+          "y": 106,
+          "width": 1920,
+          "height": 1011
         }
       },
-      "relativeX": 610,
-      "relativeY": 956
-    },
-    {
-      "id": "pt-1774600827749-10",
-      "x": 1616,
-      "y": 879,
-      "timestampMs": 1774600827749,
-      "label": "Desktop Audio mute",
-      "action": "click",
-      "monitorName": "HDMI-1-0",
-      "windowContext": {
-        "appName": "obs",
-        "windowTitle": "OBS 30.0.2.1-3build1 - Profile: Untitled - Scenes: Untitled",
-        "bounds": {
-          "x": 0,
-          "y": 74,
-          "width": 2560,
-          "height": 1043
-        }
-      },
-      "relativeX": 1616,
-      "relativeY": 805,
-      "notes": "speaker icon right of volume slider"
-    },
-    {
-      "id": "pt-1774600827777-11",
-      "x": 1616,
-      "y": 954,
-      "timestampMs": 1774600827777,
-      "label": "Mic/Aux mute",
-      "action": "click",
-      "monitorName": "HDMI-1-0",
-      "windowContext": {
-        "appName": "obs",
-        "windowTitle": "OBS 30.0.2.1-3build1 - Profile: Untitled - Scenes: Untitled",
-        "bounds": {
-          "x": 0,
-          "y": 74,
-          "width": 2560,
-          "height": 1043
-        }
-      },
-      "relativeX": 1616,
-      "relativeY": 880,
-      "notes": "speaker icon right of volume slider"
-    },
-    {
-      "id": "pt-1774600827812-12",
-      "x": 1976,
-      "y": 910,
-      "timestampMs": 1774600827812,
-      "label": "Transitions + btn",
-      "action": "click",
-      "monitorName": "HDMI-1-0",
-      "windowContext": {
-        "appName": "obs",
-        "windowTitle": "OBS 30.0.2.1-3build1 - Profile: Untitled - Scenes: Untitled",
-        "bounds": {
-          "x": 0,
-          "y": 74,
-          "width": 2560,
-          "height": 1043
-        }
-      },
-      "relativeX": 1976,
-      "relativeY": 836
-    },
-    {
-      "id": "pt-1774600827846-13",
-      "x": 2011,
-      "y": 910,
-      "timestampMs": 1774600827846,
-      "label": "Transitions - btn",
-      "action": "click",
-      "monitorName": "HDMI-1-0",
-      "windowContext": {
-        "appName": "obs",
-        "windowTitle": "OBS 30.0.2.1-3build1 - Profile: Untitled - Scenes: Untitled",
-        "bounds": {
-          "x": 0,
-          "y": 74,
-          "width": 2560,
-          "height": 1043
-        }
-      },
-      "relativeX": 2011,
-      "relativeY": 836
-    },
-    {
-      "id": "pt-1774600827880-14",
-      "x": 1748,
-      "y": 810,
-      "timestampMs": 1774600827880,
-      "label": "Fade combo box",
-      "action": "click",
-      "monitorName": "HDMI-1-0",
-      "windowContext": {
-        "appName": "obs",
-        "windowTitle": "OBS 30.0.2.1-3build1 - Profile: Untitled - Scenes: Untitled",
-        "bounds": {
-          "x": 0,
-          "y": 74,
-          "width": 2560,
-          "height": 1043
-        }
-      },
-      "relativeX": 1748,
-      "relativeY": 736,
-      "notes": "transition type selector; right-click opens rename dialog"
-    },
-    {
-      "id": "pt-1774600827911-15",
-      "x": 2322,
-      "y": 844,
-      "timestampMs": 1774600827911,
-      "label": "Start Streaming btn",
-      "action": "click",
-      "monitorName": "HDMI-1-0",
-      "windowContext": {
-        "appName": "obs",
-        "windowTitle": "OBS 30.0.2.1-3build1 - Profile: Untitled - Scenes: Untitled",
-        "bounds": {
-          "x": 0,
-          "y": 74,
-          "width": 2560,
-          "height": 1043
-        }
-      },
-      "relativeX": 2322,
-      "relativeY": 770
-    },
-    {
-      "id": "pt-1774600827944-16",
-      "x": 2322,
-      "y": 886,
-      "timestampMs": 1774600827944,
-      "label": "Start Recording btn",
-      "action": "click",
-      "monitorName": "HDMI-1-0",
-      "windowContext": {
-        "appName": "obs",
-        "windowTitle": "OBS 30.0.2.1-3build1 - Profile: Untitled - Scenes: Untitled",
-        "bounds": {
-          "x": 0,
-          "y": 74,
-          "width": 2560,
-          "height": 1043
-        }
-      },
-      "relativeX": 2322,
-      "relativeY": 812
-    },
-    {
-      "id": "pt-1774600827982-17",
-      "x": 2322,
-      "y": 924,
-      "timestampMs": 1774600827982,
-      "label": "Start Virtual Camera btn",
-      "action": "click",
-      "monitorName": "HDMI-1-0",
-      "windowContext": {
-        "appName": "obs",
-        "windowTitle": "OBS 30.0.2.1-3build1 - Profile: Untitled - Scenes: Untitled",
-        "bounds": {
-          "x": 0,
-          "y": 74,
-          "width": 2560,
-          "height": 1043
-        }
-      },
-      "relativeX": 2322,
-      "relativeY": 850
-    },
-    {
-      "id": "pt-1774600828011-18",
-      "x": 2322,
-      "y": 958,
-      "timestampMs": 1774600828011,
-      "label": "Studio Mode btn",
-      "action": "click",
-      "monitorName": "HDMI-1-0",
-      "windowContext": {
-        "appName": "obs",
-        "windowTitle": "OBS 30.0.2.1-3build1 - Profile: Untitled - Scenes: Untitled",
-        "bounds": {
-          "x": 0,
-          "y": 74,
-          "width": 2560,
-          "height": 1043
-        }
-      },
-      "relativeX": 2322,
-      "relativeY": 884
-    },
-    {
-      "id": "pt-1774600828423-19",
-      "x": 2322,
-      "y": 992,
-      "timestampMs": 1774600828423,
-      "label": "Settings btn",
-      "action": "click",
-      "monitorName": "HDMI-1-0",
-      "windowContext": {
-        "appName": "obs",
-        "windowTitle": "OBS 30.0.2.1-3build1 - Profile: Untitled - Scenes: Untitled",
-        "bounds": {
-          "x": 0,
-          "y": 74,
-          "width": 2560,
-          "height": 1043
-        }
-      },
-      "screenshotPath": "/tmp/clawdia-screenshot-1774600828045.png",
-      "relativeX": 2322,
-      "relativeY": 918
-    },
-    {
-      "id": "pt-1774600828455-20",
-      "x": 2322,
-      "y": 1026,
-      "timestampMs": 1774600828455,
-      "label": "Exit btn",
-      "action": "click",
-      "monitorName": "HDMI-1-0",
-      "windowContext": {
-        "appName": "obs",
-        "windowTitle": "OBS 30.0.2.1-3build1 - Profile: Untitled - Scenes: Untitled",
-        "bounds": {
-          "x": 0,
-          "y": 74,
-          "width": 2560,
-          "height": 1043
-        }
-      },
-      "relativeX": 2322,
-      "relativeY": 952
+      "relativeX": 1700,
+      "relativeY": 764
     }
   ],
-  "baselineScreenshot": "/tmp/clawdia-screenshot-1774600826631.png"
+  "baselineScreenshot": "/tmp/clawdia-screenshot-1774601819549.png"
 }

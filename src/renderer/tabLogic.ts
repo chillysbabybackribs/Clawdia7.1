@@ -4,6 +4,7 @@ export interface ConversationTab {
   id: string;
   conversationId: string | null;
   title?: string;
+  mode?: 'chat' | 'claude_terminal' | 'codex_terminal';
 }
 
 export function makeTab(conversationId: string | null): ConversationTab {
@@ -46,4 +47,8 @@ export function switchTab(
   tabId: string,
 ): { activeTabId: string } {
   return { activeTabId: tabId };
+}
+
+export function getTabDisplayTitle(index: number): string {
+  return `Chat ${index + 1}`;
 }

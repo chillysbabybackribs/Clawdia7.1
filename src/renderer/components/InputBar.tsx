@@ -51,6 +51,10 @@ export default function InputBar({
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const hasHydratedSelectionRef = useRef(false);
+  // When the user clicks a specific model in the dropdown we set this to the
+  // chosen index so the provider-change effect doesn't overwrite it with the
+  // previously-stored model from settings.
+  const pendingModelIdxRef = useRef<number | null>(null);
 
   const formatBytes = useCallback((bytes: number) => {
     if (bytes < 1024) return `${bytes} B`;
@@ -105,6 +109,14 @@ export default function InputBar({
     const api = (window as any).clawdia;
     const nextModels = getModelsForProvider(provider);
     setModels(nextModels);
+
+    // If the user clicked a specific model, honour that choice directly
+    // instead of fetching the previously-stored model (which would overwrite it).
+    if (pendingModelIdxRef.current !== null) {
+      setModelIdx(pendingModelIdxRef.current);
+      pendingModelIdxRef.current = null;
+      return;
+    }
 
     if (!api) {
       setModelIdx(0);
@@ -237,10 +249,14 @@ export default function InputBar({
                         <button
                           key={model.id}
                           onClick={() => {
-                            setProvider(model.provider);
                             const nextModels = getModelsForProvider(model.provider);
                             const idx = nextModels.findIndex((m) => m.id === model.id);
-                            setModelIdx(idx >= 0 ? idx : 0);
+                            const resolvedIdx = idx >= 0 ? idx : 0;
+                            // Set before provider so the provider-change effect
+                            // sees it and skips the stale settings.getModel lookup.
+                            pendingModelIdxRef.current = resolvedIdx;
+                            setProvider(model.provider);
+                            setModelIdx(resolvedIdx);
                             setModelOpen(false);
                           }}
                           className={`w-full flex items-center gap-2.5 px-3.5 py-2 text-left text-[13px] transition-all cursor-pointer ${

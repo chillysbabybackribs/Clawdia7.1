@@ -22,6 +22,34 @@ export function resolveAnthropicModelId(registryId: string): string {
   return registryId;
 }
 
+const PROTOCOL_REPAIR_RESULT = JSON.stringify({
+  status: 'interrupted',
+  reason: 'protocol_repair',
+  message: 'Tool run was interrupted before completion.',
+});
+
+/**
+ * If the last assistant message has unanswered tool_use blocks, inject
+ * synthetic tool_result messages so the next API call doesn't 400.
+ */
+function repairAnthropicHistory(messages: Anthropic.MessageParam[]): void {
+  if (messages.length === 0) return;
+  const last = messages[messages.length - 1];
+  if (last.role !== 'assistant' || !Array.isArray(last.content)) return;
+  const pendingIds = (last.content as any[])
+    .filter((b: any) => b.type === 'tool_use')
+    .map((b: any) => b.id as string);
+  if (pendingIds.length === 0) return;
+  messages.push({
+    role: 'user',
+    content: pendingIds.map(id => ({
+      type: 'tool_result' as const,
+      tool_use_id: id,
+      content: PROTOCOL_REPAIR_RESULT,
+    })),
+  });
+}
+
 function buildUserContent(
   text: string,
   attachments?: MessageAttachment[],
@@ -229,7 +257,9 @@ export async function streamAnthropicChat({
 
   const tryThinking = modelSupportsExtendedThinking(apiModelId);
 
-  const messagesForRequest: Anthropic.MessageParam[] = [...sessionMessages, userMessage].filter((m: any) => m.role !== 'tool') as Anthropic.MessageParam[];
+  const repairedSession = [...sessionMessages].filter((m: any) => m.role !== 'tool') as Anthropic.MessageParam[];
+  repairAnthropicHistory(repairedSession);
+  const messagesForRequest: Anthropic.MessageParam[] = [...repairedSession, userMessage];
 
   const runStream = async (withThinking: boolean): Promise<string> => {
     const budget = checkBudget(1); // Check with 1 cent minimum
@@ -237,13 +267,13 @@ export async function streamAnthropicChat({
       return `Budget exceeded: ${budget.periodLimit} cents limit reached for ${budget.blockedBy} period.`;
     }
     const caps = await renderCapabilities();
-    const basePrompt = await buildAnthropicStreamSystemPrompt(unrestrictedMode, caps);
+    const basePrompt = buildAnthropicStreamSystemPrompt(unrestrictedMode) + (caps ? `\n\nOS CONTEXT:\n${caps}` : '');
     const memCtx = getMemoryContext(userText);
     const systemInstructions = memCtx ? `${memCtx}\n\n${basePrompt}` : basePrompt;
 
     const body: Anthropic.MessageCreateParams = {
       model: apiModelId,
-      max_tokens: 8192,
+      max_tokens: 16000,
       messages: messagesForRequest,
       system: [
         {
@@ -259,10 +289,7 @@ export async function streamAnthropicChat({
     };
 
     if (withThinking && tryThinking) {
-      (body as Anthropic.MessageCreateParams & { thinking: { type: 'enabled'; budget_tokens: number } }).thinking = {
-        type: 'enabled',
-        budget_tokens: 10_000,
-      };
+      (body as any).thinking = { type: 'adaptive' };
     }
 
     const stream = await withAnthropicRetry(
@@ -341,13 +368,13 @@ export async function streamAnthropicChat({
     const deferredBrowserTools = BROWSER_TOOLS.map(t => ({ ...t, defer_loading: true }));
 
     const caps = await renderCapabilities();
-    const basePrompt = await buildSharedSystemPrompt(unrestrictedMode, caps);
+    const basePrompt = buildSharedSystemPrompt(unrestrictedMode) + (caps ? `\n\nOS CONTEXT:\n${caps}` : '');
     const memCtx = getMemoryContext(userText);
     const systemInstruction = memCtx ? `${memCtx}\n\n${basePrompt}` : basePrompt;
 
     const body: Anthropic.MessageCreateParams = {
       model: apiModelId,
-      max_tokens: 8192,
+      max_tokens: 16000,
       messages,
       system: systemInstruction,
       tools: [
@@ -615,9 +642,15 @@ export async function streamAnthropicLLM(
 
   const body: Anthropic.MessageCreateParams = {
     model: options.model,
-    max_tokens: 8192,
+    max_tokens: 16000,
     messages: anthropicMessages,
-    system: systemPrompt,
+    system: [
+      {
+        type: 'text' as const,
+        text: systemPrompt,
+        cache_control: { type: 'ephemeral' as const },
+      },
+    ] as any,
     tools: tools as Anthropic.Tool[],
     stream: true,
   };
@@ -656,12 +689,21 @@ export async function streamAnthropicLLM(
 
   const finalMessage = await stream.finalMessage();
 
+  // Cache hit instrumentation
+  const usage = finalMessage.usage as any;
+  if (usage?.cache_read_input_tokens > 0) {
+    console.log(`[cache] HIT ${usage.cache_read_input_tokens} tokens read, ${usage.input_tokens} uncached`);
+  } else if (usage?.cache_creation_input_tokens > 0) {
+    console.log(`[cache] WRITE ${usage.cache_creation_input_tokens} tokens cached, ${usage.input_tokens} uncached`);
+  }
+
   // Flush last tool if any
   if (currentToolId) {
     toolUseBlocks.push({ id: currentToolId, name: currentToolName, input: currentToolInput });
   }
 
-  // Build tool blocks from collected data, falling back to finalMessage for input parsing
+  // Only return client-side tool_use blocks — server_tool_use blocks are handled
+  // server-side by Anthropic and must not be dispatched locally.
   const finalToolUseBlocks = finalMessage.content.filter((b): b is Anthropic.ToolUseBlock => b.type === 'tool_use');
   const toolBlocks: ToolUseBlock[] = finalToolUseBlocks.map(b => ({
     id: b.id,
@@ -669,5 +711,10 @@ export async function streamAnthropicLLM(
     input: b.input as Record<string, unknown>,
   }));
 
-  return { text, toolBlocks };
+  return {
+    text,
+    toolBlocks,
+    stopReason: finalMessage.stop_reason ?? undefined,
+    rawContent: finalMessage.content as unknown[],
+  };
 }

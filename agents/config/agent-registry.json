@@ -1,0 +1,55 @@
+{
+  "registry_version": "1.0",
+  "last_updated": "2024-03-29",
+  "description": "Central registry for all Clawdia agents",
+  
+  "agents": [
+    {
+      "id": "developer-assistant",
+      "enabled": true,
+      "config_path": "./agents/developer-assistant.json",
+      "description": "General development assistance and debugging",
+      "tags": ["development", "debugging", "assistance"]
+    },
+    {
+      "id": "code-reviewer",
+      "enabled": true,
+      "config_path": "./agents/code-reviewer.json",
+      "description": "Code review and quality analysis",
+      "tags": ["review", "quality", "analysis"]
+    }
+  ],
+  
+  "routing": {
+    "default_agent": "developer-assistant",
+    
+    "routing_rules": [
+      {
+        "pattern": "review|refactor|quality|lint|test",
+        "agent": "code-reviewer",
+        "priority": 10
+      },
+      {
+        "pattern": "code|debug|develop|implement|fix",
+        "agent": "developer-assistant",
+        "priority": 5
+      }
+    ],
+    
+    "fallback_agent": "developer-assistant"
+  },
+  
+  "settings": {
+    "enable_agent_switching": true,
+    "enable_chaining": false,
+    "max_context_tokens": 8000,
+    "default_temperature": 0.7,
+    "timeout_seconds": 60
+  },
+  
+  "monitoring": {
+    "track_usage": true,
+    "log_errors": true,
+    "performance_metrics": true
+  }
+}

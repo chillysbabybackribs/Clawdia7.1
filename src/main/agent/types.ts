@@ -6,6 +6,7 @@ export type ToolGroup = 'core' | 'browser' | 'desktop' | 'coding' | 'full';
 export type ModelTier = 'fast' | 'standard' | 'powerful';
 export type SpecialMode = 'app_mapping';
 export type MappingPhase = 'phase1' | 'phase2';
+export type BrowserMode = 'plan' | 'act' | 'extract' | 'recover' | 'validate';
 
 export interface AgentProfile {
   toolGroup: ToolGroup;
@@ -33,6 +34,7 @@ export interface LoopOptions {
   onThinking?: (delta: string) => void;
   onToolActivity?: (activity: ToolActivity) => void;
   onPromptDebug?: (snapshot: PromptDebugSnapshot) => void;
+  onSystemPrompt?: (prompt: string) => void;
 }
 
 export interface ToolActivity {
@@ -66,7 +68,10 @@ export interface DispatchContext {
   toolCallCount: number;
   allToolCalls: ToolCallRecord[];
   browserBudget: BrowserBudgetState;
+  browserMode: BrowserMode;
   options: LoopOptions;
+  /** Live reference to the messages array for context_status and self-aware tools */
+  messages: unknown[];
 }
 
 export interface VerificationResult {
@@ -85,6 +90,12 @@ export interface LoopMessage {
 export interface LLMTurn {
   text: string;
   toolBlocks: ToolUseBlock[];
+  /** Tool schemas discovered via search_tools this iteration (Anthropic format) */
+  discoveredTools?: import('@anthropic-ai/sdk').default.Tool[];
+  /** stop_reason from the API (e.g. 'end_turn', 'tool_use', 'pause_turn') */
+  stopReason?: string;
+  /** Full raw content blocks from the API response — needed to pass server_tool_use back correctly */
+  rawContent?: unknown[];
 }
 
 export interface ToolUseBlock {

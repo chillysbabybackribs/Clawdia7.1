@@ -128,7 +128,7 @@ export async function streamGeminiChat({
             sendThinking('Gemini is thinking…');
 
             const caps = await renderCapabilities();
-            const systemPrompt = await buildSharedSystemPrompt(unrestrictedMode, caps);
+            const systemPrompt = buildSharedSystemPrompt(unrestrictedMode) + (caps ? `\n\nOS CONTEXT:\n${caps}` : '');
 
             const chat = ai.chats.create({
                 model: modelRegistryId,

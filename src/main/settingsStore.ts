@@ -37,21 +37,69 @@ function settingsPath(): string {
   return path.join(app.getPath('userData'), 'clawdia-settings.json');
 }
 
+function parseSettingsFile(filePath: string): AppSettings | null {
+  try {
+    if (!fs.existsSync(filePath)) return null;
+    const raw = fs.readFileSync(filePath, 'utf8');
+    const parsed = JSON.parse(raw) as Partial<AppSettings>;
+    return {
+      ...defaultSettings(),
+      ...parsed,
+      providerKeys: { ...emptyKeys(), ...parsed.providerKeys },
+      models: { ...DEFAULT_MODEL_BY_PROVIDER, ...parsed.models },
+    };
+  } catch {
+    return null;
+  }
+}
+
+function hasAnyProviderKey(settings: AppSettings | null | undefined): settings is AppSettings {
+  return !!settings && Object.values(settings.providerKeys || {}).some((key) => Boolean(key));
+}
+
+function legacySettingsPaths(): string[] {
+  const appDataDir = app.getPath('appData');
+  const currentPath = settingsPath();
+  return [
+    path.join(appDataDir, 'clawdia7', 'clawdia-settings.json'),
+    path.join(appDataDir, 'Clawdia 7.0', 'clawdia-settings.json'),
+    path.join(appDataDir, 'clawdia', 'clawdia-settings.json'),
+    path.join(appDataDir, 'Electron', 'clawdia-settings.json'),
+  ].filter((candidate, index, all) => candidate !== currentPath && all.indexOf(candidate) === index);
+}
+
+function loadMigratedSettings(): AppSettings | null {
+  for (const candidate of legacySettingsPaths()) {
+    const parsed = parseSettingsFile(candidate);
+    if (!hasAnyProviderKey(parsed)) continue;
+    try {
+      fs.mkdirSync(path.dirname(settingsPath()), { recursive: true });
+      fs.copyFileSync(candidate, settingsPath());
+    } catch {
+      // Ignore migration write failures and still use the parsed content in memory.
+    }
+    return parsed;
+  }
+  return null;
+}
+
 let cache: AppSettings | null = null;
 
 export function loadSettings(): AppSettings {
   if (cache) return cache;
   const p = settingsPath();
-  try {
-    if (fs.existsSync(p)) {
-      const raw = fs.readFileSync(p, 'utf8');
-      const parsed = JSON.parse(raw) as Partial<AppSettings>;
-      cache = { ...defaultSettings(), ...parsed, providerKeys: { ...emptyKeys(), ...parsed.providerKeys } };
-      return cache;
-    }
-  } catch {
-    // fall through
+  const parsedCurrent = parseSettingsFile(p);
+  if (parsedCurrent) {
+    cache = parsedCurrent;
+    return cache;
   }
+
+  const migrated = loadMigratedSettings();
+  if (migrated) {
+    cache = migrated;
+    return cache;
+  }
+
   cache = defaultSettings();
   return cache;
 }

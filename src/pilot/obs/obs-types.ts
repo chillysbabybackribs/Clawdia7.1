@@ -71,3 +71,14 @@ export interface StateDef {
   windowTitlePattern: string;
   cues: string[];
 }
+
+export interface OBSRuntimeState {
+  obsReady: boolean;
+  mainWindowDetected: boolean;
+  settingsOpen: boolean;
+  currentScene: string | null;
+  knownScenes: string[];
+  knownSources: string[];
+  micMuted: boolean | null;
+  transitionName: string | null;
+}

@@ -1,18 +1,56 @@
 import { exec } from 'child_process';
-import { promisify } from 'util';
 import * as fs from 'fs';
 import { truncateToolResult, SHELL_MAX, FILE_MAX } from './truncate';
 
-const execAsync = promisify(exec);
+// Timeout passed to exec so the OS process is killed when it overruns.
+// dispatch.ts also has a Promise.race timeout at 30 s; this inner limit matches
+// it so the child is guaranteed terminated before the outer race fires.
+const EXEC_TIMEOUT_MS = 30_000;
+
+function execAsync(command: string): Promise<{ stdout: string; stderr: string }> {
+  return new Promise((resolve, reject) => {
+    exec(command, { timeout: EXEC_TIMEOUT_MS }, (err, stdout, stderr) => {
+      if (err) {
+        // Attach stdout/stderr so the existing error handler in executeShellTool
+        // can surface them — matches the shape promisify(exec) would produce.
+        (err as any).stdout = stdout;
+        (err as any).stderr = stderr;
+        reject(err);
+      } else {
+        resolve({ stdout, stderr });
+      }
+    });
+  });
+}
 
 /** Execute a shell or file-edit tool call by name+args. Returns a result string. */
 export async function executeShellTool(name: string, args: Record<string, unknown>): Promise<string> {
   try {
     if (name === 'shell_exec' || name === 'bash') {
       const command = (args.command ?? args.cmd) as string;
-      const { stdout, stderr } = await execAsync(command);
-      const raw = stdout || stderr || 'Command executed successfully with no output.';
-      return truncateToolResult(raw, SHELL_MAX);
+      try {
+        const { stdout, stderr } = await execAsync(command);
+        return truncateToolResult(JSON.stringify({
+          ok: true,
+          exitCode: 0,
+          command,
+          stdout: (stdout ?? '').trim(),
+          stderr: (stderr ?? '').trim(),
+          hasOutput: Boolean((stdout ?? '').trim() || (stderr ?? '').trim()),
+        }), SHELL_MAX);
+      } catch (err: any) {
+        const stdout = (err.stdout ?? '').toString().trim();
+        const stderr = (err.stderr ?? '').toString().trim();
+        const exitCode = typeof err.code === 'number' ? err.code : 'unknown';
+        return truncateToolResult(JSON.stringify({
+          ok: false,
+          exitCode,
+          command,
+          stdout,
+          stderr,
+          hasOutput: Boolean(stdout || stderr),
+        }), SHELL_MAX);
+      }
     }
     if (name === 'file_list_directory') {
       const dirPath = args.path as string;

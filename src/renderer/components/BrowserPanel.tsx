@@ -1,5 +1,6 @@
 import React, { useState, useRef, useEffect, useCallback } from 'react';
 import type { BrowserExecutionMode } from '../../shared/types';
+import ExtensionsPanel from './ExtensionsPanel';
 
 interface TabInfo {
   id: string;
@@ -70,6 +71,7 @@ export default function BrowserPanel() {
   const [isLoading, setIsLoading] = useState(false);
   const [isFocused, setIsFocused] = useState(false);
   const [executionMode, setExecutionMode] = useState<BrowserExecutionMode>('headed');
+  const [showExtensions, setShowExtensions] = useState(false);
   const viewportRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
   const matchTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -98,7 +100,11 @@ export default function BrowserPanel() {
   useEffect(() => {
     const api = (window as any).clawdia?.browser;
     if (!api) return;
-    api.listTabs().then((list: TabInfo[]) => { if (list?.length) setTabs(list); });
+    // listTabs() guarantees at least one tab exists (creates one if needed),
+    // so no separate newTab() fallback is required here.
+    api.listTabs().then((list: TabInfo[]) => {
+      if (list?.length) setTabs(list);
+    }).catch(() => {});
     api.getExecutionMode?.().then((mode: BrowserExecutionMode) => {
       if (mode) setExecutionMode(mode);
     }).catch(() => {});
@@ -235,21 +241,16 @@ export default function BrowserPanel() {
       : 'Visible';
 
   return (
-    <div className="flex flex-col h-full bg-surface-0">
+    <div className="relative flex flex-col h-full bg-surface-0">
       <div className="drag-region flex items-center h-[46px] bg-surface-1 border-b border-border-subtle px-2 gap-1 flex-shrink-0 overflow-hidden">
         <div className="flex items-center gap-1 min-w-0 overflow-x-auto no-scrollbar">
           {tabs.map(tab => (
             <div
               key={tab.id}
               onClick={() => handleSwitchTab(tab.id)}
-              className={`no-drag group flex items-center gap-2 h-full px-[16px] cursor-pointer transition-all duration-100 max-w-[210px] min-w-[120px] flex-shrink-0 text-[14px] ${tab.isActive ? 'text-text-primary border-b-[2.5px] border-[#4a9eff]' : 'text-text-tertiary hover:text-text-secondary hover:bg-white/[0.03] border-b-[2.5px] border-transparent'}`}
+              className={`no-drag group flex items-center gap-2 my-[8px] h-[30px] px-[14px] rounded-lg cursor-pointer transition-all duration-100 max-w-[210px] min-w-[120px] flex-shrink-0 text-[13px] border-[1.5px] ${tab.isActive ? 'text-text-primary border-white/[0.12] bg-white/[0.04] shadow-[inset_0_1px_4px_rgba(0,0,0,0.2)]' : 'text-text-tertiary border-white/[0.05] hover:border-white/[0.09] hover:text-text-secondary'}`}
             >
-              {tab.isLoading && tab.isActive && (
-                <div className="w-3 h-3 rounded-full border-[1.5px] border-accent border-t-transparent animate-spin flex-shrink-0" />
-              )}
-              {!tab.isLoading && (
-                <TabIcon tab={tab} />
-              )}
+              <TabIcon tab={tab} />
               <span className="text-[12px] font-medium truncate flex-1 min-w-0">{tab.title || 'New Tab'}</span>
               {tabs.length > 1 && (
                 <button
@@ -336,14 +337,33 @@ export default function BrowserPanel() {
           </div>
         )}
 
-        <div className="flex-shrink-0 pr-1">
+        <div className="flex-shrink-0 pr-1 flex items-center gap-1.5">
           <span className="inline-flex items-center h-[22px] px-2 rounded-md border border-white/[0.08] bg-white/[0.04] text-[10px] uppercase tracking-[0.12em] text-text-secondary/80">
             {modeLabel}
           </span>
+          <button
+            onClick={() => setShowExtensions(true)}
+            title="Extensions"
+            className="flex items-center justify-center w-7 h-7 rounded-lg text-text-muted hover:text-text-secondary hover:bg-white/[0.04] transition-colors cursor-pointer"
+          >
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M20.24 12.24a6 6 0 0 0-8.49-8.49L5 10.5V19h8.5z" />
+              <line x1="16" y1="8" x2="2" y2="22" />
+              <line x1="17.5" y1="15" x2="9" y2="15" />
+            </svg>
+          </button>
         </div>
       </div>
 
       <div ref={viewportRef} className="relative flex-1 bg-surface-0">
+        {!activeTab && executionMode !== 'headless' && (
+          <div className="absolute inset-0 flex items-center justify-center bg-surface-0 text-text-secondary/70">
+            <div className="flex flex-col items-center gap-2 text-center">
+              <div className="text-[11px] uppercase tracking-[0.18em] text-text-secondary/50">Browser</div>
+              <div className="text-[13px] text-text-secondary">Open a tab or enter a URL to start browsing.</div>
+            </div>
+          </div>
+        )}
         {executionMode === 'headless' && (
           <div className="absolute inset-0 flex items-center justify-center bg-surface-0 text-text-secondary/70 pointer-events-none">
             <div className="flex flex-col items-center gap-2">
@@ -360,6 +380,13 @@ export default function BrowserPanel() {
           </div>
         )}
       </div>
+
+      {/* Extensions overlay */}
+      {showExtensions && (
+        <div className="absolute inset-0 z-50 bg-surface-0">
+          <ExtensionsPanel onBack={() => setShowExtensions(false)} />
+        </div>
+      )}
     </div>
   );
 }

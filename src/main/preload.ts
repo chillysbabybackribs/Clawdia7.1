@@ -2,6 +2,7 @@ import { contextBridge, ipcRenderer } from 'electron';
 import { IPC, IPC_EVENTS } from './ipc-channels';
 
 const noop = () => {};
+const preloadStatusKey = '__clawdiaPreload';
 
 function onEvent<T>(channel: string, cb: (payload: T) => void): () => void {
   const handler = (_: Electron.IpcRendererEvent, payload: T) => cb(payload);
@@ -24,34 +25,41 @@ function subscribe<T>(channel: string, mapPayload: (payload: T) => unknown = (pa
   };
 }
 
-contextBridge.exposeInMainWorld('clawdia', {
-  chat: {
-    send: (message: string, attachments?: any[]) =>
-      ipcRenderer.invoke(IPC.CHAT_SEND, { text: message, attachments }),
-    openAttachment: (_filePath: string) => Promise.resolve(),
-    stop: () => ipcRenderer.invoke(IPC.CHAT_STOP),
-    pause: () => ipcRenderer.invoke(IPC.CHAT_PAUSE),
-    resume: () => ipcRenderer.invoke(IPC.CHAT_RESUME),
-    addContext: (_text: string) => ipcRenderer.invoke(IPC.CHAT_ADD_CONTEXT),
+try {
+  console.log('[preload] bootstrap start');
+
+  contextBridge.exposeInMainWorld('clawdia', {
+    chat: {
+    send: (message: string, attachments?: any[], conversationId?: string | null) =>
+      ipcRenderer.invoke(IPC.CHAT_SEND, { text: message, attachments, conversationId }),
+    openAttachment: (filePath: string) => ipcRenderer.invoke(IPC.CHAT_OPEN_ATTACHMENT, filePath),
+    stop: (conversationId?: string) => ipcRenderer.invoke(IPC.CHAT_STOP, conversationId),
+    pause: (conversationId?: string) => ipcRenderer.invoke(IPC.CHAT_PAUSE, conversationId),
+    resume: (conversationId?: string) => ipcRenderer.invoke(IPC.CHAT_RESUME, conversationId),
+    addContext: (text: string, conversationId?: string) => ipcRenderer.invoke(IPC.CHAT_ADD_CONTEXT, text, conversationId),
     rateTool: (_messageId: string, _toolId: string, _rating: any, _note?: string) =>
       ipcRenderer.invoke(IPC.CHAT_RATE_TOOL),
     new: () => ipcRenderer.invoke(IPC.CHAT_NEW),
+    create: () => ipcRenderer.invoke(IPC.CHAT_CREATE),
     list: () => ipcRenderer.invoke(IPC.CHAT_LIST),
     load: (id: string) => ipcRenderer.invoke(IPC.CHAT_LOAD, id),
     getMode: (id: string) => ipcRenderer.invoke(IPC.CHAT_GET_MODE, id),
     setMode: (id: string, mode: string) => ipcRenderer.invoke(IPC.CHAT_SET_MODE, id, mode),
-    getActiveTerminalSession: (_conversationId?: string | null) =>
-      ipcRenderer.invoke(IPC.CHAT_GET_ACTIVE_TERMINAL_SESSION),
+    getActiveTerminalSession: (conversationId?: string | null) =>
+      ipcRenderer.invoke(IPC.CHAT_GET_ACTIVE_TERMINAL_SESSION, conversationId),
     delete: (id: string) => ipcRenderer.invoke(IPC.CHAT_DELETE, id),
-    onStreamText: (cb: (text: string) => void) => onEvent<string>(IPC_EVENTS.CHAT_STREAM_TEXT, cb),
+    // All stream event callbacks now receive { conversationId, ...data } envelopes
+    // so ChatPanel can filter to its own conversation.
+    onStreamText: (cb: (payload: { delta: string; conversationId: string }) => void) => onEvent(IPC_EVENTS.CHAT_STREAM_TEXT, cb),
     onStreamEnd: (cb: (data: any) => void) => onEvent(IPC_EVENTS.CHAT_STREAM_END, cb),
     onWorkflowPlanReset: (cb: () => void) => onEvent(IPC_EVENTS.CHAT_WORKFLOW_PLAN_RESET, cb),
     onWorkflowPlanText: (cb: (text: string) => void) => onEvent<string>(IPC_EVENTS.CHAT_WORKFLOW_PLAN_TEXT, cb),
     onWorkflowPlanEnd: (cb: () => void) => onEvent(IPC_EVENTS.CHAT_WORKFLOW_PLAN_END, cb),
-    onThinking: (cb: (thought: string) => void) => onEvent<string>(IPC_EVENTS.CHAT_THINKING, cb),
-    onToolActivity: (_cb: (activity: any) => void) => noop,
-    onToolStream: (_cb: (payload: any) => void) => noop,
-    onClaudeStatus: (_cb: (payload: any) => void) => noop,
+    onThinking: (cb: (payload: { thought: string; conversationId: string }) => void) => onEvent(IPC_EVENTS.CHAT_THINKING, cb),
+    onPromptDebug: (cb: (payload: any) => void) => onEvent(IPC_EVENTS.CHAT_PROMPT_DEBUG, cb),
+    onToolActivity: (cb: (activity: any) => void) => onEvent(IPC_EVENTS.CHAT_TOOL_ACTIVITY, cb),
+    onToolStream: (cb: (payload: any) => void) => onEvent(IPC_EVENTS.CHAT_TOOL_STREAM, cb),
+    onClaudeStatus: (cb: (payload: any) => void) => onEvent(IPC_EVENTS.CHAT_CLAUDE_STATUS, cb),
   },
 
   browser: {
@@ -71,6 +79,11 @@ contextBridge.exposeInMainWorld('clawdia', {
     show: () => ipcRenderer.invoke(IPC.BROWSER_SHOW),
     listSessions: () => ipcRenderer.invoke(IPC.BROWSER_LIST_SESSIONS),
     clearSession: (domain: string) => ipcRenderer.invoke(IPC.BROWSER_CLEAR_SESSION, domain),
+    extensions: {
+      list: () => ipcRenderer.invoke(IPC.BROWSER_EXT_LIST),
+      install: (dirPath?: string) => ipcRenderer.invoke(IPC.BROWSER_EXT_INSTALL, dirPath),
+      remove: (id: string) => ipcRenderer.invoke(IPC.BROWSER_EXT_REMOVE, id),
+    },
     onUrlChanged: subscribe<string>(IPC_EVENTS.BROWSER_URL_CHANGED),
     onTitleChanged: subscribe<string>(IPC_EVENTS.BROWSER_TITLE_CHANGED),
     onLoading: subscribe<boolean>(IPC_EVENTS.BROWSER_LOADING),
@@ -97,27 +110,27 @@ contextBridge.exposeInMainWorld('clawdia', {
   },
 
   process: {
-    list: () => Promise.resolve([]),
-    detach: () => Promise.resolve(),
-    attach: (_processId: string) => Promise.resolve(),
-    cancel: (_processId: string) => Promise.resolve(),
-    dismiss: (_processId: string) => Promise.resolve(),
-    onListChanged: (_cb: (processes: any[]) => void) => noop,
+    list: () => ipcRenderer.invoke(IPC.PROCESS_LIST),
+    detach: () => ipcRenderer.invoke(IPC.PROCESS_DETACH),
+    attach: (processId: string) => ipcRenderer.invoke(IPC.PROCESS_ATTACH, processId),
+    cancel: (processId: string) => ipcRenderer.invoke(IPC.PROCESS_CANCEL, processId),
+    dismiss: (processId: string) => ipcRenderer.invoke(IPC.PROCESS_DISMISS, processId),
+    onListChanged: (cb: (processes: any[]) => void) => onEvent(IPC_EVENTS.PROCESS_LIST_CHANGED, cb),
   },
 
   run: {
-    list: () => Promise.resolve([]),
-    get: (_runId: string) => Promise.resolve(null),
-    events: (_runId: string) => Promise.resolve([]),
-    artifacts: (_runId: string) => Promise.resolve([]),
-    changes: (_runId: string) => Promise.resolve([]),
-    scorecard: () => Promise.resolve(null),
-    approvals: (_runId: string) => Promise.resolve([]),
-    humanInterventions: (_runId: string) => Promise.resolve([]),
-    approve: (_approvalId: number) => Promise.resolve(),
-    revise: (_approvalId: number) => Promise.resolve(),
-    deny: (_approvalId: number) => Promise.resolve(),
-    resolveHumanIntervention: (_interventionId: number) => Promise.resolve(),
+    list: (conversationId?: string) => ipcRenderer.invoke(IPC.RUN_LIST, conversationId ?? ''),
+    get: (runId: string) => ipcRenderer.invoke(IPC.RUN_GET, runId),
+    events: (runId: string) => ipcRenderer.invoke(IPC.RUN_EVENTS, runId),
+    artifacts: (runId: string) => ipcRenderer.invoke(IPC.RUN_ARTIFACTS, runId),
+    changes: (runId: string) => ipcRenderer.invoke(IPC.RUN_CHANGES, runId),
+    scorecard: () => ipcRenderer.invoke(IPC.RUN_SCORECARD),
+    approvals: (runId: string) => ipcRenderer.invoke(IPC.RUN_APPROVALS, runId),
+    humanInterventions: (runId: string) => ipcRenderer.invoke(IPC.RUN_HUMAN_INTERVENTIONS, runId),
+    approve: (approvalId: number) => ipcRenderer.invoke(IPC.RUN_APPROVE, approvalId),
+    revise: (approvalId: number) => ipcRenderer.invoke(IPC.RUN_REVISE, approvalId),
+    deny: (approvalId: number) => ipcRenderer.invoke(IPC.RUN_DENY, approvalId),
+    resolveHumanIntervention: (interventionId: number) => ipcRenderer.invoke(IPC.RUN_RESOLVE_HUMAN_INTERVENTION, interventionId),
   },
 
   agent: {
@@ -135,8 +148,8 @@ contextBridge.exposeInMainWorld('clawdia', {
   },
 
   calendar: {
-    list: (_from?: string, _to?: string) => Promise.resolve([]),
-    onEventsChanged: (_cb: (events: any[]) => void) => noop,
+    list: (from?: string, to?: string) => ipcRenderer.invoke(IPC.CALENDAR_LIST, from, to),
+    onEventsChanged: (cb: (events: any[]) => void) => onEvent(IPC_EVENTS.CALENDAR_EVENTS_CHANGED, cb),
   },
 
   swarm: {
@@ -148,15 +161,15 @@ contextBridge.exposeInMainWorld('clawdia', {
   },
 
   identity: {
-    getProfile: () => Promise.resolve(null),
-    setProfile: (_input: any) => Promise.resolve(),
-    listAccounts: () => Promise.resolve([]),
-    addAccount: (_input: any) => Promise.resolve(),
-    deleteAccount: (_serviceName: string) => Promise.resolve(),
-    listCredentials: () => Promise.resolve([]),
-    addCredential: (_label: string, _type: string, _service: string, _valuePlain: string) => Promise.resolve(),
-    deleteCredential: (_label: string, _service: string) => Promise.resolve(),
-    onAccountsChanged: (_cb: () => void) => noop,
+    getProfile: () => ipcRenderer.invoke(IPC.IDENTITY_PROFILE_GET),
+    setProfile: (input: any) => ipcRenderer.invoke(IPC.IDENTITY_PROFILE_SET, input),
+    listAccounts: () => ipcRenderer.invoke(IPC.IDENTITY_ACCOUNTS_LIST),
+    addAccount: (input: any) => ipcRenderer.invoke(IPC.IDENTITY_ACCOUNT_ADD, input),
+    deleteAccount: (serviceName: string) => ipcRenderer.invoke(IPC.IDENTITY_ACCOUNT_DELETE, serviceName),
+    listCredentials: () => ipcRenderer.invoke(IPC.IDENTITY_CREDENTIALS_LIST),
+    addCredential: (label: string, type: string, service: string, valuePlain: string) => ipcRenderer.invoke(IPC.IDENTITY_CREDENTIAL_ADD, label, type, service, valuePlain),
+    deleteCredential: (label: string, service: string) => ipcRenderer.invoke(IPC.IDENTITY_CREDENTIAL_DELETE, label, service),
+    onAccountsChanged: (cb: () => void) => onEvent(IPC_EVENTS.IDENTITY_ACCOUNTS_CHANGED, cb),
   },
 
   policy: {
@@ -169,20 +182,25 @@ contextBridge.exposeInMainWorld('clawdia', {
     close: () => ipcRenderer.invoke(IPC.WINDOW_CLOSE),
   },
 
+  vpn: {
+    status: (): Promise<boolean> => ipcRenderer.invoke(IPC.VPN_STATUS),
+    toggle: (): Promise<boolean> => ipcRenderer.invoke(IPC.VPN_TOGGLE),
+  },
+
   fs: {
-    readDir: (_dirPath: string) => Promise.resolve([]),
-    readFile: (_filePath: string) => Promise.resolve(null),
-    writeFile: (_filePath: string, _content: string) => Promise.resolve(),
+    readDir: (dirPath: string) => ipcRenderer.invoke(IPC.FS_READ_DIR, dirPath),
+    readFile: (filePath: string) => ipcRenderer.invoke(IPC.FS_READ_FILE, filePath),
+    writeFile: (filePath: string, content: string) => ipcRenderer.invoke(IPC.FS_WRITE_FILE, filePath, content),
   },
 
   editor: {
-    openFile: (_filePath: string) => Promise.resolve(),
-    watchFile: (_filePath: string) => Promise.resolve(),
-    unwatchFile: () => Promise.resolve(),
-    setState: (_state: any) => Promise.resolve(),
-    getState: () => Promise.resolve(null),
-    onOpenFile: (_cb: (payload: { filePath: string }) => void) => noop,
-    onFileChanged: (_cb: (payload: { filePath: string }) => void) => noop,
+    openFile: (filePath: string) => ipcRenderer.invoke(IPC.EDITOR_OPEN_FILE, filePath),
+    watchFile: (filePath: string) => ipcRenderer.invoke(IPC.EDITOR_WATCH_FILE, filePath),
+    unwatchFile: () => ipcRenderer.invoke(IPC.EDITOR_UNWATCH_FILE),
+    setState: (state: any) => ipcRenderer.invoke(IPC.EDITOR_SET_STATE, state),
+    getState: () => ipcRenderer.invoke(IPC.EDITOR_GET_STATE),
+    onOpenFile: (cb: (payload: { filePath: string }) => void) => onEvent(IPC_EVENTS.EDITOR_OPEN_FILE, cb),
+    onFileChanged: (cb: (payload: { filePath: string }) => void) => onEvent(IPC_EVENTS.EDITOR_FILE_CHANGED, cb),
   },
 
   terminal: {
@@ -196,8 +214,8 @@ contextBridge.exposeInMainWorld('clawdia', {
     acquire: (id: string, owner: string, meta?: any) => ipcRenderer.invoke(IPC.TERMINAL_ACQUIRE, id, owner, meta),
     release: (id: string) => ipcRenderer.invoke(IPC.TERMINAL_RELEASE, id),
     requestTakeover: (id: string, requester: string) => ipcRenderer.invoke(IPC.TERMINAL_REQUEST_TAKEOVER, id, requester),
-    spawnClaudeCode: (_sessionId: string, _task: string, _opts?: any) =>
-      Promise.resolve({ sessionId: null as string | null, exitCode: null, output: '' }),
+    spawnClaudeCode: (sessionId: string, task: string, opts?: any) =>
+      ipcRenderer.invoke(IPC.TERMINAL_SPAWN_CLAUDE_CODE, sessionId, task, opts),
     onData: subscribe<{ id: string; data: string }>(IPC_EVENTS.TERMINAL_DATA),
     onExit: subscribe<{ id: string; code: number; signal?: number }>(IPC_EVENTS.TERMINAL_EXIT),
     onEvent: subscribe<any>(IPC_EVENTS.TERMINAL_EVENT),
@@ -205,73 +223,99 @@ contextBridge.exposeInMainWorld('clawdia', {
   },
 
   desktop: {
-    listApps: () => Promise.resolve([]),
-    focusApp: (_windowId: string) => Promise.resolve(),
-    killApp: (_pid: number) => Promise.resolve(),
+    listApps: () => ipcRenderer.invoke(IPC.DESKTOP_LIST_APPS),
+    focusApp: (windowId: string) => ipcRenderer.invoke(IPC.DESKTOP_FOCUS_APP, windowId),
+    killApp: (pid: number) => ipcRenderer.invoke(IPC.DESKTOP_KILL_APP, pid),
   },
 
   wallet: {
-    getPaymentMethods: () => Promise.resolve([]),
-    addManualCard: (_input: any) => Promise.resolve(),
-    importBrowserCards: () => Promise.resolve([]),
-    confirmImport: (_candidates: any[]) => Promise.resolve(),
-    setPreferred: (_id: number) => Promise.resolve(),
-    setBackup: (_id: number) => Promise.resolve(),
-    removeCard: (_id: number) => Promise.resolve(),
-    getBudgets: () => Promise.resolve([]),
-    setBudget: (_input: any) => Promise.resolve(),
-    disableBudget: (_period: string) => Promise.resolve(),
-    getTransactions: (_args?: { limit?: number }) => Promise.resolve([]),
-    getRemainingBudgets: () => Promise.resolve([]),
-    onPurchaseComplete: (_cb: (payload: any) => void) => noop,
-    onLowBalance: (_cb: (payload: any) => void) => noop,
-    onBudgetExceeded: (_cb: (payload: any) => void) => noop,
+    getPaymentMethods: () => ipcRenderer.invoke(IPC.WALLET_GET_PAYMENT_METHODS),
+    addManualCard: (input: any) => ipcRenderer.invoke(IPC.WALLET_ADD_MANUAL_CARD, input),
+    importBrowserCards: () => ipcRenderer.invoke(IPC.WALLET_IMPORT_BROWSER_CARDS),
+    confirmImport: (candidates: any[]) => ipcRenderer.invoke(IPC.WALLET_CONFIRM_IMPORT, candidates),
+    setPreferred: (id: number) => ipcRenderer.invoke(IPC.WALLET_SET_PREFERRED, id),
+    setBackup: (id: number) => ipcRenderer.invoke(IPC.WALLET_SET_BACKUP, id),
+    removeCard: (id: number) => ipcRenderer.invoke(IPC.WALLET_REMOVE_CARD, id),
+    getBudgets: () => ipcRenderer.invoke(IPC.WALLET_GET_BUDGETS),
+    setBudget: (input: any) => ipcRenderer.invoke(IPC.WALLET_SET_BUDGET, input),
+    disableBudget: (period: string) => ipcRenderer.invoke(IPC.WALLET_DISABLE_BUDGET, period),
+    getTransactions: (args?: { limit?: number }) => ipcRenderer.invoke(IPC.WALLET_GET_TRANSACTIONS, args),
+    getRemainingBudgets: () => ipcRenderer.invoke(IPC.WALLET_GET_REMAINING_BUDGETS),
+    onPurchaseComplete: (cb: (payload: any) => void) => onEvent(IPC_EVENTS.SPENDING_PURCHASE_COMPLETE, cb),
+    onLowBalance: (cb: (payload: any) => void) => onEvent(IPC_EVENTS.SPENDING_LOW_BALANCE, cb),
+    onBudgetExceeded: (cb: (payload: any) => void) => onEvent(IPC_EVENTS.SPENDING_BUDGET_EXCEEDED, cb),
   },
 
   tasks: {
-    list: () => Promise.resolve([]),
-    create: (_input: any) => Promise.resolve(null),
-    enable: (_id: number, _enabled: boolean) => Promise.resolve(),
-    delete: (_id: number) => Promise.resolve(),
-    runs: (_id: number) => Promise.resolve([]),
-    runNow: (_id: number) => Promise.resolve(),
+    list: () => ipcRenderer.invoke(IPC.TASKS_LIST),
+    create: (input: any) => ipcRenderer.invoke(IPC.TASKS_CREATE, input),
+    enable: (id: number, enabled: boolean) => ipcRenderer.invoke(IPC.TASKS_ENABLE, id, enabled),
+    delete: (id: number) => ipcRenderer.invoke(IPC.TASKS_DELETE, id),
+    runs: (id: number) => ipcRenderer.invoke(IPC.TASKS_RUNS, id),
+    runNow: (id: number) => ipcRenderer.invoke(IPC.TASKS_RUN_NOW, id),
     summary: () => ipcRenderer.invoke(IPC.TASKS_SUMMARY),
-    onRunStarted: (_cb: (payload: any) => void) => noop,
-    onRunComplete: (_cb: (payload: any) => void) => noop,
+    onRunStarted: (cb: (payload: any) => void) => onEvent(IPC_EVENTS.TASK_RUN_STARTED, cb),
+    onRunComplete: (cb: (payload: any) => void) => onEvent(IPC_EVENTS.TASK_RUN_COMPLETE, cb),
   },
 
-  videoExtractor: {
-    checkYtdlp: () => ipcRenderer.invoke('check-ytdlp'),
-    installYtdlp: () => ipcRenderer.invoke('install-ytdlp'),
-    openFolderDialog: () => ipcRenderer.invoke('open-folder-dialog'),
-    getHomeDir: () => ipcRenderer.invoke('get-home-dir'),
-    startDownload: (opts: {
-      url: string;
-      outputDir: string;
-      quality: string;
-      format: string;
-      audio: string;
-    }) => ipcRenderer.invoke('start-download', opts),
-    onProgress: (cb: (data: { percent: number | null; line: string }) => void) => {
-      const handler = (_: any, data: any) => cb(data);
-      ipcRenderer.on('download-progress', handler);
-      return () => ipcRenderer.removeListener('download-progress', handler);
-    },
-    onComplete: (cb: (data: { filePath: string }) => void) => {
-      const handler = (_: any, data: any) => cb(data);
-      ipcRenderer.on('download-complete', handler);
-      return () => ipcRenderer.removeListener('download-complete', handler);
-    },
-    onError: (cb: (data: { message: string }) => void) => {
-      const handler = (_: any, data: any) => cb(data);
-      ipcRenderer.on('download-error', handler);
-      return () => ipcRenderer.removeListener('download-error', handler);
-    },
-    onInstallProgress: (cb: (data: { line: string }) => void) => {
-      const handler = (_: any, data: any) => cb(data);
-      ipcRenderer.on('install-ytdlp-progress', handler);
-      return () => ipcRenderer.removeListener('install-ytdlp-progress', handler);
-    },
-    searchAndExtractUrl: (opts: { query: string }) => ipcRenderer.invoke('search-and-extract-url', opts),
+  uiState: {
+    /** Push current UI layout state from renderer → main (called on every meaningful state change) */
+    push: (state: any) => ipcRenderer.invoke(IPC.UI_STATE_PUSH, state),
+    /** Pull the last-known UI state from main (rarely needed; push is the primary flow) */
+    get: () => ipcRenderer.invoke(IPC.UI_STATE_GET),
   },
-});
+
+    videoExtractor: {
+      checkYtdlp: () => ipcRenderer.invoke('check-ytdlp'),
+      installYtdlp: () => ipcRenderer.invoke('install-ytdlp'),
+      openFolderDialog: () => ipcRenderer.invoke('open-folder-dialog'),
+      getHomeDir: () => ipcRenderer.invoke('get-home-dir'),
+      startDownload: (opts: {
+        url: string;
+        outputDir: string;
+        quality: string;
+        format: string;
+        audio: string;
+      }) => ipcRenderer.invoke('start-download', opts),
+      onProgress: (cb: (data: { percent: number | null; line: string }) => void) => {
+        const handler = (_: any, data: any) => cb(data);
+        ipcRenderer.on('download-progress', handler);
+        return () => ipcRenderer.removeListener('download-progress', handler);
+      },
+      onComplete: (cb: (data: { filePath: string }) => void) => {
+        const handler = (_: any, data: any) => cb(data);
+        ipcRenderer.on('download-complete', handler);
+        return () => ipcRenderer.removeListener('download-complete', handler);
+      },
+      onError: (cb: (data: { message: string }) => void) => {
+        const handler = (_: any, data: any) => cb(data);
+        ipcRenderer.on('download-error', handler);
+        return () => ipcRenderer.removeListener('download-error', handler);
+      },
+      onInstallProgress: (cb: (data: { line: string }) => void) => {
+        const handler = (_: any, data: any) => cb(data);
+        ipcRenderer.on('install-ytdlp-progress', handler);
+        return () => ipcRenderer.removeListener('install-ytdlp-progress', handler);
+      },
+      searchAndExtractUrl: (opts: { query: string }) => ipcRenderer.invoke('search-and-extract-url', opts),
+    },
+  });
+
+  contextBridge.exposeInMainWorld(preloadStatusKey, {
+    loaded: true,
+    stage: 'bridge-exposed',
+  });
+  console.log('[preload] bridge exposed');
+} catch (error) {
+  const message = error instanceof Error ? `${error.message}\n${error.stack || ''}` : String(error);
+  console.error('[preload] failed to expose bridge:', message);
+  try {
+    contextBridge.exposeInMainWorld(preloadStatusKey, {
+      loaded: false,
+      stage: 'error',
+      error: message,
+    });
+  } catch {
+    // Ignore secondary preload errors.
+  }
+}

@@ -31,5 +31,6 @@ export interface WriteMeta {
 export interface AcquireMeta {
   runId?: string;
   conversationId?: string;
+  mode?: SessionMode;
   executorMode?: string;
 }

@@ -1,0 +1,119 @@
+{
+  "id": "code-reviewer",
+  "name": "Code Reviewer Agent",
+  "version": "1.0.0",
+  "description": "Performs comprehensive code reviews focusing on security, performance, and maintainability",
+  
+  "system_prompt": {
+    "path": "../prompts/system/code-reviewer.md",
+    "priority": "high",
+    "version": "1.0"
+  },
+  
+  "capabilities": {
+    "tools": [
+      {
+        "name": "read_file",
+        "enabled": true,
+        "description": "Read files to review"
+      },
+      {
+        "name": "analyze_code",
+        "enabled": true,
+        "description": "Analyze code for issues and quality"
+      },
+      {
+        "name": "check_tests",
+        "enabled": true,
+        "description": "Verify test coverage and quality"
+      }
+    ],
+    
+    "max_tokens_output": 3000,
+    "temperature": 0.5,
+    "top_p": 0.8
+  },
+  
+  "context": {
+    "memory_type": "short-term",
+    "conversation_history_limit": 15,
+    "context_window": 16000
+  },
+  
+  "review_categories": {
+    "security": {
+      "enabled": true,
+      "severity_weight": 3,
+      "critical_issues": [
+        "hardcoded_credentials",
+        "sql_injection",
+        "xss_vulnerability",
+        "unsafe_eval"
+      ]
+    },
+    
+    "performance": {
+      "enabled": true,
+      "severity_weight": 2,
+      "checklist": [
+        "react_rerenders",
+        "memory_leaks",
+        "inefficient_algorithms",
+        "bundle_size"
+      ]
+    },
+    
+    "maintainability": {
+      "enabled": true,
+      "severity_weight": 1,
+      "checklist": [
+        "naming_clarity",
+        "code_organization",
+        "documentation",
+        "dry_principle"
+      ]
+    },
+    
+    "testing": {
+      "enabled": true,
+      "severity_weight": 2,
+      "target_coverage": 80,
+      "checklist": [
+        "test_coverage",
+        "test_quality",
+        "edge_cases",
+        "mocking"
+      ]
+    },
+    
+    "typescript": {
+      "enabled": true,
+      "severity_weight": 1,
+      "rules": [
+        "no_any_without_justification",
+        "proper_generics",
+        "strict_mode",
+        "type_annotations"
+      ]
+    }
+  },
+  
+  "constraints": {
+    "read_only": true,
+    "can_modify": false,
+    "max_file_size_kb": 50
+  },
+  
+  "output_format": {
+    "structure": "category_based",
+    "include_examples": true,
+    "include_positive_feedback": true,
+    "include_severity_levels": true
+  },
+  
+  "approval_requirements": {
+    "block_on_critical": true,
+    "require_fixes_for": ["security", "high_performance_issues"],
+    "suggest_for": ["medium", "low", "style_improvements"]
+  }
+}

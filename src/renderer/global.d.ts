@@ -1,21 +1,22 @@
-import type { AgentBuilderCompileInput, AgentBuilderCompileResult, AgentDefinition, AgentRunHistoryItem, MessageAttachment } from '../shared/types';
+import type { AgentBuilderCompileInput, AgentBuilderCompileResult, AgentDefinition, AgentRunHistoryItem, MessageAttachment, PromptDebugSnapshot } from '../shared/types';
 
 declare global {
   interface ClawdiaAPI {
     chat: {
-      send: (message: string, attachments?: MessageAttachment[]) => Promise<any>;
+      send: (message: string, attachments?: MessageAttachment[], conversationId?: string | null) => Promise<any>;
       openAttachment: (filePath: string) => Promise<any>;
       stop: () => Promise<any>;
       new: () => Promise<any>;
       list: () => Promise<any>;
       load: (id: string) => Promise<any>;
       getMode: (id: string) => Promise<any>;
-      setMode: (id: string, mode: 'chat' | 'claude_terminal') => Promise<any>;
+      setMode: (id: string, mode: 'chat' | 'claude_terminal' | 'codex_terminal') => Promise<any>;
       getActiveTerminalSession: (conversationId?: string | null) => Promise<{ sessionId: string | null }>;
       delete: (id: string) => Promise<any>;
       onStreamText: (cb: (text: string) => void) => () => void;
       onStreamEnd: (cb: (data: any) => void) => () => void;
       onThinking: (cb: (thought: string) => void) => () => void;
+      onPromptDebug: (cb: (payload: PromptDebugSnapshot) => void) => () => void;
       onToolActivity: (cb: (activity: any) => void) => () => void;
       onClaudeStatus: (cb: (payload: { conversationId: string; sessionId: string; status: string; summary: string; lastActivity: string | null }) => void) => () => void;
     };
@@ -137,6 +138,22 @@ declare global {
         takeoverRequestedBy: 'user' | 'agent' | 'external_agent' | null;
         activeRun: string | null;
       }) => void) => () => void;
+    };
+    uiState: {
+      push: (state: {
+        activeRightPanel: 'browser' | 'terminal' | 'editor' | null;
+        activeView: 'chat' | 'conversations' | 'settings' | 'processes' | 'agents';
+        activeConversationId: string | null;
+        openTabIds: string[];
+        sidebarDrawer: string | null;
+        provider: string;
+        model: string;
+        terminalSessionIds: string[];
+        browserVisible: boolean;
+        browserUrl: string | null;
+        updatedAt: number;
+      }) => Promise<void>;
+      get: () => Promise<any>;
     };
     tasks: {
       list: () => Promise<any>;

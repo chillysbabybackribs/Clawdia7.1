@@ -1,0 +1,31 @@
+{
+  "$schema": "clawdia/environment/v1",
+  "written_at": null,
+  "platform": {
+    "os": null,
+    "display_server": null,
+    "home_directory": null,
+    "working_directory": null,
+    "shell": null,
+    "username": null
+  },
+  "browser": {
+    "current_url": null,
+    "current_title": null,
+    "open_tabs": []
+  },
+  "available_binaries": [],
+  "available_tools": {
+    "shell_exec": true,
+    "file_edit": true,
+    "browser": true,
+    "gui_interact": null,
+    "dbus_control": null
+  },
+  "session": {
+    "run_id": null,
+    "unrestricted_mode": false,
+    "provider": null,
+    "model": null
+  }
+}

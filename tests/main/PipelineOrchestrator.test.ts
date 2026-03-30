@@ -47,29 +47,25 @@ const baseOptions = {
 describe('PipelineOrchestrator', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    mockStreamLLM.mockReset();
+    mockAgentLoop.mockReset();
+    mockAgentLoop.mockResolvedValue('worker result');
   });
 
   it('classifyIntent returns true for complex multi-part goals', async () => {
-    mockStreamLLM.mockResolvedValueOnce({
-      text: JSON.stringify({ pipeline: true, reason: 'complex task' }),
-      toolBlocks: [],
-    });
-    const result = await PipelineOrchestrator.classifyIntent('research AI trends and compare top 5 companies', baseOptions);
+    const result = await PipelineOrchestrator.classifyIntent(
+      'Research AI trends across multiple vendors, compare the top 5 companies, and synthesize the main differences.',
+    );
     expect(result).toBe(true);
   });
 
   it('classifyIntent returns false for simple goals', async () => {
-    mockStreamLLM.mockResolvedValueOnce({
-      text: JSON.stringify({ pipeline: false, reason: 'simple task' }),
-      toolBlocks: [],
-    });
-    const result = await PipelineOrchestrator.classifyIntent('what is the weather today', baseOptions);
+    const result = await PipelineOrchestrator.classifyIntent('what is the weather today');
     expect(result).toBe(false);
   });
 
-  it('classifyIntent returns false on parse error (fail safe)', async () => {
-    mockStreamLLM.mockResolvedValueOnce({ text: 'invalid json{{', toolBlocks: [] });
-    const result = await PipelineOrchestrator.classifyIntent('something', baseOptions);
+  it('classifyIntent returns false for short ambiguous prompts', async () => {
+    const result = await PipelineOrchestrator.classifyIntent('something');
     expect(result).toBe(false);
   });
 
@@ -127,6 +123,96 @@ describe('PipelineOrchestrator', () => {
 
     // Synthesizer still called with partial results
     expect(mockStreamLLM).toHaveBeenCalledTimes(2); // planner + synthesizer
+    expect(result).toContain('Summary');
+  });
+
+  it('run tolerates planner prose around a fenced JSON array', async () => {
+    mockStreamLLM.mockResolvedValueOnce({
+      text: [
+        'Here is the plan:',
+        '```json',
+        JSON.stringify([
+          { id: 'sub-1', subtask: 'Task 1', goal: 'Goal 1' },
+          { id: 'sub-2', subtask: 'Task 2', goal: 'Goal 2' },
+        ]),
+        '```',
+        'These are the best parallel splits.',
+      ].join('\n'),
+      toolBlocks: [],
+    });
+    mockStreamLLM.mockResolvedValueOnce({
+      text: '## Summary\n\nparsed planner output',
+      toolBlocks: [],
+    });
+
+    const result = await PipelineOrchestrator.run('some task', {
+      ...baseOptions,
+      onStateChanged: vi.fn(),
+      onText: vi.fn(),
+    });
+
+    expect(mockAgentLoop).toHaveBeenCalledTimes(2);
+    expect(result).toContain('Summary');
+  });
+
+  it('run tolerates planner JSON wrapped in an object', async () => {
+    mockStreamLLM.mockResolvedValueOnce({
+      text: JSON.stringify({
+        subtasks: [
+          { id: 'sub-1', subtask: 'Task 1', goal: 'Goal 1' },
+          { id: 'sub-2', subtask: 'Task 2', goal: 'Goal 2' },
+        ],
+      }),
+      toolBlocks: [],
+    });
+    mockStreamLLM.mockResolvedValueOnce({
+      text: '## Summary\n\nparsed planner object',
+      toolBlocks: [],
+    });
+
+    const result = await PipelineOrchestrator.run('some task', {
+      ...baseOptions,
+      onStateChanged: vi.fn(),
+      onText: vi.fn(),
+    });
+
+    expect(mockAgentLoop).toHaveBeenCalledTimes(2);
+    expect(result).toContain('Summary');
+  });
+
+  it('run tolerates planner markdown list output', async () => {
+    mockStreamLLM.mockResolvedValueOnce({
+      text: [
+        'Plan:',
+        '1. Research market trends: Find the top three current trends.',
+        '2. Analyze competitors: Identify the main competing products.',
+      ].join('\n'),
+      toolBlocks: [],
+    });
+    mockStreamLLM.mockResolvedValueOnce({
+      text: '## Summary\n\nparsed planner list',
+      toolBlocks: [],
+    });
+
+    const result = await PipelineOrchestrator.run('some task', {
+      ...baseOptions,
+      onStateChanged: vi.fn(),
+      onText: vi.fn(),
+    });
+
+    expect(mockAgentLoop).toHaveBeenCalledTimes(2);
+    expect(mockAgentLoop).toHaveBeenNthCalledWith(
+      1,
+      'Find the top three current trends.',
+      [],
+      expect.objectContaining({ runId: expect.any(String) }),
+    );
+    expect(mockAgentLoop).toHaveBeenNthCalledWith(
+      2,
+      'Identify the main competing products.',
+      [],
+      expect.objectContaining({ runId: expect.any(String) }),
+    );
     expect(result).toContain('Summary');
   });
 });

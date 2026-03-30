@@ -1,7 +1,17 @@
 import { createRun, updateRun, appendRunEvent } from './db';
+import { reserveEstimate, confirmTransaction, cancelReservation } from './agent/spending-budget';
 
 function uuid(): string {
   return `${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
+}
+
+const runTransactions = new Map<string, number>();
+const runSequences = new Map<string, number>();
+
+function getNextSeq(runId: string): number {
+  const seq = (runSequences.get(runId) || 0) + 1;
+  runSequences.set(runId, seq);
+  return seq;
 }
 
 /**
@@ -10,14 +20,28 @@ function uuid(): string {
  */
 export function startRun(conversationId: string, provider: string, model: string): string {
   const runId = `run-${uuid()}`;
+  const now = new Date().toISOString();
+
   createRun({
     id: runId,
     conversation_id: conversationId,
+    title: 'Assistant Task',
+    goal: 'Automated execution',
     status: 'running',
+    started_at: now,
+    updated_at: now,
+    tool_call_count: 0,
+    was_detached: 0,
     provider,
     model,
-    started_at: Date.now(),
+    workflow_stage: 'executing',
   });
+
+  // Reserve a 1-cent estimate for the run locally
+  const txId = reserveEstimate(runId, provider, 1);
+  runTransactions.set(runId, txId);
+  runSequences.set(runId, 0);
+
   return runId;
 }
 
@@ -26,13 +50,17 @@ export function startRun(conversationId: string, provider: string, model: string
  */
 export function trackToolCall(runId: string, toolName: string, argsSummary: string): string {
   const eventId = `evt-${uuid()}`;
+  const now = new Date().toISOString();
+
   appendRunEvent({
-    id: eventId,
     run_id: runId,
-    type: 'tool_call',
-    payload: JSON.stringify({ toolName, argsSummary }),
-    created_at: Date.now(),
+    seq: getNextSeq(runId),
+    ts: now,
+    kind: 'tool_call',
+    tool_name: toolName,
+    payload_json: JSON.stringify({ toolName, argsSummary, eventId }),
   });
+
   return eventId;
 }
 
@@ -40,12 +68,14 @@ export function trackToolCall(runId: string, toolName: string, argsSummary: stri
  * Record a tool call result. Pass the eventId returned by trackToolCall.
  */
 export function trackToolResult(runId: string, eventId: string, resultSummary: string, durationMs: number): void {
+  const now = new Date().toISOString();
+
   appendRunEvent({
-    id: `${eventId}-result`,
     run_id: runId,
-    type: 'tool_result',
-    payload: JSON.stringify({ callEventId: eventId, resultSummary, duration_ms: durationMs }),
-    created_at: Date.now(),
+    seq: getNextSeq(runId),
+    ts: now,
+    kind: 'tool_result',
+    payload_json: JSON.stringify({ callEventId: eventId, resultSummary, duration_ms: durationMs }),
   });
 }
 
@@ -53,20 +83,42 @@ export function trackToolResult(runId: string, eventId: string, resultSummary: s
  * Mark a run as completed with final token and cost counts.
  */
 export function completeRun(runId: string, totalTokens: number, estimatedCostUsd: number): void {
+  const now = new Date().toISOString();
+
   updateRun(runId, {
     status: 'completed',
-    completed_at: Date.now(),
+    completed_at: now,
+    updated_at: now,
     total_tokens: totalTokens,
     estimated_cost_usd: estimatedCostUsd,
+    workflow_stage: 'completed',
   });
+
+  const txId = runTransactions.get(runId);
+  if (txId !== undefined) {
+    const cents = Math.round(estimatedCostUsd * 100);
+    confirmTransaction(txId, Math.max(1, cents));
+    runTransactions.delete(runId);
+  }
 }
 
 /**
  * Mark a run as failed.
  */
-export function failRun(runId: string, _error: string): void {
+export function failRun(runId: string, error: string): void {
+  const now = new Date().toISOString();
+
   updateRun(runId, {
     status: 'failed',
-    completed_at: Date.now(),
+    completed_at: now,
+    updated_at: now,
+    error,
+    workflow_stage: 'failed',
   });
+
+  const txId = runTransactions.get(runId);
+  if (txId !== undefined) {
+    cancelReservation(txId);
+    runTransactions.delete(runId);
+  }
 }

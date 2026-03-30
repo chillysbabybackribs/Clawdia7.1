@@ -1,5 +1,6 @@
 // src/main/claudeCodeClient.ts
 import { spawn } from 'child_process';
+import { getClaudeMcpConfigPath } from './mcpBridge';
 
 const sessions = new Map<string, string>();
 
@@ -7,6 +8,7 @@ export interface RunClaudeCodeOptions {
   conversationId: string;
   prompt: string;
   onText: (delta: string) => void;
+  skipPermissions?: boolean;
 }
 
 export interface RunClaudeCodeResult {
@@ -19,18 +21,23 @@ export function clearSessions(): void {
 }
 
 export function runClaudeCode(options: RunClaudeCodeOptions): Promise<RunClaudeCodeResult> {
-  const { conversationId, prompt, onText } = options;
+  const { conversationId, prompt, onText, skipPermissions } = options;
   const claudeBin = process.env.CLAUDE_BIN || 'claude';
   const sessionId = sessions.get(conversationId);
 
+  return getClaudeMcpConfigPath(conversationId).then((mcpConfigPath) => {
   const args = [
     '--print',
-    '--dangerously-skip-permissions',
     '--output-format', 'stream-json',
     '--verbose',
     '--include-partial-messages',
     '--input-format', 'text',
+    '--mcp-config', mcpConfigPath,
   ];
+
+  if (skipPermissions || process.env.CLAUDE_SKIP_PERMISSIONS === '1') {
+    args.splice(1, 0, '--dangerously-skip-permissions');
+  }
 
   if (sessionId) {
     args.push('--resume', sessionId);
@@ -111,7 +118,9 @@ export function runClaudeCode(options: RunClaudeCodeOptions): Promise<RunClaudeC
         try {
           const msg = JSON.parse(buffer.trim()) as Record<string, unknown>;
           if (typeof msg.session_id === 'string') resolvedSessionId = msg.session_id;
-        } catch { /* ignore */ }
+        } catch {
+          // Ignore trailing partial JSON.
+        }
       }
 
       if (code !== 0) {
@@ -127,5 +136,6 @@ export function runClaudeCode(options: RunClaudeCodeOptions): Promise<RunClaudeC
 
       resolve({ finalText: finalText.trim(), sessionId: resolvedSessionId });
     });
+  });
   });
 }

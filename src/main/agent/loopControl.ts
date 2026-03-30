@@ -1,4 +1,5 @@
 // src/main/agent/loopControl.ts
+import { setLoopPaused, deleteLoopState } from '../db';
 
 export interface LoopControl {
   signal: AbortSignal;
@@ -42,6 +43,7 @@ export function getLoopControl(runId: string): LoopControl | undefined {
 
 export function removeLoopControl(runId: string): void {
   controls.delete(runId);
+  deleteLoopState(runId);
 }
 
 export function cancelLoop(runId: string): boolean {
@@ -60,6 +62,7 @@ export function pauseLoop(runId: string): boolean {
   const ctrl = controls.get(runId);
   if (!ctrl) return false;
   ctrl.isPaused = true;
+  setLoopPaused(runId, true);
   return true;
 }
 
@@ -67,6 +70,7 @@ export function resumeLoop(runId: string): boolean {
   const ctrl = controls.get(runId);
   if (!ctrl) return false;
   ctrl.isPaused = false;
+  setLoopPaused(runId, false);
   if (ctrl._pauseResolve) {
     ctrl._pauseResolve();
     ctrl._pauseResolve = null;

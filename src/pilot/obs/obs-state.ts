@@ -1,5 +1,22 @@
 // src/pilot/obs/obs-state.ts
-import type { StateDef } from './obs-types';
+import type { OBSRuntimeState, StateDef } from './obs-types';
+
+export function createOBSRuntimeState(): OBSRuntimeState {
+  return {
+    obsReady: false,
+    mainWindowDetected: false,
+    settingsOpen: false,
+    currentScene: null,
+    knownScenes: [],
+    knownSources: [],
+    micMuted: null,
+    transitionName: null,
+  };
+}
+
+export function rememberUnique(values: string[], value: string): string[] {
+  return values.includes(value) ? values : [...values, value];
+}
 
 /**
  * Given a map of named state definitions and runtime signals,
