@@ -589,7 +589,7 @@ function TerminalTranscriptCard({
             <div className="thinking-shimmer-line h-[2px] min-w-0 flex-1 rounded-full" aria-hidden />
           </div>
         )}
-        <div className="mt-3 flex items-center gap-2">
+        <div className="mt-3 flex items-center justify-end gap-2">
           <span className="text-[11px] text-text-secondary/70">{message.timestamp}</span>
           {!isStreaming && message.content && <CopyButton text={message.content} />}
           <button
@@ -636,7 +636,7 @@ const AssistantMessage = React.memo(function AssistantMessage({
           {!!message.fileRefs?.length && <FileRefList fileRefs={message.fileRefs} />}
           {!!message.linkPreviews?.length && <LinkPreviewList linkPreviews={message.linkPreviews} />}
           {!message.isStreaming && message.content && (
-            <div className="flex items-center gap-2 mt-1">
+            <div className="mt-1 flex items-center justify-end gap-2">
               <span className="text-[11px] text-text-secondary/70">{message.timestamp}</span>
               <CopyButton text={message.content} />
             </div>
@@ -664,7 +664,7 @@ const AssistantMessage = React.memo(function AssistantMessage({
         {!!message.fileRefs?.length && <FileRefList fileRefs={message.fileRefs} />}
         {!!message.linkPreviews?.length && <LinkPreviewList linkPreviews={message.linkPreviews} />}
         {hasContent && (
-          <div className="flex items-center gap-2 mt-2">
+          <div className="mt-2 flex items-center justify-end gap-2">
             <span className="text-[11px] text-text-secondary/70">{message.timestamp}</span>
             <CopyButton text={message.content} />
           </div>
@@ -700,7 +700,7 @@ const UserMessage = React.memo(function UserMessage({
         )}
         {message.content.trim() && <div className="text-[1rem] leading-relaxed whitespace-pre-wrap">{message.content}</div>}
       </div>
-      <div className="flex items-center gap-2">
+      <div className="flex items-center justify-end gap-2">
         <span className="text-[11px] text-text-secondary/70">{message.timestamp}</span>
         {message.content.trim() && (
           <>
@@ -1120,7 +1120,12 @@ export default function ChatPanel({
   }, []);
 
   const autoScroll = useCallback(() => {
-    if (!isUserScrolledUpRef.current) scrollToBottom();
+    const container = scrollRef.current;
+    if (!container || isUserScrolledUpRef.current) return;
+
+    const distanceFromBottom = container.scrollHeight - container.scrollTop - container.clientHeight;
+    const behavior = distanceFromBottom > 0 && distanceFromBottom < 240 ? 'smooth' : 'auto';
+    scrollToBottom(behavior);
   }, [scrollToBottom]);
 
   const clearThinkingAdvanceTimer = useCallback(() => {
@@ -1866,7 +1871,7 @@ export default function ChatPanel({
       ) : (
         <div ref={scrollRef} onScroll={handleScroll} className="flex-1 overflow-y-auto overflow-x-hidden scroll-smooth">
           <div
-            className={`flex min-h-full flex-col px-5 pt-5 pb-8 ${showCodexEmptyState || showClaudeCodeEmptyState || showClawdiaEmptyState ? '' : 'gap-4'}`}
+            className="flex min-h-full flex-col px-5 pt-5 pb-8"
             style={{ zoom: chatZoom / 100 }}
           >
             {showClawdiaEmptyState && (
@@ -1880,10 +1885,10 @@ export default function ChatPanel({
             )}
             {messages.map((msg, idx) =>
               msg.type === 'pipeline'
-              ? <div key={msg.id} data-message-id={msg.id}><PipelineBlock /></div>
+              ? <div key={msg.id} data-message-id={msg.id} className={idx === 0 ? '' : 'border-t border-white/[0.06] pt-4 mt-4'}><PipelineBlock /></div>
               : msg.role === 'assistant'
               ? (
-                <div key={msg.id} data-message-id={msg.id}>
+                <div key={msg.id} data-message-id={msg.id} className={idx === 0 ? '' : 'border-t border-white/[0.06] pt-4 mt-4'}>
                   <AssistantMessage
                     message={msg}
                     fillAvailableSpace={msg.isStreaming && idx === messages.length - 1}
@@ -1894,7 +1899,7 @@ export default function ChatPanel({
                 </div>
               )
               : (
-                <div key={msg.id} data-message-id={msg.id}>
+                <div key={msg.id} data-message-id={msg.id} className={idx === 0 ? '' : 'border-t border-white/[0.06] pt-4 mt-4'}>
                   <UserMessage
                     message={msg}
                     onRetry={(message) => {
@@ -1907,7 +1912,7 @@ export default function ChatPanel({
               )
             )}
             {pendingApprovalRunId && nonWorkflowApproval && (
-              <div className="flex justify-start animate-slide-up">
+              <div className={`flex justify-start animate-slide-up ${messages.length > 0 ? 'border-t border-white/[0.06] pt-4 mt-4' : ''}`}>
                 <div className="max-w-[92%] px-1 py-1 text-text-primary">
                   <ApprovalBanner
                     approval={nonWorkflowApproval}
