@@ -48,7 +48,8 @@ function parseSettingsFile(filePath: string): AppSettings | null {
       providerKeys: { ...emptyKeys(), ...parsed.providerKeys },
       models: { ...DEFAULT_MODEL_BY_PROVIDER, ...parsed.models },
     };
-  } catch {
+  } catch (err) {
+    console.warn('[settings] Failed to parse settings file:', filePath, (err as Error).message);
     return null;
   }
 }
@@ -108,10 +109,14 @@ export function saveSettings(next: AppSettings): void {
   cache = next;
   const p = settingsPath();
   try {
-    fs.mkdirSync(path.dirname(p), { recursive: true });
-    fs.writeFileSync(p, JSON.stringify(next, null, 2), 'utf8');
-  } catch {
-    // ignore disk errors
+    const dir = path.dirname(p);
+    fs.mkdirSync(dir, { recursive: true });
+    // Atomic write: write to temp file, then rename to prevent corruption on crash
+    const tmpPath = `${p}.tmp`;
+    fs.writeFileSync(tmpPath, JSON.stringify(next, null, 2), 'utf8');
+    fs.renameSync(tmpPath, p);
+  } catch (err) {
+    console.error('[settings] Failed to save settings:', (err as Error).message);
   }
 }
 

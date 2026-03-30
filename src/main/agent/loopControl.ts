@@ -7,7 +7,8 @@ export interface LoopControl {
   pendingContext: string | null;
   waitIfPaused: () => Promise<void>;
   _abort: AbortController;
-  _pauseResolve: (() => void) | null;
+  /** All pending waiters — resolved together when the loop is resumed or cancelled. */
+  _pauseWaiters: Array<() => void>;
 }
 
 const controls = new Map<string, LoopControl>();
@@ -24,11 +25,11 @@ export function createLoopControl(runId: string, parentSignal?: AbortSignal): Lo
     isPaused: false,
     pendingContext: null,
     _abort: abort,
-    _pauseResolve: null,
+    _pauseWaiters: [],
     waitIfPaused(): Promise<void> {
       if (!this.isPaused) return Promise.resolve();
       return new Promise<void>((resolve) => {
-        this._pauseResolve = resolve;
+        this._pauseWaiters.push(resolve);
       });
     },
   };
@@ -50,11 +51,10 @@ export function cancelLoop(runId: string): boolean {
   const ctrl = controls.get(runId);
   if (!ctrl) return false;
   ctrl._abort.abort();
-  if (ctrl._pauseResolve) {
-    ctrl._pauseResolve();
-    ctrl._pauseResolve = null;
-    ctrl.isPaused = false;
-  }
+  // Wake all waiters so they can observe the abort signal
+  for (const resolve of ctrl._pauseWaiters) resolve();
+  ctrl._pauseWaiters.length = 0;
+  ctrl.isPaused = false;
   return true;
 }
 
@@ -71,10 +71,9 @@ export function resumeLoop(runId: string): boolean {
   if (!ctrl) return false;
   ctrl.isPaused = false;
   setLoopPaused(runId, false);
-  if (ctrl._pauseResolve) {
-    ctrl._pauseResolve();
-    ctrl._pauseResolve = null;
-  }
+  // Wake all waiters
+  for (const resolve of ctrl._pauseWaiters) resolve();
+  ctrl._pauseWaiters.length = 0;
   return true;
 }
 

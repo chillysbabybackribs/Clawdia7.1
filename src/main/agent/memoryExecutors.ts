@@ -6,10 +6,14 @@ import { remember, forget, searchMemory } from '../db/memory';
 import type { MemoryEntry } from '../db/memory';
 
 export function executeMemoryStore(input: Record<string, unknown>): string {
-  const category = input.category as string;
-  const key = input.key as string;
-  const value = input.value as string;
+  const category = String(input.category ?? '').trim();
+  const key = String(input.key ?? '').trim();
+  const value = String(input.value ?? '').trim();
   const source = (input.source as 'user' | 'agent') ?? 'agent';
+
+  if (!category) return JSON.stringify({ ok: false, error: 'category is required.' });
+  if (!key) return JSON.stringify({ ok: false, error: 'key is required.' });
+  if (!value) return JSON.stringify({ ok: false, error: 'value is required.' });
 
   const err = remember(category, key, value, source);
   if (err) {
@@ -19,8 +23,9 @@ export function executeMemoryStore(input: Record<string, unknown>): string {
 }
 
 export function executeMemorySearch(input: Record<string, unknown>): string {
-  const query = input.query as string;
-  const limit = typeof input.limit === 'number' ? input.limit : 5;
+  const query = String(input.query ?? '').trim();
+  if (!query) return JSON.stringify({ ok: false, error: 'query is required.' });
+  const limit = Math.min(Math.max(typeof input.limit === 'number' ? input.limit : 5, 1), 100);
 
   const results: MemoryEntry[] = searchMemory(query, limit);
   if (results.length === 0) {

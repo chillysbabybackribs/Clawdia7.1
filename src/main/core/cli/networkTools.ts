@@ -5,15 +5,26 @@
  * raw shell_exec. These return parsed, structured JSON results.
  */
 import type Anthropic from '@anthropic-ai/sdk';
-import { exec, spawn } from 'child_process';
+import { exec, execFile, spawn } from 'child_process';
 import { promisify } from 'util';
 import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
 
 const execAsync = promisify(exec);
+const execFileAsync = promisify(execFile);
 const TIMEOUT = 30_000;
 const ENV = { ...process.env, DISPLAY: process.env.DISPLAY || ':0' };
+
+/** Validate that a string looks like a safe hostname/IP (no shell metacharacters). */
+function isValidHostOrDomain(value: string): boolean {
+  return /^[a-zA-Z0-9._-]+$/.test(value);
+}
+
+/** Validate that a string is a safe DNS record type. */
+function isValidRecordType(value: string): boolean {
+  return /^[A-Z]{1,10}$/.test(value.toUpperCase());
+}
 
 // ─── Executor ─────────────────────────────────────────────────────────────────
 
@@ -78,11 +89,12 @@ export async function executeNetworkTool(
       case 'network_ping': {
         const host = input.host as string;
         if (!host) return JSON.stringify({ ok: false, error: 'host is required.' });
+        if (!isValidHostOrDomain(host)) return JSON.stringify({ ok: false, error: 'Invalid hostname — only alphanumeric, dots, hyphens allowed.' });
         const count = Math.min((input.count as number) ?? 3, 10);
 
         try {
-          const { stdout } = await execAsync(
-            `ping -c ${count} -W 3 ${host} 2>&1`,
+          const { stdout } = await execFileAsync(
+            'ping', ['-c', String(count), '-W', '3', host],
             { timeout: count * 4000 + 5000, env: ENV },
           );
 
@@ -115,11 +127,13 @@ export async function executeNetworkTool(
       case 'network_dns_lookup': {
         const domain = input.domain as string;
         if (!domain) return JSON.stringify({ ok: false, error: 'domain is required.' });
+        if (!isValidHostOrDomain(domain)) return JSON.stringify({ ok: false, error: 'Invalid domain — only alphanumeric, dots, hyphens allowed.' });
         const recordType = (input.type as string) ?? 'A';
+        if (!isValidRecordType(recordType)) return JSON.stringify({ ok: false, error: 'Invalid record type.' });
 
         try {
-          const { stdout } = await execAsync(
-            `dig +short ${recordType} ${domain} 2>/dev/null || nslookup ${domain} 2>/dev/null | grep Address | tail -n+2`,
+          const { stdout } = await execFileAsync(
+            'dig', ['+short', recordType, domain],
             { timeout: 10_000, env: ENV },
           );
           const records = stdout.trim().split('\n').filter(Boolean);
@@ -140,19 +154,31 @@ export async function executeNetworkTool(
         const outputDir = (input.output_dir as string) || path.join(os.homedir(), 'Downloads');
         const filename = (input.filename as string) || '';
 
-        // Ensure output directory exists
-        if (!fs.existsSync(outputDir)) {
-          fs.mkdirSync(outputDir, { recursive: true });
+        // Validate output dir is under $HOME or /tmp to prevent path traversal
+        const resolvedDir = path.resolve(outputDir);
+        const homeDir = os.homedir();
+        if (!resolvedDir.startsWith(homeDir) && !resolvedDir.startsWith('/tmp')) {
+          return JSON.stringify({ ok: false, error: 'output_dir must be under $HOME or /tmp.' });
         }
 
-        const outFlag = filename
-          ? `-o "${path.join(outputDir, filename)}"`
-          : `--output-dir "${outputDir}" -OJ`;
+        // Ensure output directory exists
+        if (!fs.existsSync(resolvedDir)) {
+          fs.mkdirSync(resolvedDir, { recursive: true });
+        }
+
+        // Build curl args as an array to avoid shell injection
+        const dlArgs: string[] = ['-L', '--max-time', '120', '--progress-bar'];
+        if (filename) {
+          dlArgs.push('-o', path.join(resolvedDir, filename));
+        } else {
+          dlArgs.push('--output-dir', resolvedDir, '-OJ');
+        }
+        dlArgs.push(url);
 
         try {
-          const { stdout, stderr } = await execAsync(
-            `curl -L --max-time 120 --progress-bar ${outFlag} "${url}" 2>&1`,
-            { timeout: 130_000, env: ENV, cwd: outputDir },
+          const { stdout, stderr } = await execFileAsync(
+            'curl', dlArgs,
+            { timeout: 130_000, env: ENV, cwd: resolvedDir },
           );
 
           // Try to determine the saved filename
@@ -201,15 +227,23 @@ export async function executeNetworkTool(
         const body = input.body as string | undefined;
         const maxResponseChars = Math.min((input.max_response_chars as number) ?? 5000, 20_000);
 
-        let headerArgs = Object.entries(headers).map(([k, v]) => `-H "${k}: ${v}"`).join(' ');
-        let bodyArg = '';
-        if (body && ['POST', 'PUT', 'PATCH'].includes(method)) {
-          bodyArg = `-d '${body.replace(/'/g, "'\\''")}'`;
+        // Build curl args as an array to avoid shell injection
+        const curlArgs: string[] = [
+          '-s',
+          '-w', '\n---HTTP_STATUS:%{http_code}---\n---CONTENT_TYPE:%{content_type}---',
+          '-X', method,
+        ];
+        for (const [k, v] of Object.entries(headers)) {
+          curlArgs.push('-H', `${k}: ${v}`);
         }
+        if (body && ['POST', 'PUT', 'PATCH'].includes(method)) {
+          curlArgs.push('-d', body);
+        }
+        curlArgs.push(url);
 
         try {
-          const { stdout } = await execAsync(
-            `curl -s -w "\\n---HTTP_STATUS:%{http_code}---\\n---CONTENT_TYPE:%{content_type}---" -X ${method} ${headerArgs} ${bodyArg} "${url}" 2>/dev/null`,
+          const { stdout } = await execFileAsync(
+            'curl', curlArgs,
             { timeout: TIMEOUT, env: ENV },
           );
 

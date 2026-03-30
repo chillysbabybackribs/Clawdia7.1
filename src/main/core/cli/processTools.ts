@@ -5,13 +5,24 @@
  * with PID tracking, background execution, and resource monitoring.
  */
 import type Anthropic from '@anthropic-ai/sdk';
-import { exec, spawn } from 'child_process';
+import { exec, execFile, spawn } from 'child_process';
 import { promisify } from 'util';
 import * as os from 'os';
 
 const execAsync = promisify(exec);
+const execFileAsync = promisify(execFile);
 const TIMEOUT = 15_000;
 const ENV = { ...process.env, DISPLAY: process.env.DISPLAY || ':0' };
+
+/** Validate that a filter string is safe (no shell metacharacters). */
+function isSafeFilter(value: string): boolean {
+  return /^[a-zA-Z0-9._/ -]*$/.test(value);
+}
+
+/** Validate that a PID is a positive integer. */
+function isValidPid(pid: unknown): pid is number {
+  return typeof pid === 'number' && Number.isInteger(pid) && pid > 0;
+}
 
 // Track background processes launched by the agent
 const backgroundProcesses = new Map<number, {
@@ -34,11 +45,17 @@ export async function executeProcessTool(
         const sortBy = (input.sort_by as string) ?? 'cpu';
         const limit = Math.min((input.limit as number) ?? 20, 50);
 
+        if (filter && !isSafeFilter(filter)) {
+          return JSON.stringify({ ok: false, error: 'Invalid filter — only alphanumeric, dots, hyphens, slashes, spaces allowed.' });
+        }
+
+        const sortFlag = sortBy === 'memory' ? '-%mem' : '-%cpu';
         let cmd: string;
         if (filter) {
-          cmd = `ps aux --sort=-%${sortBy === 'memory' ? 'mem' : 'cpu'} | head -1; ps aux --sort=-%${sortBy === 'memory' ? 'mem' : 'cpu'} | grep -i "${filter}" | grep -v grep | head -${limit}`;
+          // Use execFile for the grep to avoid injection via filter
+          cmd = `ps aux --sort=${sortFlag} | head -1; ps aux --sort=${sortFlag} | grep -i -F -- ${JSON.stringify(filter)} | grep -v grep | head -${limit}`;
         } else {
-          cmd = `ps aux --sort=-%${sortBy === 'memory' ? 'mem' : 'cpu'} | head -${limit + 1}`;
+          cmd = `ps aux --sort=${sortFlag} | head -${limit + 1}`;
         }
 
         const { stdout } = await execAsync(cmd, { timeout: TIMEOUT, env: ENV });
@@ -69,7 +86,7 @@ export async function executeProcessTool(
 
       case 'process_info': {
         const pid = input.pid as number;
-        if (!pid) return JSON.stringify({ ok: false, error: 'pid is required.' });
+        if (!isValidPid(pid)) return JSON.stringify({ ok: false, error: 'pid must be a positive integer.' });
 
         const cmds = {
           stat: `cat /proc/${pid}/status 2>/dev/null | head -20`,
@@ -138,6 +155,8 @@ export async function executeProcessTool(
           startedAt: Date.now(),
           label,
         });
+        // Auto-clean entry when process exits to prevent unbounded Map growth
+        child.on('exit', () => backgroundProcesses.delete(pid));
 
         return JSON.stringify({
           ok: true,
@@ -151,7 +170,7 @@ export async function executeProcessTool(
       case 'process_signal': {
         const pid = input.pid as number;
         const signal = (input.signal as string) ?? 'SIGTERM';
-        if (!pid) return JSON.stringify({ ok: false, error: 'pid is required.' });
+        if (!isValidPid(pid)) return JSON.stringify({ ok: false, error: 'pid must be a positive integer.' });
 
         const validSignals = ['SIGTERM', 'SIGINT', 'SIGKILL', 'SIGHUP', 'SIGUSR1', 'SIGUSR2', 'SIGSTOP', 'SIGCONT'];
         if (!validSignals.includes(signal)) {
@@ -159,7 +178,7 @@ export async function executeProcessTool(
         }
 
         try {
-          await execAsync(`kill -${signal} ${pid} 2>&1`, { timeout: 5000, env: ENV });
+          await execFileAsync('kill', [`-${signal}`, String(pid)], { timeout: 5000, env: ENV });
           backgroundProcesses.delete(pid);
           return JSON.stringify({ ok: true, pid, signal, note: `Signal ${signal} sent to PID ${pid}.` });
         } catch (err: any) {
@@ -169,7 +188,9 @@ export async function executeProcessTool(
 
       case 'process_port_lookup': {
         const port = input.port as number;
-        if (!port) return JSON.stringify({ ok: false, error: 'port is required.' });
+        if (!port || !Number.isInteger(port) || port < 1 || port > 65535) {
+          return JSON.stringify({ ok: false, error: 'port must be an integer between 1 and 65535.' });
+        }
 
         try {
           const { stdout } = await execAsync(

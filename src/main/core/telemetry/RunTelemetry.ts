@@ -211,8 +211,9 @@ export class RunTelemetry {
     // Rediscovery detection
     this.detectInefficiency(turn, toolName, callKey, approvalRequired, success);
 
-    // Track call history
+    // Track call history (cap at 500 to prevent unbounded growth)
     this.callHistory.push(callKey);
+    if (this.callHistory.length > 500) this.callHistory.splice(0, this.callHistory.length - 500);
     const recent = this.recentCallKeys.get(toolName) ?? [];
     recent.push(callKey);
     if (recent.length > 5) recent.shift();

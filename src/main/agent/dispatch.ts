@@ -83,6 +83,8 @@ export async function dispatch(
     if (p.discoveredTools) discoveredTools.push(...p.discoveredTools);
   }
 
+  // Track tool calls, keeping only the most recent 200 to prevent unbounded growth
+  const MAX_TRACKED_TOOL_CALLS = 200;
   for (let i = 0; i < toolBlocks.length; i++) {
     const record: ToolCallRecord = {
       id: toolBlocks[i].id,
@@ -91,6 +93,9 @@ export async function dispatch(
       result: results[i],
     };
     ctx.allToolCalls.push(record);
+  }
+  if (ctx.allToolCalls.length > MAX_TRACKED_TOOL_CALLS) {
+    ctx.allToolCalls.splice(0, ctx.allToolCalls.length - MAX_TRACKED_TOOL_CALLS);
   }
   ctx.toolCallCount += toolBlocks.length;
 

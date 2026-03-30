@@ -170,6 +170,8 @@ export function initDb(): boolean {
         payload_json  TEXT NOT NULL DEFAULT '{}'
       );
       CREATE INDEX IF NOT EXISTS idx_run_events_run_seq ON run_events(run_id, seq ASC);
+      CREATE INDEX IF NOT EXISTS idx_runs_status ON runs(status);
+      CREATE INDEX IF NOT EXISTS idx_run_events_kind ON run_events(kind);
 
       CREATE TABLE IF NOT EXISTS user_memory (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -232,25 +234,23 @@ export function initDb(): boolean {
       );
     `);
 
-    // Evolution: Add token tracking to runs if missing
-    try {
-      db.prepare(`ALTER TABLE runs ADD COLUMN total_tokens INTEGER`).run();
-    } catch { }
-    try {
-      db.prepare(`ALTER TABLE runs ADD COLUMN estimated_cost_usd REAL`).run();
-    } catch { }
-    try {
-      db.prepare(`ALTER TABLE runs ADD COLUMN parent_run_id TEXT REFERENCES runs(id) ON DELETE CASCADE`).run();
-    } catch { }
-    try {
-      db.prepare(`ALTER TABLE runs ADD COLUMN system_prompt TEXT`).run();
-    } catch { }
-    try {
-      db.prepare(`ALTER TABLE conversations ADD COLUMN claude_code_session_id TEXT`).run();
-    } catch { }
-    try {
-      db.prepare(`ALTER TABLE conversations ADD COLUMN codex_chat_thread_id TEXT`).run();
-    } catch { }
+    // Evolution: Add columns if missing (already-exists errors are expected and ignored)
+    const evolve = (sql: string) => {
+      try { db!.prepare(sql).run(); }
+      catch (e) {
+        const msg = (e as Error).message;
+        // Only silence "duplicate column" errors; log anything unexpected
+        if (!msg.includes('duplicate column')) {
+          console.warn('[db] Schema evolution warning:', msg);
+        }
+      }
+    };
+    evolve(`ALTER TABLE runs ADD COLUMN total_tokens INTEGER`);
+    evolve(`ALTER TABLE runs ADD COLUMN estimated_cost_usd REAL`);
+    evolve(`ALTER TABLE runs ADD COLUMN parent_run_id TEXT REFERENCES runs(id) ON DELETE CASCADE`);
+    evolve(`ALTER TABLE runs ADD COLUMN system_prompt TEXT`);
+    evolve(`ALTER TABLE conversations ADD COLUMN claude_code_session_id TEXT`);
+    evolve(`ALTER TABLE conversations ADD COLUMN codex_chat_thread_id TEXT`);
 
     // Mark orphaned runs as failed (app was killed mid-run)
     db.prepare(`UPDATE runs SET status = 'failed' WHERE status = 'running'`).run();

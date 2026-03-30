@@ -1,12 +1,19 @@
 import { createRun, updateRun, appendRunEvent } from './db';
 import { reserveEstimate, confirmTransaction, cancelReservation } from './agent/spending-budget';
+import { randomUUID } from 'crypto';
 
 function uuid(): string {
-  return `${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
+  return randomUUID();
 }
 
 const runTransactions = new Map<string, number>();
 const runSequences = new Map<string, number>();
+
+/** Remove tracking state for a completed/failed run to prevent unbounded Map growth. */
+function cleanupRunState(runId: string): void {
+  runTransactions.delete(runId);
+  runSequences.delete(runId);
+}
 
 function getNextSeq(runId: string): number {
   const seq = (runSequences.get(runId) || 0) + 1;
@@ -98,8 +105,8 @@ export function completeRun(runId: string, totalTokens: number, estimatedCostUsd
   if (txId !== undefined) {
     const cents = Math.round(estimatedCostUsd * 100);
     confirmTransaction(txId, Math.max(1, cents));
-    runTransactions.delete(runId);
   }
+  cleanupRunState(runId);
 }
 
 /**
@@ -119,6 +126,6 @@ export function failRun(runId: string, error: string): void {
   const txId = runTransactions.get(runId);
   if (txId !== undefined) {
     cancelReservation(txId);
-    runTransactions.delete(runId);
   }
+  cleanupRunState(runId);
 }

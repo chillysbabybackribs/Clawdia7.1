@@ -146,6 +146,23 @@ function resolveActiveProfile(profileId: string): PolicyProfile | null {
 /** Exported for the settings panel — lists all available profiles. */
 export { listPolicyProfiles };
 
+// ─── Compiled regex cache (avoids re-compiling on every policy evaluation) ───
+
+const regexCache = new Map<string, RegExp | null>();
+
+function getCachedRegex(pattern: string): RegExp | null {
+    if (regexCache.has(pattern)) return regexCache.get(pattern)!;
+    try {
+        const re = new RegExp(pattern, 'i');
+        regexCache.set(pattern, re);
+        return re;
+    } catch {
+        console.warn(`[policy] Invalid regex pattern: ${pattern}`);
+        regexCache.set(pattern, null);
+        return null;
+    }
+}
+
 // ─── Rule matching ────────────────────────────────────────────────────────────
 
 function matchesRule(
@@ -165,11 +182,8 @@ function matchesRule(
         const command = extractCommand(input);
         if (!command) return false;
         const matched = match.commandPatterns.some((pattern) => {
-            try {
-                return new RegExp(pattern, 'i').test(command);
-            } catch {
-                return false;
-            }
+            const re = getCachedRegex(pattern);
+            return re ? re.test(command) : false;
         });
         if (!matched) return false;
     }

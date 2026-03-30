@@ -125,6 +125,15 @@ export class ChatExecutor {
     for (const cb of callbacks) {
       cb(event);
     }
+
+    // Clean up buffers and subscribers once the run is terminal to prevent memory leaks
+    if (event.type === 'run_completed' || event.type === 'run_failed') {
+      // Allow a short grace period for late subscribers, then clean up
+      setTimeout(() => {
+        this.eventBuffers.delete(runId);
+        this.subscribers.delete(runId);
+      }, 30_000);
+    }
   }
 
   private async _runLoop(request: StartRunRequest): Promise<void> {
