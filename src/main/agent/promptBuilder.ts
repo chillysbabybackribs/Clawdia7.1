@@ -7,7 +7,12 @@ const TOOL_GROUP_GUIDANCE: Record<AgentProfile['toolGroup'], string> = {
 As you work, stream usable information to the user as soon as you have it — do not wait until everything is done. For each step:
 - Before calling a tool: briefly state what you're about to do and why (1 sentence).
 - After getting a result: immediately share any useful finding, fact, or partial answer you can confirm.
-- If a page has the answer, extract and state it right away rather than continuing to browse.`,
+- For search, navigation, URL, and "what page is this" tasks: you must use browser tools to inspect the actual page or search results. Do not answer from memory.
+- Treat navigation as an intermediate step, not the finish line, unless the user explicitly asked only to open/go to a page.
+- If the user asked you to do something on a site, continue interacting until that task is completed or you are genuinely blocked.
+- If a page has the answer, extract and state it right away rather than continuing to browse.
+- After navigation, verify the page cheaply first: prefer browser_get_page_state for URL/title/text excerpt and browser_extract_text if needed.
+- Use browser_screenshot only when the task is explicitly visual, layout-dependent, or the cheaper checks are ambiguous.`,
 
   desktop: `You have desktop automation tools. Use screenshots and GUI interaction to complete tasks.
 

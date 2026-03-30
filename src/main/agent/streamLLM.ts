@@ -51,6 +51,17 @@ const FIRST_TURN_BROWSER_TOOLS = BROWSER_TOOLS.filter((tool) => FIRST_TURN_BROWS
 const _openAIToolCache = new Map<string, ReturnType<typeof toOpenAITool>[]>();
 const _geminiToolCache = new Map<string, any[]>();
 
+function applyAnthropicToolCompatibility(model: string, tools: Anthropic.Tool[]): Anthropic.Tool[] {
+  // Claude Haiku 4.5 does not support programmatic tool calling for server web tools.
+  // Restrict those specific tools to direct invocation while leaving other models unchanged.
+  if (!model.startsWith('claude-haiku-4-5')) return tools;
+
+  return tools.map((tool) => {
+    if (!WEB_TOOL_NAMES.has(tool.name)) return tool;
+    return { ...(tool as any), allowed_callers: ['direct'] } as Anthropic.Tool;
+  });
+}
+
 function getAnthropicTools(
   profile: AgentProfile,
   accumulated: Anthropic.Tool[] = [],
@@ -313,7 +324,12 @@ export async function streamLLM(
   switch (options.provider) {
     case 'anthropic':
       {
-        const anthropicTools = toolMode === 'none' ? [] : getAnthropicTools(profile, accumulatedTools, options.currentIteration ?? 0);
+        const anthropicTools = toolMode === 'none'
+          ? []
+          : applyAnthropicToolCompatibility(
+              options.model,
+              getAnthropicTools(profile, accumulatedTools, options.currentIteration ?? 0),
+            );
         emitPromptDebug(messagesWithDynamic, systemPrompt, anthropicTools.map((tool) => tool.name), options);
         return streamAnthropicLLM(messagesWithDynamic, systemPrompt, anthropicTools, options);
       }
@@ -338,5 +354,6 @@ export async function streamLLM(
 // ── Test exports (tree-shaken in production builds) ──────────────────────────
 export const injectDynamicPromptForTest = injectDynamicPrompt;
 export const getAnthropicToolsForTest = getAnthropicTools;
+export const applyAnthropicToolCompatibilityForTest = applyAnthropicToolCompatibility;
 export const getOpenAIToolsForTest = getOpenAITools;
 export const getGeminiToolsForTest = getGeminiTools;

@@ -53,6 +53,8 @@ function getDescription(tool: ToolCall): string {
       return d.split('/').pop() || d;
     case 'browser_navigate':
       return d.replace(/^https?:\/\//, '').slice(0, 60);
+    case 'browser_screenshot':
+      return '';
     default:
       return d.slice(0, 80);
   }
@@ -94,6 +96,32 @@ function formatUrlPreview(url: string): string {
   return url.replace(/^https?:\/\//, '').replace(/^www\./, '');
 }
 
+function looksLikeBase64(value: string): boolean {
+  return value.length > 120 && /^[A-Za-z0-9+/=]+$/.test(value);
+}
+
+function sanitizeForDisplay(value: unknown): unknown {
+  if (typeof value === 'string') {
+    return looksLikeBase64(value) ? '[base64 data hidden]' : value;
+  }
+  if (Array.isArray(value)) {
+    return value.map(sanitizeForDisplay);
+  }
+  if (value && typeof value === 'object') {
+    const record = value as Record<string, unknown>;
+    const next: Record<string, unknown> = {};
+    for (const [key, item] of Object.entries(record)) {
+      if ((key === 'data' || key === 'base64') && typeof item === 'string' && looksLikeBase64(item)) {
+        next[key] = '[base64 data hidden]';
+        continue;
+      }
+      next[key] = sanitizeForDisplay(item);
+    }
+    return next;
+  }
+  return value;
+}
+
 function summarizeToolPayload(label: 'IN' | 'OUT', tool: ToolCall, value: string): string {
   const parsed = tryParseJson(value);
   const obj = parsed && typeof parsed === 'object' && !Array.isArray(parsed)
@@ -111,6 +139,10 @@ function summarizeToolPayload(label: 'IN' | 'OUT', tool: ToolCall, value: string
     }
 
     if (label === 'OUT') {
+      if (tool.name === 'browser_screenshot') {
+        const mimeType = typeof obj.mimeType === 'string' ? obj.mimeType.replace('image/', '').toUpperCase() : 'Image';
+        return obj.data ? `${mimeType} screenshot captured` : `${mimeType} screenshot`;
+      }
       if (tool.name === 'search_tools' && Array.isArray(obj.tools_loaded)) {
         return `Loaded ${obj.tools_loaded.length} tools`;
       }
@@ -137,7 +169,7 @@ function summarizeToolPayload(label: 'IN' | 'OUT', tool: ToolCall, value: string
 function formatExpandedValue(value: string): string {
   const parsed = tryParseJson(value);
   if (parsed == null) return value || '(empty)';
-  return JSON.stringify(parsed, null, 2);
+  return JSON.stringify(sanitizeForDisplay(parsed), null, 2);
 }
 
 function ExpandableRow({
@@ -185,10 +217,9 @@ function ExpandableRow({
 }
 
 function ToolBlock({ tool }: { tool: ToolCall }) {
-  const [collapsed, setCollapsed] = useState(false);
+  const [collapsed, setCollapsed] = useState(true);
 
   const displayName = getDisplayName(tool.name);
-  const description = getDescription(tool);
   const hasCard = !!(tool.input || tool.output);
   const isRunning = tool.status === 'running';
 
@@ -212,8 +243,10 @@ function ToolBlock({ tool }: { tool: ToolCall }) {
       >
         <span className={`w-2 h-2 rounded-full flex-shrink-0 ${statusColor} ${isRunning ? 'animate-pulse' : ''}`} />
         <span className="text-[13px] font-semibold text-text-primary">{displayName}</span>
-        {description && (
-          <span className="text-[13px] text-text-secondary truncate">{description}</span>
+        {hasCard && (
+          <span className="flex-shrink-0 text-[10px] text-text-muted">
+            {collapsed ? '▸' : '▾'}
+          </span>
         )}
         {tool.durationMs != null && tool.durationMs > 0 && (
           <span className="text-[11px] text-text-muted ml-auto flex-shrink-0">

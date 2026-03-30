@@ -20,6 +20,10 @@ interface InputBarProps {
   onToggleCodexMode?: () => void;
   codexModeDisabled?: boolean;
   disabled?: boolean;
+  chatZoom?: number;
+  onChatZoomIn?: () => void;
+  onChatZoomOut?: () => void;
+  onChatZoomReset?: () => void;
 }
 
 export default function InputBar({
@@ -40,6 +44,10 @@ export default function InputBar({
   onToggleCodexMode,
   codexModeDisabled = false,
   disabled = false,
+  chatZoom,
+  onChatZoomIn,
+  onChatZoomOut,
+  onChatZoomReset,
 }: InputBarProps) {
   const [text, setText] = useState('');
   const [attachments, setAttachments] = useState<MessageAttachment[]>([]);
@@ -47,7 +55,9 @@ export default function InputBar({
   const [models, setModels] = useState(() => getModelsForProvider(DEFAULT_PROVIDER));
   const [modelIdx, setModelIdx] = useState(0);
   const [modelOpen, setModelOpen] = useState(false);
+  const [activeProviderMenu, setActiveProviderMenu] = useState<ProviderId | null>(null);
   const [focused, setFocused] = useState(false);
+  const modelSelectorRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const hasHydratedSelectionRef = useRef(false);
@@ -86,21 +96,25 @@ export default function InputBar({
   }, []);
 
   useEffect(() => {
+    if (disabled || isStreaming) return;
+    textareaRef.current?.focus();
+  }, [disabled, isStreaming]);
+
+  useEffect(() => {
     const api = (window as any).clawdia;
     if (!api) return;
-    Promise.all([
-      api.settings.getProvider(),
-      api.settings.getModel(),
-    ]).then(([selectedProvider, model]: [ProviderId, string]) => {
+    api.settings.getProvider().then((selectedProvider: ProviderId) => {
       const nextProvider = selectedProvider || DEFAULT_PROVIDER;
-      const nextModels = getModelsForProvider(nextProvider);
-      const persistedModel = model || nextModels[0]?.id || '';
-      setProvider(nextProvider);
-      setModels(nextModels);
-      const idx = nextModels.findIndex((item) => item.id === persistedModel);
-      setModelIdx(idx >= 0 ? idx : 0);
-      hasHydratedSelectionRef.current = true;
-      if (persistedModel) onModelContextChange?.(nextProvider, persistedModel);
+      return api.settings.getModel(nextProvider).then((model: string) => {
+        const nextModels = getModelsForProvider(nextProvider);
+        const persistedModel = model || nextModels[0]?.id || '';
+        setProvider(nextProvider);
+        setModels(nextModels);
+        const idx = nextModels.findIndex((item) => item.id === persistedModel);
+        setModelIdx(idx >= 0 ? idx : 0);
+        hasHydratedSelectionRef.current = true;
+        if (persistedModel) onModelContextChange?.(nextProvider, persistedModel);
+      });
     });
   }, [onModelContextChange]);
 
@@ -148,6 +162,20 @@ export default function InputBar({
     window.addEventListener('clawdia:prefill-input', handler);
     return () => window.removeEventListener('clawdia:prefill-input', handler);
   }, []);
+
+  useEffect(() => {
+    if (!modelOpen) return;
+
+    const handlePointerDown = (event: MouseEvent) => {
+      const target = event.target as Node | null;
+      if (target && modelSelectorRef.current?.contains(target)) return;
+      setModelOpen(false);
+      setActiveProviderMenu(null);
+    };
+
+    document.addEventListener('mousedown', handlePointerDown);
+    return () => document.removeEventListener('mousedown', handlePointerDown);
+  }, [modelOpen]);
 
   const handleSend = useCallback(() => {
     if (disabled) return;
@@ -212,10 +240,56 @@ export default function InputBar({
 
   const currentModel = models[modelIdx];
   const canSend = text.trim().length > 0 || attachments.length > 0;
+  const currentSelectorLabel = claudeMode
+    ? 'Claude Code'
+    : codexMode
+      ? 'Codex'
+      : (currentModel?.label || 'Select model');
+  const reversedProviders = [...PROVIDERS].reverse();
+
+  const ensureChatMode = useCallback(async () => {
+    if (claudeMode) {
+      await onToggleClaudeMode?.();
+      return;
+    }
+    if (codexMode) {
+      await onToggleCodexMode?.();
+    }
+  }, [claudeMode, codexMode, onToggleClaudeMode, onToggleCodexMode]);
+
+  const handleModelSelect = useCallback(async (nextProvider: ProviderId, modelId: string) => {
+    await ensureChatMode();
+    const nextModels = getModelsForProvider(nextProvider);
+    const idx = nextModels.findIndex((m) => m.id === modelId);
+    const resolvedIdx = idx >= 0 ? idx : 0;
+    pendingModelIdxRef.current = resolvedIdx;
+    setProvider(nextProvider);
+    setModelIdx(resolvedIdx);
+    setActiveProviderMenu(null);
+    setModelOpen(false);
+  }, [ensureChatMode]);
+
+  const handleClaudeCodeSelect = useCallback(async () => {
+    if (codexMode) await onToggleCodexMode?.();
+    if (!claudeMode) await onToggleClaudeMode?.();
+    setActiveProviderMenu(null);
+    setModelOpen(false);
+  }, [claudeMode, codexMode, onToggleClaudeMode, onToggleCodexMode]);
+
+  const toggleProviderSection = useCallback((providerId: ProviderId) => {
+    setActiveProviderMenu((current) => current === providerId ? null : providerId);
+  }, []);
+
+  const handleCodexSelect = useCallback(async () => {
+    if (claudeMode) await onToggleClaudeMode?.();
+    if (!codexMode) await onToggleCodexMode?.();
+    setActiveProviderMenu(null);
+    setModelOpen(false);
+  }, [claudeMode, codexMode, onToggleClaudeMode, onToggleCodexMode]);
 
   return (
     <div
-      className={`px-5 pb-5 pt-4${disabled ? ' opacity-50 pointer-events-none' : ''}`}
+      className={`w-full px-5 pb-5 pt-4${disabled ? ' opacity-50 pointer-events-none' : ''}`}
       style={{
         background: '#0d0d12',
         borderTop: '2px solid rgba(255,255,255,0.07)',
@@ -223,106 +297,137 @@ export default function InputBar({
       }}
     >
       {!isStreaming && (
-        <div className="no-drag flex items-center gap-2 pb-2 px-1 relative">
+        <div className="no-drag flex items-center pb-2 px-1 relative">
+          <div ref={modelSelectorRef} className="flex-1 flex items-center relative">
           <button
-            onClick={() => setModelOpen((v) => !v)}
+            onClick={() => {
+              setModelOpen((v) => {
+                const next = !v;
+                if (!next) setActiveProviderMenu(null);
+                return next;
+              });
+            }}
             className="flex items-center gap-1 text-[14px] text-text-tertiary hover:text-text-secondary transition-colors cursor-pointer"
           >
-            {currentModel?.label || 'Select model'}
+            <span
+              className={
+                claudeMode
+                  ? 'font-medium text-[#f08b73]'
+                  : codexMode
+                    ? 'font-semibold text-white'
+                    : ''
+              }
+            >
+              {currentSelectorLabel}
+            </span>
             <svg width="8" height="8" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" className="opacity-40">
               <polyline points="6 9 12 15 18 9" />
             </svg>
           </button>
 
           {modelOpen && (
-            <div className="absolute bottom-full left-0 mb-2 py-1.5 bg-surface-2 border border-white/[0.08] rounded-xl shadow-xl shadow-black/50 min-w-[210px] animate-fade-in z-50">
-              {PROVIDERS.map((prov) => {
-                const provModels = MODEL_REGISTRY.filter((m) => m.provider === prov.id);
-                return (
-                  <div key={prov.id}>
-                    <div className="px-3.5 pt-2 pb-1 text-[10px] font-semibold uppercase tracking-wider text-text-muted">
-                      {prov.label}
+            <div className="absolute bottom-full left-0 mb-2 min-w-[210px] overflow-visible animate-fade-in z-50">
+              <div className="py-1.5 bg-surface-2 border border-white/[0.08] rounded-xl shadow-xl shadow-black/50 max-h-[320px] overflow-y-auto">
+                {reversedProviders.map((prov) => {
+                  const isExpanded = activeProviderMenu === prov.id;
+                  return (
+                    <div key={prov.id} className="relative">
+                      <button
+                        onClick={() => toggleProviderSection(prov.id)}
+                        className="w-full flex items-center gap-2 px-3.5 pt-2 pb-2 text-left text-[10px] font-semibold uppercase tracking-wider text-text-muted hover:bg-white/[0.04] cursor-pointer"
+                      >
+                        <span className="flex-1">{prov.label}</span>
+                        <span className="text-[10px] text-text-muted">
+                          {isExpanded ? '▾' : '▸'}
+                        </span>
+                      </button>
                     </div>
-                    {provModels.map((model) => {
-                      const isSelected = model.provider === provider && model.id === models[modelIdx]?.id;
-                      return (
-                        <button
-                          key={model.id}
-                          onClick={() => {
-                            const nextModels = getModelsForProvider(model.provider);
-                            const idx = nextModels.findIndex((m) => m.id === model.id);
-                            const resolvedIdx = idx >= 0 ? idx : 0;
-                            // Set before provider so the provider-change effect
-                            // sees it and skips the stale settings.getModel lookup.
-                            pendingModelIdxRef.current = resolvedIdx;
-                            setProvider(model.provider);
-                            setModelIdx(resolvedIdx);
-                            setModelOpen(false);
-                          }}
-                          className={`w-full flex items-center gap-2.5 px-3.5 py-2 text-left text-[13px] transition-all cursor-pointer ${
-                            isSelected ? 'text-text-primary bg-white/[0.08]' : 'text-text-secondary hover:text-text-primary hover:bg-white/[0.05]'
-                          }`}
-                        >
-                          <span className="flex-1">{model.label}</span>
-                          <span className="text-[10px] text-text-muted uppercase tracking-wide">{model.tier}</span>
-                          {isSelected && (
-                            <svg className="text-text-secondary flex-shrink-0" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><polyline points="20 6 9 17 4 12" /></svg>
-                          )}
-                        </button>
-                      );
-                    })}
+                  );
+                })}
+                <div className="mx-2 my-1 h-px bg-white/[0.06]" />
+                <div>
+                  <div className="px-3.5 pt-2 pb-1 text-[10px] font-semibold uppercase tracking-wider text-text-muted">
+                    Modes
                   </div>
-                );
-              })}
+                  <button
+                    onClick={() => { void handleClaudeCodeSelect(); }}
+                    disabled={claudeModeDisabled}
+                    className={`w-full flex items-center gap-2.5 px-3.5 py-2 text-left text-[13px] transition-all ${
+                      claudeModeDisabled
+                        ? 'text-text-muted/35 cursor-default'
+                        : claudeMode
+                          ? 'bg-white/[0.08] cursor-pointer'
+                          : 'hover:bg-white/[0.05] cursor-pointer'
+                    }`}
+                  >
+                    <span className="flex-1 font-medium text-[#f08b73]">Claude Code</span>
+                    {claudeMode && (
+                      <svg className="text-text-secondary flex-shrink-0" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><polyline points="20 6 9 17 4 12" /></svg>
+                    )}
+                  </button>
+                  <button
+                    onClick={() => { void handleCodexSelect(); }}
+                    disabled={codexModeDisabled}
+                    className={`w-full flex items-center gap-2.5 px-3.5 py-2 text-left text-[13px] transition-all ${
+                      codexModeDisabled
+                        ? 'text-text-muted/35 cursor-default'
+                        : codexMode
+                          ? 'bg-white/[0.08] cursor-pointer'
+                          : 'hover:bg-white/[0.05] cursor-pointer'
+                    }`}
+                  >
+                    <span className="flex-1 font-semibold text-white">Codex</span>
+                    {codexMode && (
+                      <svg className="text-text-secondary flex-shrink-0" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><polyline points="20 6 9 17 4 12" /></svg>
+                    )}
+                  </button>
+                </div>
+              </div>
+              {activeProviderMenu && (
+                <div className="absolute left-full top-0 ml-2 py-1.5 bg-surface-2 border border-white/[0.08] rounded-xl shadow-xl shadow-black/50 min-w-[240px] max-h-[320px] overflow-y-auto animate-fade-in z-[60]">
+                  <div className="px-3.5 pt-2 pb-1 text-[10px] font-semibold uppercase tracking-wider text-text-muted">
+                    {reversedProviders.find((prov) => prov.id === activeProviderMenu)?.label}
+                  </div>
+                  {MODEL_REGISTRY.filter((model) => model.provider === activeProviderMenu).map((model) => {
+                    const isSelected = model.provider === provider && model.id === models[modelIdx]?.id;
+                    return (
+                      <button
+                        key={model.id}
+                        onClick={() => { void handleModelSelect(model.provider, model.id); }}
+                        className={`w-full flex items-center gap-2.5 px-3.5 py-2 text-left text-[13px] transition-all cursor-pointer ${
+                          isSelected ? 'text-text-primary bg-white/[0.08]' : 'text-text-secondary hover:text-text-primary hover:bg-white/[0.05]'
+                        }`}
+                      >
+                        <span className="flex-1">{model.label}</span>
+                        <span className="text-[10px] text-text-muted uppercase tracking-wide">{model.tier}</span>
+                        {isSelected && (
+                          <svg className="text-text-secondary flex-shrink-0" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><polyline points="20 6 9 17 4 12" /></svg>
+                        )}
+                      </button>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+          )}
+          </div>
+
+          {chatZoom !== undefined && (
+            <div className="absolute left-1/2 -translate-x-1/2 flex items-center gap-0.5">
+              <button onClick={onChatZoomOut} title="Zoom out" className="flex items-center justify-center w-6 h-6 rounded-md text-[12px] text-text-muted hover:text-text-secondary hover:bg-white/[0.05] transition-colors cursor-pointer">-</button>
+              <button onClick={onChatZoomReset} title="Reset zoom" className="rounded-md px-1.5 py-0.5 text-[10px] text-text-muted hover:text-text-secondary hover:bg-white/[0.05] transition-colors cursor-pointer">{chatZoom}%</button>
+              <button onClick={onChatZoomIn} title="Zoom in" className="flex items-center justify-center w-6 h-6 rounded-md text-[12px] text-text-muted hover:text-text-secondary hover:bg-white/[0.05] transition-colors cursor-pointer">+</button>
             </div>
           )}
 
-          <div style={{ width: '1px', height: '10px', background: 'rgba(255,255,255,0.08)', flexShrink: 0 }} />
-
-          <button
-            onClick={onToggleClaudeMode}
-            disabled={claudeModeDisabled}
-            className={`flex items-center justify-center w-7 h-7 rounded-md transition-colors ${
-              claudeMode
-                ? 'text-amber-400 bg-amber-400/10 cursor-pointer'
-                : claudeModeDisabled
-                  ? 'text-text-muted/35 cursor-default'
-                  : 'text-text-muted hover:text-text-secondary hover:bg-white/[0.05] cursor-pointer'
-            }`}
-            title={claudeModeDisabled ? 'Create or open a conversation first' : claudeMode ? `Claude Code (${claudeStatus})` : 'Toggle Claude Code'}
-          >
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-              <polyline points="4 17 10 11 4 5" />
-              <line x1="12" y1="19" x2="20" y2="19" />
-            </svg>
-          </button>
-
-          <div style={{ width: '1px', height: '10px', background: 'rgba(255,255,255,0.08)', flexShrink: 0 }} />
-
-          <button
-            onClick={onToggleCodexMode}
-            disabled={codexModeDisabled}
-            className={`flex items-center justify-center w-7 h-7 rounded-md transition-colors ${
-              codexMode
-                ? 'text-emerald-400 bg-emerald-400/10 cursor-pointer'
-                : codexModeDisabled
-                  ? 'text-text-muted/35 cursor-default'
-                  : 'text-text-muted hover:text-text-secondary hover:bg-white/[0.05] cursor-pointer'
-            }`}
-            title={codexModeDisabled ? 'Create or open a conversation first' : codexMode ? `Codex (${codexStatus})` : 'Toggle Codex'}
-          >
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-              <rect x="2" y="3" width="20" height="14" rx="2" ry="2" />
-              <line x1="8" y1="21" x2="16" y2="21" />
-              <line x1="12" y1="17" x2="12" y2="21" />
-            </svg>
-          </button>
+          <div className="flex-1 flex items-center justify-end gap-2">
+          </div>
         </div>
       )}
 
       <div
         className={`
-          relative flex flex-col rounded-xl transition-all duration-200
+          relative flex w-full flex-col rounded-xl transition-all duration-200
           bg-[#18181c] border
           border-[1.5px] transition-colors duration-200
           ${focused

@@ -67,7 +67,6 @@ function createWindow(): BrowserWindow {
 function loadWindowContent(win: BrowserWindow): void {
   if (isDev) {
     win.loadURL('http://127.0.0.1:5174');
-    win.webContents.openDevTools({ mode: 'detach' });
   } else {
     win.loadFile(path.join(__dirname, '../../dist/renderer/index.html'));
   }

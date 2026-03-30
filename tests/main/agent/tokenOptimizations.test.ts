@@ -74,6 +74,7 @@ import { streamAnthropicLLM } from '../../../src/main/anthropicChat';
 import {
   injectDynamicPromptForTest,
   getAnthropicToolsForTest,
+  applyAnthropicToolCompatibilityForTest,
   getOpenAIToolsForTest,
   getGeminiToolsForTest,
 } from '../../../src/main/agent/streamLLM';
@@ -256,6 +257,28 @@ describe('Fix 5: tool schemas cached per profile group', () => {
     expect(names).toContain('browser_type');
     expect(names).not.toContain('agent_status');
     expect(names).not.toContain('gui_interact');
+  });
+
+  it('marks server web tools as direct-only for Claude Haiku 4.5', () => {
+    const profile = { toolGroup: 'browser', specialMode: undefined } as any;
+    const tools = getAnthropicToolsForTest(profile, [], 1);
+    const compatible = applyAnthropicToolCompatibilityForTest('claude-haiku-4-5-20251001', tools);
+    const webSearch = compatible.find((tool: any) => tool.name === 'web_search');
+    const webFetch = compatible.find((tool: any) => tool.name === 'web_fetch');
+
+    expect(webSearch?.allowed_callers).toEqual(['direct']);
+    expect(webFetch?.allowed_callers).toEqual(['direct']);
+  });
+
+  it('leaves server web tools unchanged for other Claude models', () => {
+    const profile = { toolGroup: 'browser', specialMode: undefined } as any;
+    const tools = getAnthropicToolsForTest(profile, [], 1);
+    const compatible = applyAnthropicToolCompatibilityForTest('claude-sonnet-4-6', tools);
+    const webSearch = compatible.find((tool: any) => tool.name === 'web_search');
+    const webFetch = compatible.find((tool: any) => tool.name === 'web_fetch');
+
+    expect(webSearch?.allowed_callers).toBeUndefined();
+    expect(webFetch?.allowed_callers).toBeUndefined();
   });
 
   it('getAnthropicTools desktop profile includes gui tools immediately', () => {

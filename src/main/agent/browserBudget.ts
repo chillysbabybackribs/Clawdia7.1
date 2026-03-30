@@ -103,3 +103,41 @@ export function checkToolPolicy(toolBlocks: ToolUseBlock[]): string | null {
   }
   return null;
 }
+
+function taskNeedsVisualConfirmation(task: string): boolean {
+  return /\b(screenshot|image|photo|visual|layout|design|ui|appearance|look like|looks like|see|shown|show me|color|render|pixel)\b/i.test(task);
+}
+
+function hasVerifiedNavigationResult(result: string): boolean {
+  try {
+    const parsed = JSON.parse(result);
+    return typeof parsed.url === 'string'
+      && typeof parsed.title === 'string'
+      && typeof parsed.textSample === 'string'
+      && parsed.textSample.trim().length > 0;
+  } catch {
+    return false;
+  }
+}
+
+export function checkBrowserScreenshotPolicy(
+  toolBlocks: ToolUseBlock[],
+  taskText: string,
+  allToolCalls: Array<{ name: string; result: string }>,
+): string | null {
+  const includesScreenshot = toolBlocks.some((block) => block.name === 'browser_screenshot');
+  if (!includesScreenshot) return null;
+  if (taskNeedsVisualConfirmation(taskText)) return null;
+
+  const includesNavigate = toolBlocks.some((block) => block.name === 'browser_navigate');
+  if (includesNavigate) {
+    return 'Browser policy: do not call browser_screenshot in the same turn as browser_navigate for routine page confirmation. browser_navigate already returns URL, title, loading state, and a text excerpt.';
+  }
+
+  const lastCall = allToolCalls[allToolCalls.length - 1];
+  if (lastCall?.name === 'browser_navigate' && hasVerifiedNavigationResult(lastCall.result)) {
+    return 'Browser policy: avoid browser_screenshot immediately after a verified browser_navigate unless the task explicitly requires visual confirmation. Use the navigation result, browser_get_page_state, or browser_extract_text instead.';
+  }
+
+  return null;
+}

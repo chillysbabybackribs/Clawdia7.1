@@ -1,5 +1,15 @@
 import React, { useState, useEffect } from 'react';
 
+interface AppChromeProps {
+  showChatControls?: boolean;
+  historyOpen?: boolean;
+  terminalOpen?: boolean;
+  settingsOpen?: boolean;
+  onToggleHistory?: () => void;
+  onToggleTerminal?: () => void;
+  onOpenSettings?: () => void;
+}
+
 function useClock() {
   const [label, setLabel] = useState('');
   useEffect(() => {
@@ -47,7 +57,15 @@ function useVpn(api: any) {
   return { connected, busy, toggle };
 }
 
-export default function AppChrome() {
+export default function AppChrome({
+  showChatControls = false,
+  historyOpen = false,
+  terminalOpen = false,
+  settingsOpen = false,
+  onToggleHistory,
+  onToggleTerminal,
+  onOpenSettings,
+}: AppChromeProps) {
   const api = (window as any).clawdia;
   const clock = useClock();
   const vpn = useVpn(api);
@@ -66,6 +84,57 @@ export default function AppChrome() {
         <span className="text-[9.5px] font-medium uppercase tracking-[0.16em] opacity-70">Workspace</span>
       </div>
 
+      {showChatControls && (
+        <div className="no-drag ml-4 flex items-center gap-3">
+          <div className="h-4 w-px bg-white/[0.10]" aria-hidden />
+          <button
+            onClick={onToggleHistory}
+            title={historyOpen ? 'Close history' : 'Chat history'}
+            className={`flex items-center justify-center px-3 h-7 rounded-lg text-[11px] font-medium uppercase tracking-[0.12em] transition-all cursor-pointer ${
+              historyOpen
+                ? 'bg-white/[0.08] text-text-primary'
+                : 'text-text-secondary hover:text-text-primary hover:bg-white/[0.06]'
+            }`}
+          >
+            History
+          </button>
+          <button
+            onClick={onToggleTerminal}
+            title={terminalOpen ? 'Close terminal' : 'Open terminal'}
+            className={`flex items-center justify-center px-3 h-7 rounded-lg text-[11px] font-medium uppercase tracking-[0.12em] transition-all cursor-pointer ${
+              terminalOpen
+                ? 'bg-white/[0.08] text-text-primary'
+                : 'text-text-secondary hover:text-text-primary hover:bg-white/[0.06]'
+            }`}
+          >
+            Terminal
+          </button>
+          <button
+            onClick={onOpenSettings}
+            title="Settings"
+            className={`flex items-center justify-center px-3 h-7 rounded-lg text-[11px] font-medium uppercase tracking-[0.12em] transition-all cursor-pointer ${
+              settingsOpen
+                ? 'bg-white/[0.08] text-text-primary'
+                : 'text-text-secondary hover:text-text-primary hover:bg-white/[0.06]'
+            }`}
+          >
+            Settings
+          </button>
+          <button
+            onClick={vpn.toggle}
+            disabled={vpn.busy}
+            title={vpn.connected ? 'VPN connected — click to disconnect' : 'VPN disconnected — click to connect'}
+            className={`flex items-center justify-center px-3 h-7 rounded-lg text-[11px] font-medium uppercase tracking-[0.12em] transition-all ${
+              vpn.connected
+                ? 'text-status-success hover:bg-white/[0.06]'
+                : 'text-text-secondary hover:text-text-primary hover:bg-white/[0.06]'
+            }`}
+          >
+            VPN
+          </button>
+        </div>
+      )}
+
       <div className="flex-1" />
 
       <div
@@ -76,31 +145,6 @@ export default function AppChrome() {
       </div>
 
       <div className="flex-1" />
-
-      <div className="no-drag flex items-center gap-2 mr-2">
-        <button
-          onClick={vpn.toggle}
-          disabled={vpn.busy}
-          title={vpn.connected ? 'VPN connected — click to disconnect' : 'VPN disconnected — click to connect'}
-          className="flex items-center gap-1.5 px-2 h-[22px] rounded text-[10px] font-medium uppercase tracking-[0.10em] transition-all"
-          style={{
-            background: vpn.connected ? 'rgba(34,197,94,0.15)' : 'rgba(255,255,255,0.06)',
-            border: `1px solid ${vpn.connected ? 'rgba(34,197,94,0.4)' : 'rgba(255,255,255,0.12)'}`,
-            color: vpn.connected ? '#4ade80' : 'rgba(255,255,255,0.35)',
-            opacity: vpn.busy ? 0.5 : 1,
-            cursor: vpn.busy ? 'wait' : 'pointer',
-          }}
-        >
-          <svg width="8" height="8" viewBox="0 0 8 8">
-            <circle cx="4" cy="4" r="3.5"
-              fill={vpn.connected ? '#4ade80' : 'transparent'}
-              stroke={vpn.connected ? '#4ade80' : 'rgba(255,255,255,0.3)'}
-              strokeWidth="1"
-            />
-          </svg>
-          {vpn.busy ? '···' : (vpn.connected ? 'VPN' : 'VPN')}
-        </button>
-      </div>
 
       <div className="no-drag flex items-center gap-0.5">
         <button

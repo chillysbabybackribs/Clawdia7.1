@@ -3,7 +3,7 @@ import * as fs from 'fs';
 import { classify } from './classify';
 import { buildStaticPrompt, buildDynamicPrompt } from './promptBuilder';
 import { createLoopControl, removeLoopControl } from './loopControl';
-import { initBrowserBudget, checkBrowserBudget, updateBrowserBudget, checkToolPolicy } from './browserBudget';
+import { initBrowserBudget, checkBrowserBudget, updateBrowserBudget, checkToolPolicy, checkBrowserScreenshotPolicy } from './browserBudget';
 import { dispatch } from './dispatch';
 import { verifyOutcomes } from './recovery';
 import { streamLLM } from './streamLLM';
@@ -178,6 +178,7 @@ export async function agentLoop(
 
       // Policy checks before execution
       const violation = checkBrowserBudget(toolBlocks, ctx.browserBudget)
+        ?? checkBrowserScreenshotPolicy(toolBlocks, userMessage, ctx.allToolCalls)
         ?? checkToolPolicy(toolBlocks);
 
       if (violation) {

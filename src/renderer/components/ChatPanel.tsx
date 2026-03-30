@@ -28,6 +28,8 @@ type StreamEndPayload = {
 };
 
 interface ChatPanelProps {
+  historyMode: boolean;
+  onToggleHistory: () => void;
   browserVisible: boolean;
   onToggleBrowser: () => void;
   onHideBrowser: () => void;
@@ -605,9 +607,11 @@ function TerminalTranscriptCard({
 const AssistantMessage = React.memo(function AssistantMessage({
   message,
   onOpenTerminal,
+  fillAvailableSpace = false,
 }: {
   message: Message;
   onOpenTerminal: () => void;
+  fillAvailableSpace?: boolean;
 }) {
   // Live path: active streaming message (feed may be empty while shimmer is showing)
   if (message.isStreaming || (message.feed && message.feed.length > 0)) {
@@ -617,7 +621,7 @@ const AssistantMessage = React.memo(function AssistantMessage({
     if (!hasContent && !message.isStreaming) return null;
 
     return (
-      <div className="flex justify-start animate-slide-up group">
+      <div className={`flex justify-start animate-slide-up group ${fillAvailableSpace ? 'flex-1 min-h-[12rem]' : ''}`}>
         <div className="w-full px-1 py-2 text-text-primary flex flex-col gap-3">
           {(message.feed ?? []).map((item, idx) => {
             if (item.kind === 'text') {
@@ -649,7 +653,7 @@ const AssistantMessage = React.memo(function AssistantMessage({
     return <TerminalTranscriptCard message={message} showStreamingStatus={false} onOpenTerminal={onOpenTerminal} />;
   }
   return (
-    <div className="flex justify-start animate-slide-up group">
+    <div className={`flex justify-start animate-slide-up group ${fillAvailableSpace ? 'flex-1 min-h-[12rem]' : ''}`}>
       <div className="w-full px-1 py-2 text-text-primary">
         {!!message.toolCalls?.length && (
           <div className="mb-3">
@@ -1041,6 +1045,8 @@ function InlineShimmer({ text }: { text: string }) {
 }
 
 export default function ChatPanel({
+  historyMode,
+  onToggleHistory: _onToggleHistory,
   browserVisible,
   onToggleBrowser,
   onHideBrowser,
@@ -1064,7 +1070,6 @@ export default function ChatPanel({
   const DEFAULT_CHAT_ZOOM = 100;
   const MIN_CHAT_ZOOM = 80;
   const MAX_CHAT_ZOOM = 160;
-  const [historyMode, setHistoryMode] = useState(false);
   const [messages, setMessages] = useState<Message[]>([]);
   const [isStreaming, setIsStreaming] = useState(false);
   const [isPaused, setIsPaused] = useState(false);
@@ -1098,6 +1103,14 @@ export default function ChatPanel({
 
   const scrollToBottom = useCallback((behavior: 'auto' | 'smooth' = 'auto') => {
     if (scrollRef.current) scrollRef.current.scrollTo({ top: scrollRef.current.scrollHeight, behavior });
+  }, []);
+
+  const scrollMessageToTop = useCallback((messageId: string, behavior: 'auto' | 'smooth' = 'auto') => {
+    const container = scrollRef.current;
+    const node = container?.querySelector<HTMLElement>(`[data-message-id="${messageId}"]`);
+    if (!container || !node) return;
+    const nextTop = node.offsetTop - 12;
+    container.scrollTo({ top: Math.max(0, nextTop), behavior });
   }, []);
 
   const handleScroll = useCallback(() => {
@@ -1627,7 +1640,7 @@ export default function ChatPanel({
       timestamp: new Date().toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' }),
     };
     setMessages(prev => [...prev, userMsg]);
-    setTimeout(() => scrollToBottom('smooth'), 50);
+    setTimeout(() => scrollMessageToTop(userMsg.id, 'smooth'), 50);
 
     const assistantId = `assistant-${Date.now()}`;
     assistantMsgIdRef.current = assistantId;
@@ -1647,6 +1660,7 @@ export default function ChatPanel({
         isStreaming: true,
       }]);
       setIsStreaming(true);
+      requestAnimationFrame(() => scrollMessageToTop(userMsg.id));
     }, 100);
 
     try {
@@ -1711,7 +1725,7 @@ export default function ChatPanel({
       assistantMsgIdRef.current = null;
       setActiveStreamMode('chat');
     }
-  }, [conversationMode, scrollToBottom]);
+  }, [conversationMode, scrollMessageToTop]);
 
   const handleStop = useCallback(() => {
     (window as any).clawdia?.chat.stop(loadedConversationId ?? undefined);
@@ -1830,84 +1844,19 @@ export default function ChatPanel({
     && !historyMode;
 
   return (
-    <div ref={chatRootRef} className="flex flex-col h-full">
-      <TabStrip
-        tabs={tabs}
-        activeTabId={activeTabId}
-        runningConvIds={runningConvIds}
-        onSwitch={onSwitchTab}
-        onClose={onCloseTab}
-        onNew={onNewTab}
-      />
-      {/* Icons row — terminal + settings */}
-      <div
-        className="drag-region flex items-center justify-end gap-1 px-2 h-[44px] flex-shrink-0 relative z-10"
-        style={{
-          background: '#09090c',
-        }}
-      >
-        <div className="no-drag mr-1 flex items-center gap-1 rounded-lg border border-white/[0.06] bg-white/[0.03] px-1 py-0.5">
-          <button
-            onClick={handleChatZoomOut}
-            title="Zoom out chat"
-            className="flex h-7 w-7 items-center justify-center rounded-md text-[12px] text-text-secondary transition-colors hover:bg-white/[0.06] hover:text-text-primary"
-          >
-            -
-          </button>
-          <button
-            onClick={handleChatZoomReset}
-            title="Reset chat zoom"
-            className="rounded-md px-2 py-1 text-[11px] text-text-secondary transition-colors hover:bg-white/[0.06] hover:text-text-primary"
-          >
-            {chatZoom}%
-          </button>
-          <button
-            onClick={handleChatZoomIn}
-            title="Zoom in chat"
-            className="flex h-7 w-7 items-center justify-center rounded-md text-[12px] text-text-secondary transition-colors hover:bg-white/[0.06] hover:text-text-primary"
-          >
-            +
-          </button>
-        </div>
-        <button
-          onClick={() => setHistoryMode(m => !m)}
-          title={historyMode ? 'Close history' : 'Chat history'}
-          className={`no-drag flex items-center justify-center w-8 h-8 rounded-lg transition-all cursor-pointer ${
-            historyMode
-              ? 'bg-white/[0.08] text-text-primary'
-              : 'text-text-secondary hover:text-text-primary hover:bg-white/[0.06]'
-          }`}
-        >
-          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
-            <circle cx="12" cy="12" r="10" />
-            <polyline points="12 6 12 12 16 14" />
-          </svg>
-        </button>
-        <button
-          onClick={onToggleTerminal}
-          title={terminalOpen ? 'Close terminal' : 'Open terminal'}
-          className={`no-drag flex items-center justify-center w-8 h-8 rounded-lg transition-all cursor-pointer ${
-            terminalOpen
-              ? 'bg-white/[0.08] text-text-primary'
-              : 'text-text-secondary hover:text-text-primary hover:bg-white/[0.06]'
-          }`}
-        >
-          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
-            <path d="M4 5h16a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V7a2 2 0 0 1 2-2Z" />
-            <path d="m7 9 3 3-3 3" />
-            <path d="M12 15h5" />
-          </svg>
-        </button>
-        <button onClick={onOpenSettings} title="Settings" className="no-drag flex items-center justify-center w-8 h-8 rounded-lg text-text-secondary hover:text-text-primary hover:bg-white/[0.06] transition-all cursor-pointer">
-          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round">
-            <circle cx="12" cy="12" r="3" />
-            <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z" />
-          </svg>
-        </button>
-      </div>
-
+    <div ref={chatRootRef} className="flex h-full w-full min-w-0 flex-col self-stretch">
+      {!historyMode && (
+        <TabStrip
+          tabs={tabs}
+          activeTabId={activeTabId}
+          runningConvIds={runningConvIds}
+          onSwitch={onSwitchTab}
+          onClose={onCloseTab}
+          onNew={onNewTab}
+        />
+      )}
       {historyMode ? (
-        <div className="flex-1 overflow-hidden">
+        <div className="flex min-h-0 w-full flex-1 overflow-hidden self-stretch">
           <HistoryBrowser
             currentTabs={tabs}
             onSelectConversation={onOpenConversation}
@@ -1917,7 +1866,7 @@ export default function ChatPanel({
       ) : (
         <div ref={scrollRef} onScroll={handleScroll} className="flex-1 overflow-y-auto overflow-x-hidden scroll-smooth">
           <div
-            className={`flex flex-col px-5 pt-5 pb-8 ${showCodexEmptyState || showClaudeCodeEmptyState || showClawdiaEmptyState ? '' : 'gap-4'}`}
+            className={`flex min-h-full flex-col px-5 pt-5 pb-8 ${showCodexEmptyState || showClaudeCodeEmptyState || showClawdiaEmptyState ? '' : 'gap-4'}`}
             style={{ zoom: chatZoom / 100 }}
           >
             {showClawdiaEmptyState && (
@@ -1929,29 +1878,32 @@ export default function ChatPanel({
             {showClaudeCodeEmptyState && (
               <ClaudeCodeEmptyState onSend={(text) => { void handleSend(text); }} />
             )}
-            {messages.map(msg =>
+            {messages.map((msg, idx) =>
               msg.type === 'pipeline'
-              ? <PipelineBlock key={msg.id} />
+              ? <div key={msg.id} data-message-id={msg.id}><PipelineBlock /></div>
               : msg.role === 'assistant'
               ? (
-                <AssistantMessage
-                  key={msg.id}
-                  message={msg}
-                  onOpenTerminal={() => {
-                    if (!terminalOpen) onToggleTerminal();
-                  }}
-                />
+                <div key={msg.id} data-message-id={msg.id}>
+                  <AssistantMessage
+                    message={msg}
+                    fillAvailableSpace={msg.isStreaming && idx === messages.length - 1}
+                    onOpenTerminal={() => {
+                      if (!terminalOpen) onToggleTerminal();
+                    }}
+                  />
+                </div>
               )
               : (
-                <UserMessage
-                  key={msg.id}
-                  message={msg}
-                  onRetry={(message) => {
-                    if (isStreaming) return;
-                    void handleSend(message.content, message.attachments ?? []);
-                  }}
-                  retryDisabled={isStreaming}
-                />
+                <div key={msg.id} data-message-id={msg.id}>
+                  <UserMessage
+                    message={msg}
+                    onRetry={(message) => {
+                      if (isStreaming) return;
+                      void handleSend(message.content, message.attachments ?? []);
+                    }}
+                    retryDisabled={isStreaming}
+                  />
+                </div>
               )
             )}
             {pendingApprovalRunId && nonWorkflowApproval && (
@@ -1973,7 +1925,7 @@ export default function ChatPanel({
 
       <SwarmPanel />
 
-      {isStreaming && shimmerText && (
+      {isStreaming && shimmerText && !historyMode && (
         <InlineShimmer text={shimmerText} />
       )}
 
@@ -1994,6 +1946,10 @@ export default function ChatPanel({
         onToggleCodexMode={handleToggleCodexMode}
         codexModeDisabled={false}
         disabled={historyMode}
+        chatZoom={chatZoom}
+        onChatZoomIn={handleChatZoomIn}
+        onChatZoomOut={handleChatZoomOut}
+        onChatZoomReset={handleChatZoomReset}
       />
 
     </div>

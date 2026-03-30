@@ -7,6 +7,21 @@ interface MarkdownRendererProps {
   isStreaming?: boolean;
 }
 
+function normalizeLinkedLabelText(content: string): string {
+  // Collapse "Label (https://example.com)" into a single markdown link.
+  return content.replace(
+    /(^|[\s>_*~-])([A-Za-z0-9][A-Za-z0-9 '&/.-]{0,60}?)\s*\((https?:\/\/[^\s)]+)\)/g,
+    (_match, prefix: string, label: string, url: string) => `${prefix}[${label.trim()}](${url})`,
+  );
+}
+
+function cleanDisplayUrl(url: string): string {
+  return url
+    .replace(/^https?:\/\//, '')
+    .replace(/^www\./, '')
+    .replace(/\/$/, '');
+}
+
 /** Copy button for code blocks */
 function CopyButton({ text }: { text: string }) {
   const [copied, setCopied] = useState(false);
@@ -42,20 +57,10 @@ export default function MarkdownRenderer({ content, isStreaming }: MarkdownRende
   if (!content) return null;
 
   const plugins = useMemo(() => [remarkGfm], []);
-
-  // During streaming: render plain text with no markdown parse overhead.
-  // Text updates flow through at RAF rate (~60fps) with no throttle.
-  // When streaming ends: one-shot ReactMarkdown render of the final content.
-  if (isStreaming) {
-    return (
-      <div className="markdown-prose streaming-plain">
-        <p style={{ whiteSpace: 'pre-wrap', margin: 0 }}>{content}</p>
-      </div>
-    );
-  }
+  const normalizedContent = useMemo(() => normalizeLinkedLabelText(content), [content]);
 
   return (
-    <div className="markdown-prose animate-md-in">
+    <div className={`markdown-prose${isStreaming ? ' pb-2' : ' animate-md-in'}`}>
       <ReactMarkdown
         remarkPlugins={plugins}
         components={{
@@ -93,6 +98,9 @@ export default function MarkdownRenderer({ content, isStreaming }: MarkdownRende
           },
 
           a({ href, children }) {
+            const childText = React.Children.toArray(children).join('').trim();
+            const displayText = href && childText === href ? cleanDisplayUrl(href) : children;
+
             return (
               <a
                 href={href}
@@ -104,13 +112,13 @@ export default function MarkdownRenderer({ content, isStreaming }: MarkdownRende
                   }
                 }}
               >
-                {children}
+                {displayText}
               </a>
             );
           },
         }}
       >
-        {content}
+        {normalizedContent}
       </ReactMarkdown>
     </div>
   );

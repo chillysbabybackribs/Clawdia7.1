@@ -3,6 +3,7 @@ import {
   checkBrowserBudget,
   updateBrowserBudget,
   checkToolPolicy,
+  checkBrowserScreenshotPolicy,
 } from '../../../src/main/agent/browserBudget';
 import type { ToolUseBlock } from '../../../src/main/agent/types';
 
@@ -66,5 +67,49 @@ describe('browserBudget', () => {
     const state = initBrowserBudget();
     expect(checkBrowserBudget([block('shell_exec', { command: 'ls' })], state)).toBeNull();
     expect(checkToolPolicy([block('shell_exec', { command: 'ls' })])).toBeNull();
+  });
+
+  it('blocks screenshot in the same turn as navigate for non-visual tasks', () => {
+    expect(
+      checkBrowserScreenshotPolicy(
+        [block('browser_navigate', { url: 'https://example.com' }), block('browser_screenshot')],
+        'navigate to example.com',
+        [],
+      ),
+    ).toMatch(/same turn as browser_navigate/i);
+  });
+
+  it('blocks screenshot immediately after a verified navigate for non-visual tasks', () => {
+    expect(
+      checkBrowserScreenshotPolicy(
+        [block('browser_screenshot')],
+        'what page is this?',
+        [{
+          name: 'browser_navigate',
+          result: JSON.stringify({
+            url: 'https://example.com',
+            title: 'Example',
+            textSample: 'Example Domain',
+          }),
+        }],
+      ),
+    ).toMatch(/immediately after a verified browser_navigate/i);
+  });
+
+  it('allows screenshot when the task is explicitly visual', () => {
+    expect(
+      checkBrowserScreenshotPolicy(
+        [block('browser_screenshot')],
+        'take a screenshot so I can see what the page looks like',
+        [{
+          name: 'browser_navigate',
+          result: JSON.stringify({
+            url: 'https://example.com',
+            title: 'Example',
+            textSample: 'Example Domain',
+          }),
+        }],
+      ),
+    ).toBeNull();
   });
 });

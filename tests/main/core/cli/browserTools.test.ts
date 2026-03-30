@@ -65,14 +65,29 @@ describe('BROWSER_TOOLS', () => {
       expect(tool.input_schema).toBeDefined();
     }
   });
+
+  it('browser_screenshot description discourages routine confirmation use', () => {
+    const screenshotTool = BROWSER_TOOLS.find((tool) => tool.name === 'browser_screenshot');
+    expect(screenshotTool?.description).toContain('Use only when visual confirmation is required');
+    expect(screenshotTool?.description).toContain('page-state/text checks are ambiguous');
+  });
 });
 
 describe('executeBrowserTool', () => {
-  it('browser_navigate calls browser.navigate and returns url+title', async () => {
+  it('browser_navigate calls browser.navigate, then returns lightweight page verification data', async () => {
     const browser = makeBrowser();
     const result = await executeBrowserTool('browser_navigate', { url: 'https://example.com' }, browser);
     expect(browser.navigate).toHaveBeenCalledWith('https://example.com');
-    expect(result).toEqual({ url: 'https://example.com', title: 'Example' });
+    expect(browser.getPageState).toHaveBeenCalled();
+    expect(result).toEqual({
+      tabId: 't1',
+      url: 'https://example.com',
+      title: 'Example',
+      isLoading: false,
+      textSample: 'Hello',
+      canGoBack: false,
+      canGoForward: false,
+    });
   });
 
   it('browser_click calls browser.click with selector', async () => {

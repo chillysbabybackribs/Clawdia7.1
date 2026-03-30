@@ -5,7 +5,7 @@ import type { BrowserService } from '../browser/BrowserService';
 export const BROWSER_TOOLS: Anthropic.Tool[] = [
   {
     name: 'browser_navigate',
-    description: 'Navigate the browser to a URL. Returns the final URL and page title.',
+    description: 'Navigate the browser to a URL. Returns the final URL, page title, loading state, and a short text excerpt so you can usually confirm navigation without a separate page-state call.',
     input_schema: {
       type: 'object' as const,
       properties: {
@@ -94,7 +94,7 @@ export const BROWSER_TOOLS: Anthropic.Tool[] = [
   },
   {
     name: 'browser_screenshot',
-    description: 'Take a screenshot of the current browser view. Returns base64-encoded PNG that you can inspect visually.',
+    description: 'Take a screenshot of the current browser view. Use only when visual confirmation is required, layout matters, or page-state/text checks are ambiguous. Returns base64-encoded PNG that you can inspect visually.',
     input_schema: {
       type: 'object' as const,
       properties: {},
@@ -215,7 +215,16 @@ export async function executeBrowserTool(
   switch (name) {
     case 'browser_navigate': {
       const result = await browser.navigate(input.url as string);
-      return { url: result.url, title: result.title };
+      const state = await browser.getPageState();
+      return {
+        tabId: result.tabId,
+        url: state.url || result.url,
+        title: state.title || result.title,
+        isLoading: state.isLoading,
+        textSample: state.textSample,
+        canGoBack: state.canGoBack,
+        canGoForward: state.canGoForward,
+      };
     }
     case 'browser_click':
       return browser.click(input.selector as string);

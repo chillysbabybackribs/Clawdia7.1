@@ -69,7 +69,7 @@ export default function HistoryBrowser({ currentTabs, onSelectConversation, onCl
   }
 
   return (
-    <div className="flex flex-col h-full overflow-hidden">
+    <div className="flex h-full w-full flex-col overflow-hidden">
       {/* Header */}
       <div
         className="flex items-center justify-between px-4 py-3 flex-shrink-0"
@@ -86,7 +86,7 @@ export default function HistoryBrowser({ currentTabs, onSelectConversation, onCl
       </div>
 
       {/* Body */}
-      <div className="flex-1 overflow-y-auto px-3 py-2">
+      <div className="flex w-full flex-1 flex-col overflow-y-auto px-3 py-2">
         {loading && (
           <div className="flex items-center justify-center h-24 text-[13px] text-text-muted">
             Loading…

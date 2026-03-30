@@ -30,6 +30,9 @@ interface UiSessionState {
 
 export default function App() {
   const [activeView, setActiveView] = useState<View>('chat');
+  const [displayedView, setDisplayedView] = useState<View>('chat');
+  const [viewTransitionStage, setViewTransitionStage] = useState<'idle' | 'exit' | 'enter'>('idle');
+  const [historyMode, setHistoryMode] = useState(false);
   const [rightPaneMode, setRightPaneMode] = useState<RightPaneMode>('browser');
   const [chatKey, setChatKey] = useState(0);
   const [loadConversationId, setLoadConversationId] = useState<string | null>(null);
@@ -49,6 +52,26 @@ export default function App() {
   const editorOpen = rightPaneMode === 'editor';
   const terminalOpen = rightPaneMode === 'terminal';
   const activeEditorTab = editorTabs.find((tab) => tab.id === activeEditorTabId) || null;
+
+  useEffect(() => {
+    if (activeView === displayedView) return;
+
+    let enterTimer: number | null = null;
+    const swapTimer = window.setTimeout(() => {
+      setDisplayedView(activeView);
+      setViewTransitionStage('enter');
+      enterTimer = window.setTimeout(() => {
+        setViewTransitionStage('idle');
+      }, 180);
+    }, 120);
+
+    setViewTransitionStage('exit');
+
+    return () => {
+      window.clearTimeout(swapTimer);
+      if (enterTimer !== null) window.clearTimeout(enterTimer);
+    };
+  }, [activeView, displayedView]);
 
   // Check for API key on mount
   useEffect(() => {
@@ -254,6 +277,7 @@ export default function App() {
     setLoadConversationId(null);
     setReplayBuffer(null);
     setChatKey(k => k + 1);
+    setHistoryMode(false);
     setActiveView('chat');
   }, [activeTabId]);
 
@@ -266,6 +290,7 @@ export default function App() {
     setReplayBuffer(buffer || null);
     setSelectedProcessId(null);
     setChatKey(k => k + 1);
+    setHistoryMode(false);
     setActiveView('chat');
   }, [activeTabId]);
 
@@ -334,6 +359,7 @@ export default function App() {
       setLoadConversationId(id);
       setReplayBuffer(null);
       setChatKey(k => k + 1);
+      setHistoryMode(false);
       setActiveView('chat');
     }
   }, [tabs, handleSwitchTab]);
@@ -496,12 +522,108 @@ export default function App() {
     );
   }
 
+  const renderPrimaryView = () => {
+    if (displayedView === 'chat') {
+      return (
+        <ChatPanel
+          key={chatKey}
+          historyMode={historyMode}
+          onToggleHistory={() => setHistoryMode((current) => !current)}
+          browserVisible={browserVisible}
+          onToggleBrowser={handleToggleBrowser}
+          onHideBrowser={handleHideBrowser}
+          onShowBrowser={handleShowBrowser}
+          terminalOpen={terminalOpen}
+          onToggleTerminal={handleToggleTerminal}
+          onOpenSettings={() => setActiveView('settings')}
+          onOpenPendingApproval={handleOpenProcess}
+          loadConversationId={loadConversationId}
+          replayBuffer={replayBuffer}
+          tabs={tabs}
+          activeTabId={activeTabId}
+          runningConvIds={runningConvIds}
+          onNewTab={handleNewTab}
+          onCloseTab={handleCloseTab}
+          onSwitchTab={handleSwitchTab}
+          onOpenConversation={handleOpenConversation}
+          onConversationTitleResolved={handleConversationTitleResolved}
+        />
+      );
+    }
+
+    if (displayedView === 'conversations') {
+      return (
+        <ConversationsView
+          onBack={() => setActiveView('chat')}
+          onLoadConversation={handleLoadConversation}
+        />
+      );
+    }
+
+    if (displayedView === 'processes') {
+      return (
+        <ProcessesPanel
+          onBack={() => setActiveView('chat')}
+          initialRunId={selectedProcessId}
+          onAttach={(conversationId, buffer) => {
+            handleLoadConversation(conversationId, buffer);
+          }}
+        />
+      );
+    }
+
+    if (displayedView === 'settings') {
+      return <SettingsView onBack={() => setActiveView('chat')} />;
+    }
+
+    if (displayedView === 'agent-create') {
+      return (
+        <CreateAgentPanel
+          onBack={() => setActiveView('chat')}
+          onCreated={(agent) => {
+            setSelectedAgentId(agent.id);
+            setActiveView('agent-detail');
+          }}
+        />
+      );
+    }
+
+    if (displayedView === 'agent-detail') {
+      return (
+        <AgentDetailPanel
+          agentId={selectedAgentId}
+          onBack={() => setActiveView('chat')}
+          onDeleted={() => {
+            setSelectedAgentId(null);
+            setActiveView('chat');
+          }}
+        />
+      );
+    }
+
+    return null;
+  };
+
   return (
     <div
       className="flex h-screen w-screen flex-col overflow-hidden rounded-[10px] border-[2px] border-white/[0.10]"
       style={{ boxShadow: '0 8px 40px rgba(0,0,0,0.8), 0 2px 8px rgba(0,0,0,0.6), inset 0 1px 0 rgba(255,255,255,0.05)' }}
     >
-      <AppChrome />
+      <AppChrome
+        showChatControls={activeView === 'chat' || activeView === 'settings'}
+        historyOpen={historyMode}
+        terminalOpen={terminalOpen}
+        settingsOpen={activeView === 'settings'}
+        onToggleHistory={() => {
+          setActiveView('chat');
+          setHistoryMode((current) => !current);
+        }}
+        onToggleTerminal={() => {
+          setActiveView('chat');
+          handleToggleTerminal();
+        }}
+        onOpenSettings={() => setActiveView((current) => current === 'settings' ? 'chat' : 'settings')}
+      />
       <div className="flex min-h-0 flex-1">
         <div
           className="relative flex h-full min-w-0 flex-col"
@@ -514,66 +636,17 @@ export default function App() {
             } : {}),
           }}
         >
-          {activeView === 'chat' && (
-            <ChatPanel
-              key={chatKey}
-              browserVisible={browserVisible}
-              onToggleBrowser={handleToggleBrowser}
-              onHideBrowser={handleHideBrowser}
-              onShowBrowser={handleShowBrowser}
-              terminalOpen={terminalOpen}
-              onToggleTerminal={handleToggleTerminal}
-              onOpenSettings={() => setActiveView('settings')}
-              onOpenPendingApproval={handleOpenProcess}
-              loadConversationId={loadConversationId}
-              replayBuffer={replayBuffer}
-              tabs={tabs}
-              activeTabId={activeTabId}
-              runningConvIds={runningConvIds}
-              onNewTab={handleNewTab}
-              onCloseTab={handleCloseTab}
-              onSwitchTab={handleSwitchTab}
-              onOpenConversation={handleOpenConversation}
-              onConversationTitleResolved={handleConversationTitleResolved}
-            />
-          )}
-          {activeView === 'conversations' && (
-            <ConversationsView
-              onBack={() => setActiveView('chat')}
-              onLoadConversation={handleLoadConversation}
-            />
-          )}
-          {activeView === 'processes' && (
-            <ProcessesPanel
-              onBack={() => setActiveView('chat')}
-              initialRunId={selectedProcessId}
-              onAttach={(conversationId, buffer) => {
-                handleLoadConversation(conversationId, buffer);
-              }}
-            />
-          )}
-          {activeView === 'settings' && (
-            <SettingsView onBack={() => setActiveView('chat')} />
-          )}
-          {activeView === 'agent-create' && (
-            <CreateAgentPanel
-              onBack={() => setActiveView('chat')}
-              onCreated={(agent) => {
-                setSelectedAgentId(agent.id);
-                setActiveView('agent-detail');
-              }}
-            />
-          )}
-          {activeView === 'agent-detail' && (
-            <AgentDetailPanel
-              agentId={selectedAgentId}
-              onBack={() => setActiveView('chat')}
-              onDeleted={() => {
-                setSelectedAgentId(null);
-                setActiveView('chat');
-              }}
-            />
-          )}
+          <div
+            className={`flex min-h-0 w-full min-w-0 flex-1 self-stretch transition-all duration-180 ease-out ${
+              viewTransitionStage === 'exit'
+                ? 'translate-y-1 opacity-0'
+                : viewTransitionStage === 'enter'
+                  ? 'translate-y-0 opacity-100'
+                  : 'translate-y-0 opacity-100'
+            }`}
+          >
+            {renderPrimaryView()}
+          </div>
         </div>
 
         {editorOpen && (
