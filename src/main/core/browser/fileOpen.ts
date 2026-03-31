@@ -21,6 +21,13 @@ import { ElectronBrowserService } from './ElectronBrowserService';
 
 export type BrowserOpenMode = 'review' | 'preview' | 'publish';
 
+// Extensions the browser renders natively — no wrapper needed, navigate directly
+const NATIVE_EXTENSIONS = new Set([
+  '.html', '.htm', '.svg', '.pdf',
+  '.png', '.jpg', '.jpeg', '.gif', '.webp', '.avif', '.ico', '.bmp',
+  '.mp4', '.webm', '.ogg', '.mp3', '.wav',
+]);
+
 // Extensions that default to preview mode when no explicit mode is given
 const PREVIEW_EXTENSIONS = new Set(['.html', '.htm', '.svg', '.pdf']);
 
@@ -43,6 +50,15 @@ export function resolveOpenMode(filePath: string): BrowserOpenMode {
 }
 
 /**
+ * Returns true if the browser can render this file natively via file:// —
+ * no wrapper HTML needed. Images, PDFs, HTML, SVG, media files.
+ */
+export function isNativelyRenderable(filePath: string): boolean {
+  const ext = path.extname(filePath).toLowerCase();
+  return NATIVE_EXTENSIONS.has(ext);
+}
+
+/**
  * Open a local file in the browser with the specified mode.
  *
  * Respects conversation-scoped tab ownership when conversationId is provided.
@@ -58,8 +74,11 @@ export async function openFileInBrowser(
 
   let targetUrl: string;
 
-  if (mode === 'publish') {
-    // Publish: navigate directly — the file is already a polished HTML artifact
+  // For natively renderable files (images, PDF, HTML, SVG, media) — navigate
+  // directly via file:// unless the user explicitly asked for a wrapper mode.
+  if (!opts.mode && isNativelyRenderable(absPath)) {
+    targetUrl = `file://${absPath}`;
+  } else if (mode === 'publish') {
     targetUrl = `file://${absPath}`;
   } else if (mode === 'preview') {
     targetUrl = await buildPreviewUrl(absPath);
