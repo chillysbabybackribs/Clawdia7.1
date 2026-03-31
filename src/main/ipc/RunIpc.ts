@@ -1,0 +1,293 @@
+import { ipcMain } from 'electron';
+import * as fs from 'fs';
+import * as path from 'path';
+import { IPC } from '../ipc-channels';
+import { getRuns, getRunEvents, updateRun, getDb } from '../db';
+import { listActiveBudgets } from '../db/spending';
+import { cancelLoop } from '../agent/loopControl';
+import { runClaudeCode } from '../claudeCodeClient';
+import type { TerminalSessionController } from '../core/terminal/TerminalSessionController';
+
+export function registerRunIpc(terminalController?: TerminalSessionController): void {
+  // ── Run queries ─────────────────────────────────────────────────────────────
+  ipcMain.handle(IPC.RUN_GET, (_e, runId: string) => {
+    try { return getDb().prepare('SELECT * FROM runs WHERE id = ?').get(runId) ?? null; }
+    catch { return null; }
+  });
+
+  ipcMain.handle(IPC.RUN_ARTIFACTS, (_e, runId: string) => {
+    try { return getRunEvents(runId).filter((e: any) => e.event_type === 'artifact'); }
+    catch { return []; }
+  });
+
+  ipcMain.handle(IPC.RUN_CHANGES, (_e, runId: string) => {
+    try { return getRunEvents(runId).filter((e: any) => e.event_type === 'file_change'); }
+    catch { return []; }
+  });
+
+  ipcMain.handle(IPC.RUN_SCORECARD, () => {
+    try {
+      const db = getDb();
+      const total = (db.prepare('SELECT COUNT(*) as n FROM runs').get() as any)?.n ?? 0;
+      const completed = (db.prepare("SELECT COUNT(*) as n FROM runs WHERE status = 'completed'").get() as any)?.n ?? 0;
+      const failed = (db.prepare("SELECT COUNT(*) as n FROM runs WHERE status = 'failed'").get() as any)?.n ?? 0;
+      return { total, completed, failed, successRate: total > 0 ? (completed / total * 100).toFixed(1) : '0' };
+    } catch { return null; }
+  });
+
+  // ── Run approvals / interventions (stubs) ───────────────────────────────────
+  ipcMain.handle(IPC.RUN_APPROVALS, (_e, _runId: string) => []);
+  ipcMain.handle(IPC.RUN_APPROVE, (_e, _approvalId: number) => {});
+  ipcMain.handle(IPC.RUN_REVISE, (_e, _approvalId: number) => {});
+  ipcMain.handle(IPC.RUN_DENY, (_e, _approvalId: number) => {});
+  ipcMain.handle(IPC.RUN_HUMAN_INTERVENTIONS, (_e, _runId: string) => []);
+  ipcMain.handle(IPC.RUN_RESOLVE_HUMAN_INTERVENTION, (_e, _interventionId: number) => {});
+
+  // ── Process management ──────────────────────────────────────────────────────
+  ipcMain.handle(IPC.PROCESS_LIST, () => {
+    const runs = getRuns('');
+    return runs.filter((r) => r.status === 'running').map((r) => ({
+      id: r.id,
+      title: r.title,
+      status: r.status,
+      startedAt: r.started_at,
+    }));
+  });
+
+  ipcMain.handle(IPC.PROCESS_CANCEL, (_e, processId: string) => {
+    cancelLoop(processId);
+    return { ok: true };
+  });
+
+  ipcMain.handle(IPC.PROCESS_DISMISS, (_e, processId: string) => {
+    updateRun(processId, { status: 'dismissed' });
+    return { ok: true };
+  });
+
+  ipcMain.handle(IPC.PROCESS_DETACH, () => { /* no-op */ });
+  ipcMain.handle(IPC.PROCESS_ATTACH, (_e: any, _processId: string) => { /* no-op */ });
+
+  // ── Spending ────────────────────────────────────────────────────────────────
+  ipcMain.handle(IPC.WALLET_GET_REMAINING_BUDGETS, () => {
+    const { getRemainingBudgets } = require('../agent/spending-budget');
+    return getRemainingBudgets();
+  });
+
+  ipcMain.handle(IPC.WALLET_GET_BUDGETS, () => listActiveBudgets());
+
+  ipcMain.handle(IPC.WALLET_GET_TRANSACTIONS, (_e, args?: { limit?: number }) => {
+    try {
+      const limit = args?.limit ?? 50;
+      return getDb().prepare('SELECT * FROM spending_transactions ORDER BY created_at DESC LIMIT ?').all(limit);
+    } catch { return []; }
+  });
+
+  ipcMain.handle(IPC.WALLET_SET_BUDGET, (_e, input: { period: string; limitUsd: number; resetDay?: number }) => {
+    try {
+      getDb().prepare(`
+        INSERT INTO spending_budgets (period, limit_usd, reset_day)
+        VALUES (?, ?, ?)
+        ON CONFLICT(period) DO UPDATE SET limit_usd = excluded.limit_usd, reset_day = excluded.reset_day, is_active = 1
+      `).run(input.period, input.limitUsd, input.resetDay ?? 1);
+      return { ok: true };
+    } catch (err: any) {
+      return { ok: false, error: err.message };
+    }
+  });
+
+  ipcMain.handle(IPC.WALLET_DISABLE_BUDGET, (_e, period: string) => {
+    try {
+      getDb().prepare('UPDATE spending_budgets SET is_active = 0 WHERE period = ?').run(period);
+      return { ok: true };
+    } catch (err: any) {
+      return { ok: false, error: err.message };
+    }
+  });
+
+  // ── Wallet / Payment Methods ────────────────────────────────────────────────
+  const walletPath = path.join(require('electron').app.getPath('userData'), 'wallet.json');
+
+  function loadWallet(): any {
+    try { return JSON.parse(fs.readFileSync(walletPath, 'utf-8')); }
+    catch { return { paymentMethods: [] }; }
+  }
+
+  function saveWallet(data: any): void {
+    fs.writeFileSync(walletPath, JSON.stringify(data, null, 2), 'utf-8');
+  }
+
+  ipcMain.handle(IPC.WALLET_GET_PAYMENT_METHODS, () => loadWallet().paymentMethods ?? []);
+  ipcMain.handle(IPC.WALLET_ADD_MANUAL_CARD, (_e: any, input: any) => {
+    const w = loadWallet();
+    w.paymentMethods.push({ ...input, id: Date.now(), source: 'manual', createdAt: new Date().toISOString() });
+    saveWallet(w);
+  });
+  ipcMain.handle(IPC.WALLET_IMPORT_BROWSER_CARDS, () => []);
+  ipcMain.handle(IPC.WALLET_CONFIRM_IMPORT, (_e: any, candidates: any[]) => {
+    const w = loadWallet();
+    for (const c of candidates) {
+      w.paymentMethods.push({ ...c, id: Date.now(), source: 'imported', createdAt: new Date().toISOString() });
+    }
+    saveWallet(w);
+  });
+  ipcMain.handle(IPC.WALLET_SET_PREFERRED, (_e: any, id: number) => {
+    const w = loadWallet();
+    for (const pm of w.paymentMethods) pm.isPreferred = pm.id === id;
+    saveWallet(w);
+  });
+  ipcMain.handle(IPC.WALLET_SET_BACKUP, (_e: any, id: number) => {
+    const w = loadWallet();
+    for (const pm of w.paymentMethods) pm.isBackup = pm.id === id;
+    saveWallet(w);
+  });
+  ipcMain.handle(IPC.WALLET_REMOVE_CARD, (_e: any, id: number) => {
+    const w = loadWallet();
+    w.paymentMethods = w.paymentMethods.filter((pm: any) => pm.id !== id);
+    saveWallet(w);
+  });
+
+  // ── Tasks ───────────────────────────────────────────────────────────────────
+  const tasksPath = path.join(require('electron').app.getPath('userData'), 'tasks.json');
+
+  function loadTasks(): any[] {
+    try { return JSON.parse(fs.readFileSync(tasksPath, 'utf-8')); }
+    catch { return []; }
+  }
+
+  function saveTasks(tasks: any[]): void {
+    fs.writeFileSync(tasksPath, JSON.stringify(tasks, null, 2), 'utf-8');
+  }
+
+  ipcMain.handle(IPC.TASKS_SUMMARY, () => ({ runningCount: 0, completedCount: 0 }));
+  ipcMain.handle(IPC.TASKS_LIST, () => loadTasks());
+  ipcMain.handle(IPC.TASKS_CREATE, (_e: any, input: any) => {
+    const tasks = loadTasks();
+    const task = { ...input, id: Date.now(), enabled: true, createdAt: new Date().toISOString(), runs: [] };
+    tasks.push(task);
+    saveTasks(tasks);
+    return task;
+  });
+  ipcMain.handle(IPC.TASKS_ENABLE, (_e: any, id: number, enabled: boolean) => {
+    const tasks = loadTasks();
+    const t = tasks.find((t: any) => t.id === id);
+    if (t) { t.enabled = enabled; saveTasks(tasks); }
+  });
+  ipcMain.handle(IPC.TASKS_DELETE, (_e: any, id: number) => {
+    saveTasks(loadTasks().filter((t: any) => t.id !== id));
+  });
+  ipcMain.handle(IPC.TASKS_RUNS, (_e: any, id: number) => {
+    const task = loadTasks().find((t: any) => t.id === id);
+    return task?.runs ?? [];
+  });
+  ipcMain.handle(IPC.TASKS_RUN_NOW, (_e: any, _id: number) => ({ ok: true, message: 'Task execution not yet implemented' }));
+
+  // ── Identity ────────────────────────────────────────────────────────────────
+  const identityPath = path.join(require('electron').app.getPath('userData'), 'identity.json');
+
+  function loadIdentity(): any {
+    try { return JSON.parse(fs.readFileSync(identityPath, 'utf-8')); }
+    catch { return { profile: null, accounts: [], credentials: [] }; }
+  }
+
+  function saveIdentity(data: any): void {
+    fs.writeFileSync(identityPath, JSON.stringify(data, null, 2), 'utf-8');
+  }
+
+  ipcMain.handle(IPC.IDENTITY_PROFILE_GET, () => loadIdentity().profile ?? null);
+  ipcMain.handle(IPC.IDENTITY_PROFILE_SET, (_e: any, input: any) => {
+    const id = loadIdentity(); id.profile = input; saveIdentity(id);
+  });
+  ipcMain.handle(IPC.IDENTITY_ACCOUNTS_LIST, () => loadIdentity().accounts ?? []);
+  ipcMain.handle(IPC.IDENTITY_ACCOUNT_ADD, (_e: any, input: any) => {
+    const id = loadIdentity();
+    id.accounts = id.accounts || [];
+    id.accounts.push(input);
+    saveIdentity(id);
+  });
+  ipcMain.handle(IPC.IDENTITY_ACCOUNT_DELETE, (_e: any, serviceName: string) => {
+    const id = loadIdentity();
+    id.accounts = (id.accounts || []).filter((a: any) => a.serviceName !== serviceName);
+    saveIdentity(id);
+  });
+  ipcMain.handle(IPC.IDENTITY_CREDENTIALS_LIST, () => {
+    return (loadIdentity().credentials ?? []).map((c: any) => ({ ...c, valuePlain: undefined, hasValue: true }));
+  });
+  ipcMain.handle(IPC.IDENTITY_CREDENTIAL_ADD, (_e: any, label: string, type: string, service: string, valuePlain: string) => {
+    const id = loadIdentity();
+    id.credentials = id.credentials || [];
+    id.credentials.push({ label, type, service, valuePlain, createdAt: new Date().toISOString() });
+    saveIdentity(id);
+  });
+  ipcMain.handle(IPC.IDENTITY_CREDENTIAL_DELETE, (_e: any, label: string, service: string) => {
+    const id = loadIdentity();
+    id.credentials = (id.credentials || []).filter((c: any) => !(c.label === label && c.service === service));
+    saveIdentity(id);
+  });
+
+  // ── Calendar (stub) ──────────────────────────────────────────────────────────
+  ipcMain.handle(IPC.CALENDAR_LIST, (_e: any, _from?: string, _to?: string) => []);
+
+  // ── Filesystem ───────────────────────────────────────────────────────────────
+  ipcMain.handle(IPC.FS_READ_DIR, async (_e, dirPath: string) => {
+    try {
+      const entries = await fs.promises.readdir(dirPath, { withFileTypes: true });
+      return entries.map((e) => ({
+        name: e.name,
+        type: e.isDirectory() ? 'directory' : 'file',
+        path: path.join(dirPath, e.name),
+      }));
+    } catch { return []; }
+  });
+
+  ipcMain.handle(IPC.FS_READ_FILE, async (_e, filePath: string) => {
+    try { return await fs.promises.readFile(filePath, 'utf-8'); }
+    catch { return null; }
+  });
+
+  ipcMain.handle(IPC.FS_WRITE_FILE, async (_e, filePath: string, content: string) => {
+    try { await fs.promises.writeFile(filePath, content, 'utf-8'); return { ok: true }; }
+    catch (err: any) { return { ok: false, error: err.message }; }
+  });
+
+  // ── Editor ───────────────────────────────────────────────────────────────────
+  ipcMain.handle(IPC.EDITOR_OPEN_FILE, (_e, filePath: string) => {
+    const w = require('electron').BrowserWindow.getAllWindows()[0];
+    if (w) w.webContents.send('editor:open-file', { filePath });
+  });
+
+  ipcMain.handle(IPC.EDITOR_WATCH_FILE, (_e, filePath: string) => {
+    try {
+      const watcher = fs.watch(filePath, () => {
+        const w = require('electron').BrowserWindow.getAllWindows()[0];
+        if (w) w.webContents.send('editor:file-changed', { filePath });
+      });
+      (ipcMain as any).__editorWatcher = watcher;
+      return { ok: true };
+    } catch { return { ok: false }; }
+  });
+
+  ipcMain.handle(IPC.EDITOR_UNWATCH_FILE, () => {
+    const watcher = (ipcMain as any).__editorWatcher;
+    if (watcher) { watcher.close(); (ipcMain as any).__editorWatcher = null; }
+  });
+
+  ipcMain.handle(IPC.EDITOR_SET_STATE, (_e, state: any) => {
+    (ipcMain as any).__editorState = state;
+  });
+
+  ipcMain.handle(IPC.EDITOR_GET_STATE, () => (ipcMain as any).__editorState ?? null);
+
+  // ── Terminal helpers (not owned by registerTerminalIpc) ─────────────────────
+  ipcMain.handle(IPC.TERMINAL_SPAWN_CLAUDE_CODE, async (_e: any, sessionId: string, task: string) => {
+    try {
+      const { finalText: result } = await runClaudeCode({
+        conversationId: sessionId,
+        prompt: task,
+        onText: () => {},
+      });
+      return { sessionId, exitCode: 0, output: result };
+    } catch (err: any) {
+      return { sessionId, exitCode: 1, output: err.message };
+    }
+  });
+}
