@@ -15,6 +15,10 @@ import { prepareOpenAIMessagesForSend } from '../core/providers/openAIMessagePro
 import { buildCacheKey, getCachedResponse, setCachedResponse } from '../db/responseCache';
 
 const MAX_ITERATIONS = 50;
+// Maximum wall-clock time for a single agent run (5 minutes).
+// Guards against loops where each iteration completes quickly but the run
+// never reaches a terminal state (e.g. infinite tool-call cycles).
+const MAX_RUN_MS = 10 * 60 * 1000;
 
 // ── Token-aware history trimming ──────────────────────────────────────────────
 // Estimates token count as Math.ceil(chars / 4) — avoids a tiktoken dependency
@@ -148,6 +152,7 @@ export async function agentLoop(
     : baseStaticPrompt;
 
   // 3. Init loop state
+  const loopDeadline = Date.now() + MAX_RUN_MS;
   const control = createLoopControl(runId, options.signal);
   const ctx: DispatchContext = {
     runId,
@@ -213,6 +218,10 @@ export async function agentLoop(
       // Pause check
       await control.waitIfPaused();
       if (control.signal.aborted) break;
+      if (Date.now() > loopDeadline) {
+        console.warn(`[agentLoop] Run ${runId} exceeded ${MAX_RUN_MS / 1000}s wall-clock limit — aborting`);
+        break;
+      }
 
       // Inject queued user context
       if (control.pendingContext) {

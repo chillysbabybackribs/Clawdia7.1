@@ -107,76 +107,76 @@ export function registerRunIpc(terminalController?: TerminalSessionController): 
   // ── Wallet / Payment Methods ────────────────────────────────────────────────
   const walletPath = path.join(require('electron').app.getPath('userData'), 'wallet.json');
 
-  function loadWallet(): any {
-    try { return JSON.parse(fs.readFileSync(walletPath, 'utf-8')); }
+  async function loadWallet(): Promise<any> {
+    try { return JSON.parse(await fs.promises.readFile(walletPath, 'utf-8')); }
     catch { return { paymentMethods: [] }; }
   }
 
-  function saveWallet(data: any): void {
-    fs.writeFileSync(walletPath, JSON.stringify(data, null, 2), 'utf-8');
+  async function saveWallet(data: any): Promise<void> {
+    await fs.promises.writeFile(walletPath, JSON.stringify(data, null, 2), 'utf-8');
   }
 
-  ipcMain.handle(IPC.WALLET_GET_PAYMENT_METHODS, () => loadWallet().paymentMethods ?? []);
-  ipcMain.handle(IPC.WALLET_ADD_MANUAL_CARD, (_e: any, input: any) => {
-    const w = loadWallet();
+  ipcMain.handle(IPC.WALLET_GET_PAYMENT_METHODS, async () => (await loadWallet()).paymentMethods ?? []);
+  ipcMain.handle(IPC.WALLET_ADD_MANUAL_CARD, async (_e: any, input: any) => {
+    const w = await loadWallet();
     w.paymentMethods.push({ ...input, id: Date.now(), source: 'manual', createdAt: new Date().toISOString() });
-    saveWallet(w);
+    await saveWallet(w);
   });
   ipcMain.handle(IPC.WALLET_IMPORT_BROWSER_CARDS, () => []);
-  ipcMain.handle(IPC.WALLET_CONFIRM_IMPORT, (_e: any, candidates: any[]) => {
-    const w = loadWallet();
+  ipcMain.handle(IPC.WALLET_CONFIRM_IMPORT, async (_e: any, candidates: any[]) => {
+    const w = await loadWallet();
     for (const c of candidates) {
       w.paymentMethods.push({ ...c, id: Date.now(), source: 'imported', createdAt: new Date().toISOString() });
     }
-    saveWallet(w);
+    await saveWallet(w);
   });
-  ipcMain.handle(IPC.WALLET_SET_PREFERRED, (_e: any, id: number) => {
-    const w = loadWallet();
+  ipcMain.handle(IPC.WALLET_SET_PREFERRED, async (_e: any, id: number) => {
+    const w = await loadWallet();
     for (const pm of w.paymentMethods) pm.isPreferred = pm.id === id;
-    saveWallet(w);
+    await saveWallet(w);
   });
-  ipcMain.handle(IPC.WALLET_SET_BACKUP, (_e: any, id: number) => {
-    const w = loadWallet();
+  ipcMain.handle(IPC.WALLET_SET_BACKUP, async (_e: any, id: number) => {
+    const w = await loadWallet();
     for (const pm of w.paymentMethods) pm.isBackup = pm.id === id;
-    saveWallet(w);
+    await saveWallet(w);
   });
-  ipcMain.handle(IPC.WALLET_REMOVE_CARD, (_e: any, id: number) => {
-    const w = loadWallet();
+  ipcMain.handle(IPC.WALLET_REMOVE_CARD, async (_e: any, id: number) => {
+    const w = await loadWallet();
     w.paymentMethods = w.paymentMethods.filter((pm: any) => pm.id !== id);
-    saveWallet(w);
+    await saveWallet(w);
   });
 
   // ── Tasks ───────────────────────────────────────────────────────────────────
   const tasksPath = path.join(require('electron').app.getPath('userData'), 'tasks.json');
 
-  function loadTasks(): any[] {
-    try { return JSON.parse(fs.readFileSync(tasksPath, 'utf-8')); }
+  async function loadTasks(): Promise<any[]> {
+    try { return JSON.parse(await fs.promises.readFile(tasksPath, 'utf-8')); }
     catch { return []; }
   }
 
-  function saveTasks(tasks: any[]): void {
-    fs.writeFileSync(tasksPath, JSON.stringify(tasks, null, 2), 'utf-8');
+  async function saveTasks(tasks: any[]): Promise<void> {
+    await fs.promises.writeFile(tasksPath, JSON.stringify(tasks, null, 2), 'utf-8');
   }
 
   ipcMain.handle(IPC.TASKS_SUMMARY, () => ({ runningCount: 0, completedCount: 0 }));
-  ipcMain.handle(IPC.TASKS_LIST, () => loadTasks());
-  ipcMain.handle(IPC.TASKS_CREATE, (_e: any, input: any) => {
-    const tasks = loadTasks();
+  ipcMain.handle(IPC.TASKS_LIST, async () => loadTasks());
+  ipcMain.handle(IPC.TASKS_CREATE, async (_e: any, input: any) => {
+    const tasks = await loadTasks();
     const task = { ...input, id: Date.now(), enabled: true, createdAt: new Date().toISOString(), runs: [] };
     tasks.push(task);
-    saveTasks(tasks);
+    await saveTasks(tasks);
     return task;
   });
-  ipcMain.handle(IPC.TASKS_ENABLE, (_e: any, id: number, enabled: boolean) => {
-    const tasks = loadTasks();
+  ipcMain.handle(IPC.TASKS_ENABLE, async (_e: any, id: number, enabled: boolean) => {
+    const tasks = await loadTasks();
     const t = tasks.find((t: any) => t.id === id);
-    if (t) { t.enabled = enabled; saveTasks(tasks); }
+    if (t) { t.enabled = enabled; await saveTasks(tasks); }
   });
-  ipcMain.handle(IPC.TASKS_DELETE, (_e: any, id: number) => {
-    saveTasks(loadTasks().filter((t: any) => t.id !== id));
+  ipcMain.handle(IPC.TASKS_DELETE, async (_e: any, id: number) => {
+    await saveTasks((await loadTasks()).filter((t: any) => t.id !== id));
   });
-  ipcMain.handle(IPC.TASKS_RUNS, (_e: any, id: number) => {
-    const task = loadTasks().find((t: any) => t.id === id);
+  ipcMain.handle(IPC.TASKS_RUNS, async (_e: any, id: number) => {
+    const task = (await loadTasks()).find((t: any) => t.id === id);
     return task?.runs ?? [];
   });
   ipcMain.handle(IPC.TASKS_RUN_NOW, (_e: any, _id: number) => ({ ok: true, message: 'Task execution not yet implemented' }));
@@ -184,44 +184,44 @@ export function registerRunIpc(terminalController?: TerminalSessionController): 
   // ── Identity ────────────────────────────────────────────────────────────────
   const identityPath = path.join(require('electron').app.getPath('userData'), 'identity.json');
 
-  function loadIdentity(): any {
-    try { return JSON.parse(fs.readFileSync(identityPath, 'utf-8')); }
+  async function loadIdentity(): Promise<any> {
+    try { return JSON.parse(await fs.promises.readFile(identityPath, 'utf-8')); }
     catch { return { profile: null, accounts: [], credentials: [] }; }
   }
 
-  function saveIdentity(data: any): void {
-    fs.writeFileSync(identityPath, JSON.stringify(data, null, 2), 'utf-8');
+  async function saveIdentity(data: any): Promise<void> {
+    await fs.promises.writeFile(identityPath, JSON.stringify(data, null, 2), 'utf-8');
   }
 
-  ipcMain.handle(IPC.IDENTITY_PROFILE_GET, () => loadIdentity().profile ?? null);
-  ipcMain.handle(IPC.IDENTITY_PROFILE_SET, (_e: any, input: any) => {
-    const id = loadIdentity(); id.profile = input; saveIdentity(id);
+  ipcMain.handle(IPC.IDENTITY_PROFILE_GET, async () => (await loadIdentity()).profile ?? null);
+  ipcMain.handle(IPC.IDENTITY_PROFILE_SET, async (_e: any, input: any) => {
+    const id = await loadIdentity(); id.profile = input; await saveIdentity(id);
   });
-  ipcMain.handle(IPC.IDENTITY_ACCOUNTS_LIST, () => loadIdentity().accounts ?? []);
-  ipcMain.handle(IPC.IDENTITY_ACCOUNT_ADD, (_e: any, input: any) => {
-    const id = loadIdentity();
+  ipcMain.handle(IPC.IDENTITY_ACCOUNTS_LIST, async () => (await loadIdentity()).accounts ?? []);
+  ipcMain.handle(IPC.IDENTITY_ACCOUNT_ADD, async (_e: any, input: any) => {
+    const id = await loadIdentity();
     id.accounts = id.accounts || [];
     id.accounts.push(input);
-    saveIdentity(id);
+    await saveIdentity(id);
   });
-  ipcMain.handle(IPC.IDENTITY_ACCOUNT_DELETE, (_e: any, serviceName: string) => {
-    const id = loadIdentity();
+  ipcMain.handle(IPC.IDENTITY_ACCOUNT_DELETE, async (_e: any, serviceName: string) => {
+    const id = await loadIdentity();
     id.accounts = (id.accounts || []).filter((a: any) => a.serviceName !== serviceName);
-    saveIdentity(id);
+    await saveIdentity(id);
   });
-  ipcMain.handle(IPC.IDENTITY_CREDENTIALS_LIST, () => {
-    return (loadIdentity().credentials ?? []).map((c: any) => ({ ...c, valuePlain: undefined, hasValue: true }));
+  ipcMain.handle(IPC.IDENTITY_CREDENTIALS_LIST, async () => {
+    return ((await loadIdentity()).credentials ?? []).map((c: any) => ({ ...c, valuePlain: undefined, hasValue: true }));
   });
-  ipcMain.handle(IPC.IDENTITY_CREDENTIAL_ADD, (_e: any, label: string, type: string, service: string, valuePlain: string) => {
-    const id = loadIdentity();
+  ipcMain.handle(IPC.IDENTITY_CREDENTIAL_ADD, async (_e: any, label: string, type: string, service: string, valuePlain: string) => {
+    const id = await loadIdentity();
     id.credentials = id.credentials || [];
     id.credentials.push({ label, type, service, valuePlain, createdAt: new Date().toISOString() });
-    saveIdentity(id);
+    await saveIdentity(id);
   });
-  ipcMain.handle(IPC.IDENTITY_CREDENTIAL_DELETE, (_e: any, label: string, service: string) => {
-    const id = loadIdentity();
+  ipcMain.handle(IPC.IDENTITY_CREDENTIAL_DELETE, async (_e: any, label: string, service: string) => {
+    const id = await loadIdentity();
     id.credentials = (id.credentials || []).filter((c: any) => !(c.label === label && c.service === service));
-    saveIdentity(id);
+    await saveIdentity(id);
   });
 
   // ── Calendar (stub) ──────────────────────────────────────────────────────────
