@@ -17,6 +17,33 @@
 .no-drag { -webkit-app-region: no-drag; }
 textarea { field-sizing: content; }
 
+/* ── Chat nav chevrons: shimmer ── */
+@keyframes chevron-shimmer {
+  0%   { opacity: 0.18; filter: drop-shadow(0 0 0px rgba(255,255,255,0)); }
+  50%  { opacity: 0.70; filter: drop-shadow(0 0 6px rgba(255,255,255,0.55)); }
+  100% { opacity: 0.18; filter: drop-shadow(0 0 0px rgba(255,255,255,0)); }
+}
+.chat-nav-chevron {
+  animation: chevron-shimmer 2.8s ease-in-out infinite;
+  background: none;
+  border: none;
+  padding: 0;
+  cursor: pointer;
+  color: rgba(255,255,255,0.55);
+  position: absolute;
+  top: 50%;
+  transform: translateY(-50%);
+  z-index: 20;
+  line-height: 0;
+  pointer-events: auto;
+}
+.chat-nav-chevron:hover {
+  animation: none;
+  opacity: 1;
+  color: #fff;
+  filter: drop-shadow(0 0 8px rgba(255,255,255,0.7));
+}
+
 /* ── Tab close button: show on tab hover ── */
 .tab-close-btn { opacity: 0 !important; }
 *:hover > .tab-close-btn { opacity: 0.6 !important; }

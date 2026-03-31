@@ -1,0 +1,105 @@
+{
+  "version": "1.0",
+  "superpowers": [
+    {
+      "id": "repo-audit",
+      "name": "Repo Audit",
+      "description": "Audit live runtime paths and separate active behavior from stale config.",
+      "priority": 95,
+      "triggers": ["audit", "architecture", "implementation", "enhance", "performance", "capability", "prompt", "tool", "skill", "codex"],
+      "tool_groups": ["coding", "core", "full"],
+      "executors": ["agentLoop", "codex"],
+      "providers": ["anthropic", "openai", "gemini", "any"],
+      "min_model_tier": "standard",
+      "skill_ids": ["repo-audit"],
+      "prompt": "Identify the live execution path before drawing conclusions. Prioritize prompt assembly, tool selection, context shaping, recovery logic, and session management.",
+      "fallback": "If execution is limited, focus on concrete runtime paths and avoid speculative architecture claims.",
+      "provider_modes": {
+        "anthropic": "full",
+        "openai": "full",
+        "gemini": "full",
+        "any": "full"
+      },
+      "executor_modes": {
+        "agentLoop": "full",
+        "codex": "full",
+        "any": "limited"
+      }
+    },
+    {
+      "id": "browser-grounding",
+      "name": "Browser Grounding",
+      "description": "Prefer real browser evidence over memory for web and navigation tasks.",
+      "priority": 90,
+      "triggers": ["browser", "website", "url", "navigate", "search", "look up", "find info", "web"],
+      "tool_groups": ["browser", "full"],
+      "executors": ["agentLoop"],
+      "providers": ["anthropic", "openai", "gemini", "any"],
+      "min_model_tier": "standard",
+      "skill_ids": ["browser-grounding"],
+      "prompt": "Inspect the live page or search result before answering. Treat navigation as intermediate, not completion.",
+      "fallback": "If direct interaction is constrained, extract the cheapest grounding signal first and summarize confirmed facts only.",
+      "provider_modes": {
+        "anthropic": "full",
+        "openai": "full",
+        "gemini": "full",
+        "any": "limited"
+      },
+      "executor_modes": {
+        "agentLoop": "full",
+        "codex": "disabled",
+        "any": "limited"
+      }
+    },
+    {
+      "id": "coding-execution",
+      "name": "Coding Execution",
+      "description": "Read code before changing it, keep edits targeted, and verify results after changes.",
+      "priority": 92,
+      "triggers": ["code", "debug", "refactor", "fix", "test", "typescript", "javascript", "python"],
+      "tool_groups": ["coding", "full"],
+      "executors": ["agentLoop", "codex"],
+      "providers": ["anthropic", "openai", "gemini", "any"],
+      "min_model_tier": "standard",
+      "skill_ids": ["coding-execution"],
+      "prompt": "Inspect the relevant implementation path, make targeted edits, and verify outcomes with tests or type checks when available.",
+      "fallback": "If editing is not available, produce a concrete change plan tied to exact files and runtime behavior.",
+      "provider_modes": {
+        "anthropic": "full",
+        "openai": "full",
+        "gemini": "full",
+        "any": "full"
+      },
+      "executor_modes": {
+        "agentLoop": "full",
+        "codex": "full",
+        "any": "limited"
+      }
+    },
+    {
+      "id": "code-review",
+      "name": "Code Review",
+      "description": "Review changes for bugs, regressions, and missing tests before summarizing.",
+      "priority": 88,
+      "triggers": ["review", "pr", "pull request", "regression", "risk", "findings"],
+      "tool_groups": ["coding", "full"],
+      "executors": ["agentLoop", "codex"],
+      "providers": ["anthropic", "openai", "gemini", "any"],
+      "min_model_tier": "standard",
+      "skill_ids": ["code-review"],
+      "prompt": "Lead with findings, cite concrete files or behaviors, and keep summary secondary to risk identification.",
+      "fallback": "If the full diff is unavailable, state the inspection gap explicitly and limit claims to observed files.",
+      "provider_modes": {
+        "anthropic": "full",
+        "openai": "full",
+        "gemini": "full",
+        "any": "full"
+      },
+      "executor_modes": {
+        "agentLoop": "full",
+        "codex": "full",
+        "any": "limited"
+      }
+    }
+  ]
+}

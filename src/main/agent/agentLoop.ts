@@ -11,10 +11,13 @@ import type { LoopOptions, DispatchContext, ToolUseBlock } from './types';
 import type { MessageAttachment } from '../../shared/types';
 import { buildAppMappingSystemPrompt } from './appMapping';
 import { prepareAnthropicMessagesForSend } from '../core/providers/anthropicMessageProtocol';
+import { prepareGeminiMessagesForSend } from '../core/providers/geminiMessageProtocol';
 import { prepareOpenAIMessagesForSend } from '../core/providers/openAIMessageProtocol';
 import { buildCacheKey, getCachedResponse, setCachedResponse } from '../db/responseCache';
 import { getMemoryContext } from '../db/memory';
 import { checkBudget } from './spending-budget';
+import { buildPromptComposition } from '../skills/promptComposition';
+import { buildRecoveryGuidanceMessage, detectRecoveryFromTurn, detectStall as detectRecoveryStall } from './recoveryGuidance';
 
 const MAX_ITERATIONS = 50;
 // Maximum wall-clock time for a single agent run (5 minutes).
@@ -108,6 +111,17 @@ function normalizeHistoryForProvider(messages: any[], provider: LoopOptions['pro
       },
     });
     messages.splice(0, messages.length, ...repair.messages);
+    return;
+  }
+
+  if (provider === 'gemini') {
+    const repair = prepareGeminiMessagesForSend(messages, {
+      caller,
+      onRepair: (issues) => {
+        console.warn(`[agentLoop] Gemini protocol repaired in ${caller}: ${issues.join(' | ')}`);
+      },
+    });
+    messages.splice(0, messages.length, ...repair.messages);
   }
 }
 
@@ -143,9 +157,16 @@ export async function agentLoop(
 
   // 1. Classify
   const profile = classify(userMessage, options.forcedProfile);
+  const promptComposition = buildPromptComposition({
+    message: userMessage,
+    toolGroup: profile.toolGroup,
+    executor: 'agentLoop',
+    provider: options.provider,
+    modelTier: profile.modelTier,
+  });
 
   // 2. Build static prompt (once per run)
-  const baseStaticPrompt = buildStaticPrompt(profile, options.unrestrictedMode ?? false);
+  const baseStaticPrompt = buildStaticPrompt(profile, options.unrestrictedMode ?? false, promptComposition.promptBlock);
   const staticPrompt = profile.specialMode === 'app_mapping'
     ? await buildAppMappingSystemPrompt(baseStaticPrompt, {
         appName: profile.mappingTarget || 'target app',
@@ -220,6 +241,9 @@ export async function agentLoop(
   }
 
   let finalText = '';
+  // Tracks how many recovery guidance injections have occurred without new progress.
+  // When this reaches 2, a replanning turn is forced before further retries.
+  let recoveryCount = 0;
   // Tools discovered via search_tools accumulate across iterations so the model
   // can call them on subsequent turns (OpenAI/Gemini don't support defer_loading).
   let accumulatedTools: import('@anthropic-ai/sdk').default.Tool[] = [];
@@ -255,10 +279,13 @@ export async function agentLoop(
       // Stream text to renderer immediately while also accumulating
       // for the agent loop's internal state tracking.
       let turnText = '';
+      // Use a per-iteration signal that fires on both stop AND pause so that
+      // pausing immediately aborts the live LLM stream (not just the next iteration).
+      const iterSignal = control.iterationSignal();
       const iterOptions = {
         ...options,
         currentIteration: i + 1,
-        signal: control.signal,
+        signal: iterSignal,
         onText: (delta: string) => {
           turnText += delta;
           options.onText(delta);  // Forward immediately for live streaming
@@ -270,11 +297,34 @@ export async function agentLoop(
 
       // Call LLM — pass accumulated discovered tools so OpenAI/Gemini can call
       // tools that were returned by a previous search_tools invocation.
-      const { text, toolBlocks, stopReason, rawContent } = await streamLLM(
-        messages, staticPrompt, dynamicPrompt, profile,
-        iterOptions,
-        accumulatedTools,
-      );
+      let streamResult: Awaited<ReturnType<typeof streamLLM>>;
+      try {
+        streamResult = await streamLLM(
+          messages, staticPrompt, dynamicPrompt, profile,
+          iterOptions,
+          accumulatedTools,
+        );
+      } catch (err: any) {
+        // If the stream was aborted due to pause (not stop), block here until resumed,
+        // then retry the same iteration so the turn is not lost.
+        if (iterSignal.aborted && !control.signal.aborted) {
+          await control.waitIfPaused();
+          if (control.signal.aborted) break;
+          i--; // retry this iteration
+          continue;
+        }
+        throw err;
+      }
+      const { text, toolBlocks, stopReason, rawContent } = streamResult;
+
+      // If the signal aborted due to pause but streamLLM returned without throwing,
+      // discard partial output and wait for resume before retrying.
+      if (iterSignal.aborted && !control.signal.aborted) {
+        await control.waitIfPaused();
+        if (control.signal.aborted) break;
+        i--; // retry this iteration
+        continue;
+      }
 
       if (text) finalText = text;
 
@@ -325,6 +375,7 @@ export async function agentLoop(
       // Execute tools in parallel
       const dispatchResult = await dispatch(toolBlocks, ctx);
       const results = dispatchResult.results;
+      const recoveryKey = detectRecoveryFromTurn(toolBlocks, results) ?? detectRecoveryStall(ctx.allToolCalls);
 
       // Accumulate any tools discovered via search_tools so they stay in the
       // tool list for all subsequent iterations (critical for OpenAI/Gemini).
@@ -344,6 +395,17 @@ export async function agentLoop(
         messages.push(...toolResultMsg);
       } else {
         messages.push(toolResultMsg);
+      }
+      if (recoveryKey) {
+        messages.push({ role: 'user', content: buildRecoveryGuidanceMessage(recoveryKey) });
+        recoveryCount++;
+        if (recoveryCount >= 2) {
+          messages.push({ role: 'user', content: buildReplanMessage(userMessage, ctx) });
+          recoveryCount = 0;
+        }
+      } else {
+        // Any iteration without a recovery signal resets the counter — progress is being made.
+        recoveryCount = 0;
       }
 
       if (profile.specialMode === 'app_mapping' && options.provider !== 'anthropic') {
@@ -462,7 +524,11 @@ function buildUserMessage(
   attachments: MessageAttachment[] | undefined,
   provider: string,
 ): any {
-  if (!attachments?.length) return { role: 'user', content: text };
+  if (!attachments?.length) {
+    return provider === 'gemini'
+      ? { role: 'user', parts: [{ text }] }
+      : { role: 'user', content: text };
+  }
 
   if (provider === 'anthropic') {
     const blocks: any[] = [];
@@ -550,7 +616,14 @@ function buildAssistantContent(text: string, toolBlocks: ToolUseBlock[], provide
   // Gemini
   const parts: any[] = [];
   if (text) parts.push({ text });
-  for (const b of toolBlocks) parts.push({ functionCall: { name: b.name, args: b.input } });
+  for (const b of toolBlocks) {
+    // thoughtSignature is a Part-level field (sibling of functionCall), not inside it
+    const part: Record<string, unknown> = { functionCall: { name: b.name, args: b.input } };
+    if (b.thoughtSignature) {
+      part.thoughtSignature = b.thoughtSignature;
+    }
+    parts.push(part);
+  }
   return { role: 'model', parts };
 }
 
@@ -580,6 +653,38 @@ function buildToolResultMessage(toolBlocks: ToolUseBlock[], results: string[], p
       functionResponse: { name: b.name, response: { result: results[i] } },
     })),
   };
+}
+
+// ── Replanning ────────────────────────────────────────────────────────────────
+// Injected after 2 consecutive recovery guidance injections with no progress.
+// Forces the model to diagnose the root blocker and commit to a different approach
+// rather than continuing to retry the same failing strategy.
+function buildReplanMessage(originalGoal: string, ctx: DispatchContext): string {
+  const recentTools = ctx.allToolCalls.slice(-8);
+  const triedTools = [...new Set(recentTools.map(c => c.name))].join(', ');
+  const recentOutcomes = recentTools
+    .slice(-4)
+    .map(c => `  - ${c.name}: ${c.result.replace(/\s+/g, ' ').trim().slice(0, 120)}`)
+    .join('\n');
+
+  return [
+    '[REPLAN REQUIRED]',
+    'Recovery guidance has been applied but the task has not made progress. You must replan now.',
+    '',
+    `Original goal: ${originalGoal}`,
+    '',
+    `Tools tried recently: ${triedTools || 'none'}`,
+    'Recent outcomes:',
+    recentOutcomes || '  (none)',
+    '',
+    'Required steps:',
+    '1. State what has been tried and exactly why it failed (1-2 sentences, be specific).',
+    '2. Identify the root blocker — not "it didn\'t work" but the precise reason.',
+    '3. Propose a different approach that avoids the same blocker.',
+    '4. Execute that new approach immediately.',
+    '',
+    'If no viable alternative exists, state the exact blocker clearly and stop — do not retry the same approach again.',
+  ].join('\n');
 }
 
 // ── Test exports (tree-shaken in production builds) ───────────────────────────

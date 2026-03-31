@@ -3,14 +3,25 @@ import {
   closePendingAnthropicToolUses,
   prepareAnthropicMessagesForSend,
 } from './core/providers/anthropicMessageProtocol';
+import {
+  initExecutorState,
+  updateExecutorState,
+  getExecutorState,
+  getAllExecutorStates,
+  removeExecutorState,
+  type ExecutorRuntimeState,
+} from './core/executors/ExecutorRouter';
+import type { ExecutorId } from './core/executors/ExecutorRegistry';
+import { getExecutorConfig, type AgentLoopConfig } from './core/executors/ExecutorConfigStore';
 
 export interface ConvAgent {
   abort: AbortController;
   runId: string | null;
 }
 
-const MAX_SESSION_TURNS = 20;
-const MAX_MAPPING_SESSION_TURNS = 6;
+/** Fallback defaults — used only if config load fails. */
+const DEFAULT_MAX_SESSION_TURNS = 20;
+const DEFAULT_MAX_MAPPING_SESSION_TURNS = 6;
 
 /**
  * Encapsulates all per-conversation in-memory state that was previously
@@ -25,6 +36,8 @@ export class SessionManager {
   private sessions = new Map<string, any[]>();
   private convAgents = new Map<string, ConvAgent>();
   private _activeConversationId: string | null = null;
+  /** In-memory map of the most recent taskId for each conversation. */
+  private convTaskIds = new Map<string, string>();
 
   // ── Active conversation ────────────────────────────────────────────────────
 
@@ -89,7 +102,7 @@ export class SessionManager {
    * Prune a session to at most maxTurns user+assistant pairs.
    * Always cuts at a user-role boundary to avoid orphaned tool_result blocks.
    */
-  pruneSession(messages: any[], maxTurns = MAX_SESSION_TURNS): any[] {
+  pruneSession(messages: any[], maxTurns = DEFAULT_MAX_SESSION_TURNS): any[] {
     const maxMessages = maxTurns * 2;
     if (messages.length <= maxMessages) return messages;
     let start = messages.length - maxMessages;
@@ -99,7 +112,7 @@ export class SessionManager {
     return messages.slice(start);
   }
 
-  pruneSessionInPlace(id: string, maxTurns = MAX_SESSION_TURNS): any[] {
+  pruneSessionInPlace(id: string, maxTurns = DEFAULT_MAX_SESSION_TURNS): any[] {
     const session = this.getOrCreateSession(id);
     const pruned = this.pruneSession(session, maxTurns);
     if (pruned.length < session.length) {
@@ -108,12 +121,22 @@ export class SessionManager {
     return this.sessions.get(id)!;
   }
 
+  /** Read from AgentLoopConfig; falls back to compile-time defaults if config unavailable. */
   get maxSessionTurns(): number {
-    return MAX_SESSION_TURNS;
+    try {
+      return (getExecutorConfig('agentLoop') as AgentLoopConfig).maxSessionTurns ?? DEFAULT_MAX_SESSION_TURNS;
+    } catch {
+      return DEFAULT_MAX_SESSION_TURNS;
+    }
   }
 
+  /** Read from AgentLoopConfig; falls back to compile-time defaults if config unavailable. */
   get maxMappingSessionTurns(): number {
-    return MAX_MAPPING_SESSION_TURNS;
+    try {
+      return (getExecutorConfig('agentLoop') as AgentLoopConfig).maxMappingSessionTurns ?? DEFAULT_MAX_MAPPING_SESSION_TURNS;
+    } catch {
+      return DEFAULT_MAX_MAPPING_SESSION_TURNS;
+    }
   }
 
   // ── Anthropic session repair ───────────────────────────────────────────────
@@ -179,5 +202,88 @@ export class SessionManager {
       agent.abort.abort();
       this.convAgents.delete(id);
     }
+  }
+
+  /**
+   * Enforce same-conversation exclusivity and start a new execution slot.
+   *
+   * This is the single authoritative enforcement point for the 'exclusive'
+   * same-conversation policy. It:
+   *   1. Aborts any currently-running agent for this conversation.
+   *   2. Creates a fresh AbortController for the new run.
+   *   3. Initializes executor runtime state to 'running'.
+   *
+   * All CHAT_SEND execution paths must call this instead of calling
+   * abortAgent + getOrCreateAgent separately. This prevents future entry
+   * points from accidentally skipping the abort step.
+   *
+   * Returns the new ConvAgent (with a fresh AbortSignal).
+   */
+  startExclusive(conversationId: string, executorId: ExecutorId): ConvAgent {
+    // Step 1: abort any existing run for this conversation (exclusive policy)
+    this.abortAgent(conversationId);
+    // Step 2: create fresh agent slot
+    const agent: ConvAgent = { abort: new AbortController(), runId: null };
+    this.convAgents.set(conversationId, agent);
+    // Step 3: set runtime state — single source of truth for "what is running"
+    initExecutorState(conversationId, executorId);
+    updateExecutorState(conversationId, { status: 'running' });
+    return agent;
+  }
+
+  // ── Executor runtime state ─────────────────────────────────────────────────
+
+  /**
+   * Initialize or reset the executor runtime state for a conversation.
+   * Called at the start of each execution path in ChatIpc.
+   */
+  initExecutorState(conversationId: string, executorId: ExecutorId): ExecutorRuntimeState {
+    return initExecutorState(conversationId, executorId);
+  }
+
+  /**
+   * Transition the executor runtime state for a conversation.
+   * Used to track idle/running/paused/failed transitions.
+   */
+  updateExecutorState(
+    conversationId: string,
+    patch: Partial<Omit<ExecutorRuntimeState, 'lastChangedAt'>>,
+  ): ExecutorRuntimeState {
+    return updateExecutorState(conversationId, patch);
+  }
+
+  /** Get the current executor runtime state for a conversation. */
+  getExecutorState(conversationId: string): ExecutorRuntimeState | undefined {
+    return getExecutorState(conversationId);
+  }
+
+  /** Get all tracked executor states (for diagnostics / settings UI). */
+  getAllExecutorStates(): Map<string, ExecutorRuntimeState> {
+    return getAllExecutorStates();
+  }
+
+  /** Remove executor state when a conversation is deleted. */
+  removeExecutorState(conversationId: string): void {
+    removeExecutorState(conversationId);
+  }
+
+  // ── Task identity ──────────────────────────────────────────────────────────
+
+  /**
+   * Store the active taskId for a conversation.
+   * Called at the start of each CHAT_SEND execution.
+   */
+  updateTaskId(conversationId: string, taskId: string): void {
+    this.convTaskIds.set(conversationId, taskId);
+  }
+
+  /** Get the most recently started taskId for a conversation (in-memory only). */
+  getActiveTaskId(conversationId: string): string | null {
+    return this.convTaskIds.get(conversationId) ?? null;
+  }
+
+  /** Clear the taskId when a conversation is deleted. */
+  removeTaskId(conversationId: string): void {
+    this.convTaskIds.delete(conversationId);
   }
 }

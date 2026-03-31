@@ -11,8 +11,14 @@ import { truncateBrowserResult } from './core/cli/truncate';
 import { buildSharedSystemPrompt } from './core/cli/systemPrompt';
 import { executeGuiInteract, DESKTOP_TOOL_NAMES, renderCapabilities } from './core/desktop';
 import { evaluatePolicy } from './agent/policy-engine';
+import { checkBudget } from './agent/spending-budget';
+import { detectStall, detectRecoveryFromTurn, buildRecoveryGuidanceMessage } from './agent/recoveryGuidance';
+import { trimGeminiHistory } from './agent/historyTrimmer';
+import { initBrowserBudget, checkBrowserBudget, updateBrowserBudget, checkBrowserScreenshotPolicy } from './agent/browserBudget';
+import { getMemoryContext } from './db/memory';
 import { startRun, trackToolCall, trackToolResult, completeRun, failRun } from './runTracker';
-import type { ToolUseBlock, LLMTurn, LoopOptions } from './agent/types';
+import type { BrowserBudgetState, ToolCallRecord, ToolUseBlock, LLMTurn, LoopOptions } from './agent/types';
+import { prepareGeminiMessagesForSend } from './core/providers/geminiMessageProtocol';
 
 // ── Module-level constants (kept for reference) ───────────────────────────────
 // GEMINI_TOOLS is no longer used directly in the loop — tools are loaded on demand
@@ -20,6 +26,21 @@ import type { ToolUseBlock, LLMTurn, LoopOptions } from './agent/types';
 const GEMINI_TOOLS = null; // eslint-disable-line @typescript-eslint/no-unused-vars
 
 const MAX_TOOL_TURNS = 20;
+
+function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
+  return Promise.race([
+    promise,
+    new Promise<T>((_, reject) =>
+      setTimeout(() => reject(new Error(`Tool timed out after ${ms}ms: ${label}`)), ms)
+    ),
+  ]);
+}
+
+const TOOL_TIMEOUTS: Record<string, number> = {
+  browser: 60_000,
+  desktop: 15_000,
+  shell: 30_000,
+};
 
 // ── StreamParams type ────────────────────────────────────────────────────────
 
@@ -106,9 +127,22 @@ export async function streamGeminiChat({
     try {
         sessionMessages.push(userMessage);
 
+        // Inject memory context as a prefill pair so the model has relevant stored facts
+        const memoryContext = getMemoryContext(userText);
+        if (memoryContext) {
+            sessionMessages.push({ role: 'user', parts: [{ text: `[Memory context]\n${memoryContext}` }] });
+            sessionMessages.push({ role: 'model', parts: [{ text: 'Understood.' }] });
+        }
+
         let allToolCalls: any[] = [];
+        const toolCallHistory: ToolCallRecord[] = [];
+        const browserBudget: BrowserBudgetState = initBrowserBudget();
         let finalResponseText = '';
         let turns = 0;
+
+        // Build system prompt once — rebuilt per iteration is wasteful and adds latency
+        const caps = await renderCapabilities();
+        const systemPrompt = buildSharedSystemPrompt(unrestrictedMode, userText) + (caps ? `\n\nOS CONTEXT:\n${caps}` : '');
 
         // Build active tools list — start with search + pre-loaded shell tools
         let activeGeminiTools: any[] = [
@@ -125,10 +159,26 @@ export async function streamGeminiChat({
             turns++;
             if (signal.aborted) throw new Error('AbortError');
 
+            const budgetCheck = checkBudget(1);
+            if (!budgetCheck.allowed) {
+                throw new Error(`Budget exceeded: ${budgetCheck.periodLimit} cents limit reached for ${budgetCheck.blockedBy} period.`);
+            }
+
             sendThinking('Gemini is thinking…');
 
-            const caps = await renderCapabilities();
-            const systemPrompt = buildSharedSystemPrompt(unrestrictedMode) + (caps ? `\n\nOS CONTEXT:\n${caps}` : '');
+            trimGeminiHistory(sessionMessages);
+
+            // Inject iteration hint + stall detection before each LLM call
+            {
+                const hints: string[] = [`[Iteration ${turns} | Tools called so far: ${toolCallHistory.length}]`];
+                if (turns >= 15) hints.push('You are approaching the iteration limit. Begin wrapping up and produce a final answer.');
+                if (detectStall(toolCallHistory)) {
+                    hints.push('Stall detected: you are repeating the same tool pattern without new evidence. Change strategy immediately.');
+                }
+                const hintText = hints.join('\n');
+                sessionMessages.push({ role: 'user', parts: [{ text: hintText }] });
+                sessionMessages.push({ role: 'model', parts: [{ text: 'Understood.' }] });
+            }
 
             const chat = ai.chats.create({
                 model: modelRegistryId,
@@ -146,25 +196,30 @@ export async function streamGeminiChat({
             });
 
             let turnText = '';
-            let functionCalls: any[] = [];
+            // Collect raw parts from candidates to preserve thoughtSignature.
+            // chunk.functionCalls strips thoughtSignature; raw parts carry it.
+            const rawParts: any[] = [];
 
             for await (const chunk of responseStream) {
                 if (signal.aborted) throw new Error('AbortError');
                 if (chunk.text) {
                     turnText += chunk.text;
                 }
-                if (chunk.functionCalls && chunk.functionCalls.length > 0) {
-                    functionCalls.push(...chunk.functionCalls);
+                const chunkParts: any[] = chunk.candidates?.[0]?.content?.parts ?? [];
+                for (const p of chunkParts) {
+                    if (p.functionCall) rawParts.push(p);
                 }
             }
 
-            // Record assistant's turn
+            // functionCalls derived from raw parts for tool execution below
+            const functionCalls: any[] = rawParts.map((p: any) => p.functionCall);
+
+            // Record assistant's turn — use raw parts to preserve thoughtSignature
             const assistantMessage: any = { role: 'model', parts: [] };
             if (turnText) assistantMessage.parts.push({ text: turnText });
-            if (functionCalls.length > 0) {
-                for (const fc of functionCalls) {
-                    assistantMessage.parts.push({ functionCall: fc });
-                }
+            // Push each raw part as-is; thoughtSignature is a sibling of functionCall
+            for (const p of rawParts) {
+                assistantMessage.parts.push(p);
             }
 
             if (assistantMessage.parts.length === 0) {
@@ -187,9 +242,23 @@ export async function streamGeminiChat({
                 if (line) sendThinking(line.length > 80 ? line.slice(0, 77) + '…' : line);
             }
 
-            // Execute tool calls
-            const toolResultParts: any[] = [];
-            for (const fc of functionCalls) {
+            // Browser budget check before executing tools this turn
+            const turnToolBlocks: ToolUseBlock[] = functionCalls.map((fc: any, i: number) => ({
+                id: `tc-budget-${i}`,
+                name: fc.name,
+                input: (fc.args ?? {}) as Record<string, unknown>,
+            }));
+            const budgetViolation = unrestrictedMode
+                ? null
+                : checkBrowserBudget(turnToolBlocks, browserBudget)
+                  ?? checkBrowserScreenshotPolicy(turnToolBlocks, userText, toolCallHistory);
+            if (budgetViolation) {
+                sessionMessages.push({ role: 'user', parts: [{ text: `[POLICY] ${budgetViolation}` }] });
+                continue;
+            }
+
+            // Execute tool calls in parallel (order preserved via index)
+            const toolResultParts: any[] = await Promise.all(functionCalls.map(async (fc: any) => {
                 const uiName = fc.name;
                 const detail = fc.name === 'shell_exec' ? fc.args.command : JSON.stringify(fc.args);
                 const tcId = `tc-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`;
@@ -209,7 +278,6 @@ export async function streamGeminiChat({
                     const searchArgs: Record<string, unknown> = fc.args as Record<string, unknown>;
                     const searchResultStr = executeSearchTools(searchArgs);
                     const parsed = JSON.parse(searchResultStr);
-                    // Add newly discovered tools to active declarations
                     if (parsed.schemas) {
                         const currentDecls = (activeGeminiTools[0] as any).functionDeclarations as any[];
                         for (const schema of parsed.schemas) {
@@ -220,44 +288,27 @@ export async function streamGeminiChat({
                     }
                     if (!webContents.isDestroyed()) {
                         webContents.send(IPC_EVENTS.CHAT_TOOL_ACTIVITY, {
-                            id: tcId,
-                            name: 'search_tools',
-                            status: 'success',
+                            id: tcId, name: 'search_tools', status: 'success',
                             detail: `Loaded: ${parsed.tools_loaded?.join(', ') ?? 'catalog'}`,
                         });
                     }
-                    toolResultParts.push({
-                        functionResponse: {
-                            name: 'search_tools',
-                            response: { result: searchResultStr },
-                        }
-                    });
-                    continue;
+                    return { functionResponse: { name: 'search_tools', response: { result: searchResultStr } } };
                 }
 
                 let resultStr: string;
 
                 // ── Policy gate ───────────────────────────────────────────────
-                const policyDecision = evaluatePolicy(
-                    fc.name,
-                    fc.args as Record<string, unknown>,
-                );
+                const policyDecision = evaluatePolicy(fc.name, fc.args as Record<string, unknown>);
 
                 if (policyDecision.effect === 'deny') {
                     resultStr = `[POLICY DENIED] ${policyDecision.reason} (rule: ${policyDecision.ruleId ?? 'none'}, profile: ${policyDecision.profileName})`;
                     if (!webContents.isDestroyed()) {
                         webContents.send(IPC_EVENTS.CHAT_TOOL_ACTIVITY, {
-                            id: tcId,
-                            name: uiName,
-                            status: 'error',
-                            detail: `Policy denied: ${policyDecision.reason}`,
-                            policyDenied: true,
+                            id: tcId, name: uiName, status: 'error',
+                            detail: `Policy denied: ${policyDecision.reason}`, policyDenied: true,
                         });
                     }
-                    toolResultParts.push({
-                        functionResponse: { name: fc.name, response: { result: resultStr, error: true } },
-                    });
-                    continue;
+                    return { functionResponse: { name: fc.name, response: { result: resultStr, error: true } } };
                 }
 
                 if (policyDecision.effect === 'require_approval') {
@@ -265,51 +316,69 @@ export async function streamGeminiChat({
                         `Tool "${fc.name}" was not executed. Change the policy profile in Settings to allow it.`;
                     if (!webContents.isDestroyed()) {
                         webContents.send(IPC_EVENTS.CHAT_TOOL_ACTIVITY, {
-                            id: tcId,
-                            name: uiName,
-                            status: 'error',
-                            detail: `Requires approval: ${policyDecision.reason}`,
-                            policyHeld: true,
+                            id: tcId, name: uiName, status: 'error',
+                            detail: `Requires approval: ${policyDecision.reason}`, policyHeld: true,
                         });
                     }
-                    toolResultParts.push({
-                        functionResponse: { name: fc.name, response: { result: resultStr } },
-                    });
-                    continue;
+                    return { functionResponse: { name: fc.name, response: { result: resultStr } } };
                 }
                 // ── End policy gate ───────────────────────────────────────────────
 
+                let screenshotInlineData: { mimeType: string; data: string } | null = null;
                 if (fc.name.startsWith('browser_') && browserService) {
-                    const output = await executeBrowserTool(fc.name, fc.args as Record<string, unknown>, browserService);
-                    resultStr = truncateBrowserResult(JSON.stringify(output));
+                    const output = await withTimeout(executeBrowserTool(fc.name, fc.args as Record<string, unknown>, browserService, conversationId), TOOL_TIMEOUTS.browser, fc.name);
+                    // Screenshots: extract inlineData so Gemini can actually see the image
+                    if (fc.name === 'browser_screenshot' && (output as any)?.data) {
+                        const shot = output as { type: string; mimeType: string; data: string; width?: number; height?: number };
+                        resultStr = JSON.stringify({ ok: true, width: shot.width, height: shot.height, note: 'Screenshot captured — image provided as vision content.' });
+                        screenshotInlineData = { mimeType: shot.mimeType, data: shot.data };
+                    } else {
+                        resultStr = truncateBrowserResult(JSON.stringify(output));
+                    }
                 } else if (DESKTOP_TOOL_NAMES.has(fc.name)) {
-                    resultStr = await executeGuiInteract(fc.args as Record<string, unknown>);
+                    resultStr = await withTimeout(executeGuiInteract(fc.args as Record<string, unknown>), TOOL_TIMEOUTS.desktop, fc.name);
                 } else {
-                    resultStr = await executeShellTool(fc.name, fc.args as Record<string, unknown>);
+                    resultStr = await withTimeout(executeShellTool(fc.name, fc.args as Record<string, unknown>), TOOL_TIMEOUTS.shell, fc.name);
                 }
 
                 if (runId && eventId) {
                     trackToolResult(runId, eventId, resultStr.slice(0, 200), Date.now() - tcStartMs);
                 }
 
-                toolResultParts.push({
-                    functionResponse: {
-                        name: fc.name,
-                        response: { result: resultStr },
-                    }
-                });
-
+                toolCallHistory.push({ id: tcId, name: fc.name, input: fc.args as Record<string, unknown>, result: resultStr });
                 const successTcObj = { ...tcObj, status: 'success' as const, detail: resultStr.substring(0, 500), output: resultStr };
                 if (!webContents.isDestroyed()) {
                     webContents.send(IPC_EVENTS.CHAT_TOOL_ACTIVITY, successTcObj);
                 }
-            }
+                // For screenshots, inject inlineData as an extra part alongside the functionResponse
+                const resultPart: any = { functionResponse: { name: fc.name, response: { result: resultStr } } };
+                if (screenshotInlineData) {
+                    return [resultPart, { inlineData: screenshotInlineData }];
+                }
+                return resultPart;
+            }));
+
+            // Flatten: screenshot returns [functionResponse, inlineData] pair; others return single part
+            const flatToolResultParts: any[] = (toolResultParts as any[]).flat();
+
+            // Extract result strings for budget tracking (look for functionResponse parts only)
+            const turnResults = flatToolResultParts
+                .filter((p: any) => p.functionResponse)
+                .map((p: any) => p.functionResponse?.response?.result ?? '');
+            updateBrowserBudget(turnToolBlocks, turnResults, browserBudget);
+
+            // Inject recovery guidance if a browser failure pattern was detected
+            const recoveryKey = detectRecoveryFromTurn(turnToolBlocks, turnResults);
 
             // Reply with tool results
             sessionMessages.push({
                 role: 'user',
-                parts: toolResultParts,
+                parts: flatToolResultParts,
             });
+            if (recoveryKey) {
+                sessionMessages.push({ role: 'user', parts: [{ text: buildRecoveryGuidanceMessage(recoveryKey) }] });
+                sessionMessages.push({ role: 'model', parts: [{ text: 'Understood, adjusting approach.' }] });
+            }
             // The while loop continues and will send these results to the model
         }
 
@@ -347,6 +416,12 @@ export async function streamGeminiLLM(
   options: LoopOptions,
 ): Promise<LLMTurn> {
   const ai = new GoogleGenAI({ apiKey: options.apiKey });
+  const prepared = prepareGeminiMessagesForSend([...sessionMessages], {
+    caller: 'streamGeminiLLM',
+    onRepair: (issues) => {
+      console.warn(`[gemini] repaired request history: ${issues.join(' | ')}`);
+    },
+  }).messages;
 
   const chat = ai.chats.create({
     model: options.model,
@@ -355,15 +430,17 @@ export async function streamGeminiLLM(
       tools,
       temperature: 0,
     },
-    history: sessionMessages.slice(0, -1),
+    history: prepared.slice(0, -1),
   });
 
   const responseStream = await chat.sendMessageStream({
-    message: sessionMessages[sessionMessages.length - 1].parts,
+    message: prepared[prepared.length - 1]?.parts ?? [],
   });
 
   let text = '';
-  const functionCalls: any[] = [];
+  // Collect raw parts to preserve thoughtSignature alongside functionCall.
+  // chunk.functionCalls strips it; raw parts carry it as a sibling field.
+  const rawFcParts: any[] = [];
 
   for await (const chunk of responseStream) {
     if (options.signal?.aborted) throw new Error('AbortError');
@@ -371,13 +448,18 @@ export async function streamGeminiLLM(
       text += chunk.text;
       options.onText(chunk.text);
     }
-    if (chunk.functionCalls?.length) functionCalls.push(...chunk.functionCalls);
+    const chunkParts: any[] = chunk.candidates?.[0]?.content?.parts ?? [];
+    for (const p of chunkParts) {
+      if (p.functionCall) rawFcParts.push(p);
+    }
   }
 
-  const toolBlocks: ToolUseBlock[] = functionCalls.map((fc, i) => ({
+  const toolBlocks: ToolUseBlock[] = rawFcParts.map((p, i) => ({
     id: `gc-${Date.now()}-${i}`,
-    name: fc.name,
-    input: fc.args as Record<string, unknown>,
+    name: p.functionCall.name,
+    input: p.functionCall.args as Record<string, unknown>,
+    // thoughtSignature lives on the Part, not inside functionCall
+    thoughtSignature: typeof p.thoughtSignature === 'string' ? p.thoughtSignature : undefined,
   }));
 
   return { text, toolBlocks };

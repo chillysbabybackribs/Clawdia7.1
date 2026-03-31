@@ -2,7 +2,7 @@ import { BrowserWindow, ipcMain, shell } from 'electron';
 import Anthropic from '@anthropic-ai/sdk';
 import { IPC, IPC_EVENTS } from '../ipc-channels';
 import { DEFAULT_MODEL_BY_PROVIDER, resolveModelForTier } from '../../shared/model-registry';
-import type { Message, MessageAttachment, PromptDebugSnapshot, FeedItem, ToolCall } from '../../shared/types';
+import type { Message, MessageAttachment, PromptDebugSnapshot, FeedItem, ToolCall, ConcurrentFeedSource } from '../../shared/types';
 import { agentLoop } from '../agent/agentLoop';
 import { PipelineOrchestrator } from '../core/PipelineOrchestrator';
 import { classify, isAppMappingRequest, isContinuationRequest, extractAppMappingTarget } from '../agent/classify';
@@ -27,6 +27,18 @@ import { runCodexCli } from '../codexCliClient';
 import type { SessionManager } from '../SessionManager';
 import type { ElectronBrowserService } from '../core/browser/ElectronBrowserService';
 import type { TerminalSessionController } from '../core/terminal/TerminalSessionController';
+import { routeExecutor } from '../core/executors/ExecutorRouter';
+import { runConcurrent } from '../core/executors/ConcurrentExecutor';
+import { getExecutorConfig } from '../core/executors/ExecutorConfigStore';
+import type { ConcurrentConfig } from '../core/executors/ExecutorConfigStore';
+import {
+  createNewTask,
+  linkRunToTask,
+  completeTask,
+  failTask,
+  cancelTask,
+} from '../taskTracker';
+import { registerRun, completeRun, failRun } from '../runTracker';
 
 // ── Formatting helpers ────────────────────────────────────────────────────────
 
@@ -64,14 +76,14 @@ export function formatExternalPromptForTerminal(label: string, prompt: string): 
 
 // ── Feed helpers ──────────────────────────────────────────────────────────────
 
-function appendFeedText(feed: FeedItem[], chunk: string): void {
+function appendFeedText(feed: FeedItem[], chunk: string, source?: ConcurrentFeedSource): void {
   if (!chunk) return;
   const last = feed[feed.length - 1];
-  if (last?.kind === 'text' && last.isStreaming) {
+  if (last?.kind === 'text' && last.isStreaming && last.source === source) {
     last.text += chunk;
     return;
   }
-  feed.push({ kind: 'text', text: chunk, isStreaming: true });
+  feed.push({ kind: 'text', text: chunk, isStreaming: true, source });
 }
 
 function upsertFeedTool(feed: FeedItem[], activity: ToolCall): void {
@@ -303,6 +315,8 @@ export function registerChatIpc(
   ipcMain.handle(IPC.CHAT_DELETE, (_e, id: string) => {
     deleteConversation(id);
     sessionManager.deleteSession(id);
+    sessionManager.removeExecutorState(id);
+    sessionManager.removeTaskId(id);
     if (sessionManager.activeConversationId === id) sessionManager.activeConversationId = null;
     // Release the conversation-scoped browser tab so it doesn't persist after deletion.
     browserService.releaseTab(id).catch(() => {});
@@ -317,8 +331,8 @@ export function registerChatIpc(
   ipcMain.handle(IPC.RUN_EVENTS, (_e, runId: string) => getRunEvents(runId));
 
   // ── Send ────────────────────────────────────────────────────────────────────
-  ipcMain.handle(IPC.CHAT_SEND, async (_event, payload: { text: string; attachments?: MessageAttachment[]; conversationId?: string | null }) => {
-    const { text, attachments, conversationId } = payload || { text: '' };
+  ipcMain.handle(IPC.CHAT_SEND, async (_event, payload: { text: string; attachments?: MessageAttachment[]; conversationId?: string | null; provider?: string; model?: string }) => {
+    const { text, attachments, conversationId, provider: payloadProvider, model: payloadModel } = payload || { text: '' };
 
     let id: string;
     if (conversationId) {
@@ -337,23 +351,48 @@ export function registerChatIpc(
     const userMsgId = `msg-u-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
     const userMsgTs = new Date().toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
     const nowTs = new Date().toISOString();
+    const conversationTitle = text.trim().slice(0, 60) || 'New conversation';
     const userMsg: Message = { id: userMsgId, role: 'user', content: text, timestamp: userMsgTs, attachments };
     addMessage({ id: userMsgId, conversation_id: id, role: 'user', content: JSON.stringify(userMsg), created_at: nowTs });
-    updateConversation(id, { updated_at: nowTs });
+    updateConversation(id, { updated_at: nowTs, title: conversationTitle });
 
     const sendEvent = (channel: string, payload: unknown) => {
       const w = getMainWindow();
       if (w && !w.isDestroyed()) w.webContents.send(channel, payload);
     };
 
-    // ── Claude Code path ────────────────────────────────────────────────────
+    // ── Executor routing ────────────────────────────────────────────────────
     const conv = getConversation(id);
-    if (conv?.mode === 'claude_terminal') {
+    const { executorId, usedFallback, fallbackReason } = routeExecutor(conv?.mode ?? 'chat');
+    if (usedFallback && fallbackReason) {
+      console.warn(`[ChatIpc] executor routing fallback: ${fallbackReason}`);
+    }
+    // startExclusive enforces same-conversation exclusivity: aborts any prior
+    // run, creates a fresh AbortController, and initialises runtime state to
+    // 'running' — all as one atomic operation.
+    const convAgent = sessionManager.startExclusive(id, executorId);
+    sessionManager.activeConversationId = id;
+
+    // ── Task identity ───────────────────────────────────────────────────────
+    // Each explicit user send creates a new task. This is the simplest stable
+    // rule — no semantic inference, no ambiguity about continuation.
+    const taskId = createNewTask(id, text, executorId);
+    sessionManager.updateTaskId(id, taskId);
+
+    // ── Claude Code path ────────────────────────────────────────────────────
+    if (executorId === 'claudeCode') {
       sendEvent(IPC_EVENTS.CHAT_THINKING, { thought: 'Claude Code is thinking…', conversationId: id });
       appendPromptTail(id, formatExternalPromptForTerminal('Claude Code', text));
 
       // Load persisted session id so resume survives app restarts.
-      const persistedSessionId = conv.claude_code_session_id ?? null;
+      const persistedSessionId = conv?.claude_code_session_id ?? null;
+
+      // Claude Code generates its own internal run IDs; we create a DB-tracked
+      // run here so the task ↔ run linkage is consistent across all executors.
+      const ccRunId = `run-cc-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+      registerRun(ccRunId, id, 'anthropic', 'claude-code', taskId);
+      linkRunToTask(taskId, ccRunId);
+      sessionManager.updateExecutorState(id, { runId: ccRunId });
 
       try {
         const { finalText, sessionId: newSessionId } = await runClaudeCode({
@@ -362,6 +401,7 @@ export function registerChatIpc(
           attachments,
           skipPermissions: loadSettings().unrestrictedMode,
           persistedSessionId,
+          signal: convAgent.abort.signal,
           onText: (delta) => sendEvent(IPC_EVENTS.CHAT_STREAM_TEXT, { delta, conversationId: id }),
           onToolActivity: (activity) => sendEvent(IPC_EVENTS.CHAT_TOOL_ACTIVITY, { ...activity, conversationId: id }),
         });
@@ -371,6 +411,14 @@ export function registerChatIpc(
         if (newSessionId && newSessionId !== persistedSessionId) {
           updateConversation(id, { claude_code_session_id: newSessionId });
         }
+
+        completeRun(ccRunId, 0, 0);
+        completeTask(taskId);
+        sessionManager.updateExecutorState(id, {
+          status: 'idle',
+          runId: null,
+          hasPersistentSession: Boolean(newSessionId ?? persistedSessionId),
+        });
 
         if (finalText) {
           const assistantMsgId = `msg-a-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
@@ -391,26 +439,153 @@ export function registerChatIpc(
           updateConversation(id, { claude_code_session_id: null });
         }
 
+        failRun(ccRunId, err.message);
+        failTask(taskId, err.message);
+        sessionManager.updateExecutorState(id, { status: 'failed', runId: null, hasPersistentSession: false });
         sendEvent(IPC_EVENTS.CHAT_STREAM_END, { ok: false, error: err.message, conversationId: id });
         return { response: '', error: err.message, conversationId: id };
       }
     }
 
+    // ── Concurrent path (Planner → Workers → Synthesizer) ─────────────────
+    if (executorId === 'concurrent') {
+      sendEvent(IPC_EVENTS.CHAT_THINKING, { thought: 'Planning concurrent execution…', conversationId: id });
+      appendPromptTail(id, formatExternalPromptForTerminal('Concurrent', text));
+
+      const concurrentConfig = getExecutorConfig('concurrent') as ConcurrentConfig;
+      const assistantFeed: FeedItem[] = [];
+      const assistantToolCalls = new Map<string, ToolCall>();
+
+      // Apply the wall-clock timeout from config (0 = no limit).
+      const timeoutMs = concurrentConfig.timeoutMs;
+      let timeoutHandle: ReturnType<typeof setTimeout> | null = null;
+      let timeoutController: AbortController | null = null;
+      let concurrentSignal = convAgent.abort.signal;
+      if (timeoutMs > 0) {
+        timeoutController = new AbortController();
+        timeoutHandle = setTimeout(() => timeoutController!.abort(), timeoutMs);
+        // Chain: abort if either user aborts or timeout fires.
+        concurrentSignal = AbortSignal.any
+          ? AbortSignal.any([convAgent.abort.signal, timeoutController.signal])
+          : convAgent.abort.signal; // fallback: user abort only (Node < 20.3)
+        convAgent.abort.signal.addEventListener('abort', () => {
+          if (timeoutHandle) clearTimeout(timeoutHandle);
+          timeoutController!.abort();
+        }, { once: true });
+      }
+
+      try {
+        const result = await runConcurrent({
+          conversationId: id,
+          taskId,
+          prompt: text,
+          attachments,
+          signal: concurrentSignal,
+          strategy: concurrentConfig.strategy,
+          synthesize: concurrentConfig.synthesize,
+          onText: (delta, source) => {
+            appendFeedText(assistantFeed, delta, source);
+            sendEvent(IPC_EVENTS.CHAT_STREAM_TEXT, { delta, conversationId: id, source });
+          },
+          onToolActivity: (activity) => {
+            assistantToolCalls.set(activity.id, activity);
+            upsertFeedTool(assistantFeed, activity);
+            sendEvent(IPC_EVENTS.CHAT_TOOL_ACTIVITY, { ...activity, conversationId: id });
+          },
+          onThinking: (thought) => {
+            sendEvent(IPC_EVENTS.CHAT_THINKING, { thought, conversationId: id });
+          },
+          onStateChanged: (state) => {
+            sendEvent(IPC_EVENTS.SWARM_STATE_CHANGED, { ...state, conversationId: id });
+          },
+          onExecutionStart: (plan) => {
+            sendEvent(IPC_EVENTS.CONCURRENT_EXECUTION_START, { plan, conversationId: id });
+          },
+          onExecutionEnd: () => {
+            sendEvent(IPC_EVENTS.CONCURRENT_EXECUTION_END, { conversationId: id });
+          },
+        });
+
+        sendEvent(IPC_EVENTS.CHAT_STREAM_END, { ok: true, conversationId: id });
+        completeTask(taskId);
+        sessionManager.updateExecutorState(id, { status: 'idle', runId: null });
+
+        if (result.finalText) {
+          const assistantMsgId = `msg-a-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+          const assistantMsgTs = new Date().toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+          const assistantMsg: Message = {
+            id: assistantMsgId,
+            role: 'assistant',
+            content: result.finalText,
+            timestamp: assistantMsgTs,
+            feed: finalizeFeed(assistantFeed),
+            toolCalls: Array.from(assistantToolCalls.values()),
+          };
+          const nowStr = new Date().toISOString();
+          addMessage({ id: assistantMsgId, conversation_id: id, role: 'assistant', content: JSON.stringify(assistantMsg), created_at: nowStr });
+          updateConversation(id, { updated_at: nowStr });
+        }
+        return { response: result.finalText, conversationId: id };
+      } catch (e: unknown) {
+        const err = e instanceof Error ? e : new Error(String(e));
+        if (err.name === 'AbortError' || err.message === 'AbortError') {
+          cancelTask(taskId);
+          sessionManager.updateExecutorState(id, { status: 'idle', runId: null });
+          sendEvent(IPC_EVENTS.CHAT_STREAM_END, { ok: false, cancelled: true, conversationId: id });
+          return { response: '', error: 'Stopped', conversationId: id };
+        }
+        failTask(taskId, err.message);
+        sessionManager.updateExecutorState(id, { status: 'failed', runId: null });
+        sendEvent(IPC_EVENTS.CHAT_STREAM_END, { ok: false, error: err.message, conversationId: id });
+        return { response: '', error: err.message, conversationId: id };
+      } finally {
+        if (timeoutHandle) clearTimeout(timeoutHandle);
+      }
+    }
+
     // ── Codex path ──────────────────────────────────────────────────────────
-    if (conv?.mode === 'codex_terminal') {
+    if (executorId === 'codex') {
       sendEvent(IPC_EVENTS.CHAT_THINKING, { thought: 'Codex is thinking…', conversationId: id });
       appendPromptTail(id, formatExternalPromptForTerminal('Codex', text));
+
+      const codexRunId = `run-cdx-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+      registerRun(codexRunId, id, 'openai', 'codex', taskId);
+      linkRunToTask(taskId, codexRunId);
+      sessionManager.updateExecutorState(id, { runId: codexRunId });
+      const assistantFeed: FeedItem[] = [];
+      const assistantToolCalls = new Map<string, ToolCall>();
+
       try {
         const { finalText } = await runCodexCli({
           conversationId: id,
           prompt: text,
-          onText: (delta) => sendEvent(IPC_EVENTS.CHAT_STREAM_TEXT, { delta, conversationId: id }),
+          onText: (delta) => {
+            appendFeedText(assistantFeed, delta);
+            sendEvent(IPC_EVENTS.CHAT_STREAM_TEXT, { delta, conversationId: id });
+          },
+          onToolActivity: (activity) => {
+            assistantToolCalls.set(activity.id, activity);
+            upsertFeedTool(assistantFeed, activity);
+            sendEvent(IPC_EVENTS.CHAT_TOOL_ACTIVITY, { ...activity, conversationId: id });
+          },
         });
         sendEvent(IPC_EVENTS.CHAT_STREAM_END, { ok: true, conversationId: id });
+        completeRun(codexRunId, 0, 0);
+        completeTask(taskId);
+        // Codex manages its own thread persistence internally; no session id is
+        // stored in Clawdia's DB, so hasPersistentSession remains false.
+        sessionManager.updateExecutorState(id, { status: 'idle', runId: null, hasPersistentSession: false });
         if (finalText) {
           const assistantMsgId = `msg-a-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
           const assistantMsgTs = new Date().toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
-          const assistantMsg: Message = { id: assistantMsgId, role: 'assistant', content: finalText, timestamp: assistantMsgTs };
+          const assistantMsg: Message = {
+            id: assistantMsgId,
+            role: 'assistant',
+            content: finalText,
+            timestamp: assistantMsgTs,
+            feed: finalizeFeed(assistantFeed),
+            toolCalls: Array.from(assistantToolCalls.values()),
+          };
           const nowStr = new Date().toISOString();
           addMessage({ id: assistantMsgId, conversation_id: id, role: 'assistant', content: JSON.stringify(assistantMsg), created_at: nowStr });
           updateConversation(id, { updated_at: nowStr });
@@ -418,6 +593,9 @@ export function registerChatIpc(
         return { response: finalText, conversationId: id };
       } catch (e: unknown) {
         const err = e instanceof Error ? e : new Error(String(e));
+        failRun(codexRunId, err.message);
+        failTask(taskId, err.message);
+        sessionManager.updateExecutorState(id, { status: 'failed', runId: null });
         sendEvent(IPC_EVENTS.CHAT_STREAM_END, { ok: false, error: err.message, conversationId: id });
         return { response: '', error: err.message, conversationId: id };
       }
@@ -425,15 +603,22 @@ export function registerChatIpc(
 
     // ── Standard LLM path ──────────────────────────────────────────────────
     const settings = loadSettings();
-    if (settings.provider !== 'anthropic' && settings.provider !== 'gemini' && settings.provider !== 'openai') {
+    // Provider: prefer the value sent from the UI (user's live selection) over the saved default.
+    const resolvedProvider = (payloadProvider === 'anthropic' || payloadProvider === 'openai' || payloadProvider === 'gemini')
+      ? payloadProvider
+      : settings.provider;
+    if (resolvedProvider !== 'anthropic' && resolvedProvider !== 'gemini' && resolvedProvider !== 'openai') {
       return { response: '', error: 'Select a provider in Settings to use chat.' };
     }
-    const apiKey = settings.providerKeys[settings.provider as keyof typeof settings.providerKeys]?.trim();
-    if (!apiKey) return { response: '', error: `Add a ${settings.provider} API key in Settings.` };
+    const apiKey = settings.providerKeys[resolvedProvider as keyof typeof settings.providerKeys]?.trim();
+    if (!apiKey) return { response: '', error: `Add a ${resolvedProvider} API key in Settings.` };
 
-    const configuredModel = settings.models[settings.provider as keyof typeof settings.models]
-      ?? DEFAULT_MODEL_BY_PROVIDER[settings.provider as keyof typeof DEFAULT_MODEL_BY_PROVIDER];
-    const settings_provider = settings.provider as 'anthropic' | 'openai' | 'gemini';
+    // Model: if the UI sent an explicit model, use it directly (skip tier resolution).
+    // Otherwise fall back to the saved model for the provider.
+    const configuredModel = payloadModel
+      ?? settings.models[resolvedProvider as keyof typeof settings.models]
+      ?? DEFAULT_MODEL_BY_PROVIDER[resolvedProvider as keyof typeof DEFAULT_MODEL_BY_PROVIDER];
+    const settings_provider = resolvedProvider as 'anthropic' | 'openai' | 'gemini';
 
     const maxTurns = isAppMappingRequest(text) ? sessionManager.maxMappingSessionTurns : sessionManager.maxSessionTurns;
     let sessionMessages = sessionManager.pruneSessionInPlace(id, maxTurns);
@@ -442,16 +627,16 @@ export function registerChatIpc(
       sessionManager.closePendingToolUses(id, 'session_recovery');
     }
 
-    sessionManager.abortAgent(id);
-    const convAgent = sessionManager.getOrCreateAgent(id);
-    sessionManager.activeConversationId = id;
-
     const continuationForcedProfile = buildContinuationForcedProfile(text, sessionMessages);
     const taskProfile = classify(text, continuationForcedProfile ?? undefined);
-    const model = resolveModelForTier(taskProfile.modelTier, settings_provider, configuredModel);
+    // If the user explicitly picked a model from the UI, respect it exactly.
+    // Only apply tier-based resolution when falling back to saved settings.
+    const model = payloadModel
+      ? configuredModel
+      : resolveModelForTier(taskProfile.modelTier, settings_provider, configuredModel);
     const usePipeline = !isAppMappingRequest(text) && !(continuationForcedProfile?.specialMode === 'app_mapping') && PipelineOrchestrator.classifyIntent(text);
 
-    let result: { response: string; error?: string };
+    let result: { response: string; error?: string } = { response: '', error: 'Unknown failure' };
 
     if (usePipeline) {
       const pipelineMsgId = `msg-pipe-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
@@ -469,6 +654,7 @@ export function registerChatIpc(
           onText: (delta) => sendEvent(IPC_EVENTS.CHAT_STREAM_TEXT, { delta, conversationId: id }),
         });
         result = { response };
+        completeTask(taskId);
         sendEvent(IPC_EVENTS.CHAT_STREAM_END, { ok: true, conversationId: id });
         if (response) {
           const assistantMsgId = `msg-a-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
@@ -484,13 +670,24 @@ export function registerChatIpc(
       } catch (e: unknown) {
         const err = e instanceof Error ? e : new Error(String(e));
         result = { response: '', error: err.message };
-        sendEvent(IPC_EVENTS.CHAT_STREAM_END, { ok: false, error: err.message, conversationId: id });
+        if (err.name === 'AbortError' || err.message === 'AbortError') {
+          cancelTask(taskId);
+          sendEvent(IPC_EVENTS.CHAT_STREAM_END, { ok: false, cancelled: true, conversationId: id });
+        } else {
+          failTask(taskId, err.message);
+          sendEvent(IPC_EVENTS.CHAT_STREAM_END, { ok: false, error: err.message, conversationId: id });
+        }
       } finally {
         sessionManager.deleteAgent(id);
+        sessionManager.updateExecutorState(id, { status: result?.error ? 'failed' : 'idle', runId: null });
       }
     } else {
       const runId = `run-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
       convAgent.runId = runId;
+      // Register the agentLoop run in DB (previously not persisted for Anthropic path).
+      registerRun(runId, id, settings_provider, configuredModel, taskId);
+      linkRunToTask(taskId, runId);
+      sessionManager.updateExecutorState(id, { runId, status: 'running' });
       const assistantFeed: FeedItem[] = [];
       const assistantToolCalls = new Map<string, ToolCall>();
 
@@ -543,6 +740,8 @@ export function registerChatIpc(
           },
         });
         result = { response };
+        completeRun(runId, 0, 0);
+        completeTask(taskId);
         sendEvent(IPC_EVENTS.CHAT_STREAM_END, { ok: true, conversationId: id });
       } catch (e: unknown) {
         const err = e instanceof Error ? e : new Error(String(e));
@@ -551,14 +750,22 @@ export function registerChatIpc(
             repairSession(sessionMessages, 'user_interrupted', 'ChatIpc.agentAbort');
           }
           result = { response: '', error: 'Stopped' };
+          failRun(runId, 'Cancelled by user');
+          cancelTask(taskId);
           sendEvent(IPC_EVENTS.CHAT_STREAM_END, { ok: false, cancelled: true, conversationId: id });
         } else {
           result = { response: '', error: err.message };
+          failRun(runId, err.message);
+          failTask(taskId, err.message);
           sendEvent(IPC_EVENTS.CHAT_STREAM_END, { ok: false, error: err.message, conversationId: id });
         }
       } finally {
         if (streamingFlushTimer) { clearTimeout(streamingFlushTimer); streamingFlushTimer = null; }
         sessionManager.deleteAgent(id);
+        sessionManager.updateExecutorState(id, {
+          status: result?.error ? 'failed' : 'idle',
+          runId: null,
+        });
       }
 
       if (result!.response && !result!.error) {
@@ -593,6 +800,10 @@ export function registerChatIpc(
       if (agent.runId) cancelLoop(agent.runId);
       sessionManager.deleteAgent(targetId);
     }
+    sessionManager.updateExecutorState(targetId, { status: 'idle', runId: null });
+    // Cancel the active task for this conversation if one exists.
+    const activeTaskId = sessionManager.getActiveTaskId(targetId);
+    if (activeTaskId) cancelTask(activeTaskId);
     const sessionMessages = sessionManager.getSession(targetId);
     if (sessionMessages) repairSession(sessionMessages, 'user_interrupted', 'ChatIpc.chatStop');
   });

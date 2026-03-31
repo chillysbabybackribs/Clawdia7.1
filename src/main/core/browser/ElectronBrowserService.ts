@@ -776,11 +776,12 @@ export class ElectronBrowserService implements BrowserService {
 
   /**
    * Activate the browser panel to show the tab owned by this conversation.
-   * Creates the tab lazily if the conversation has never used the browser.
-   * This is a pure UI operation — execution routing is unaffected.
+   * This stays lazy: switching chat tabs must not allocate a browser tab.
+   * Execution routing still creates conversation-owned tabs via getOrAssignTab().
    */
   async focusConversation(conversationId: string): Promise<void> {
-    const tabId = await this.getOrAssignTab(conversationId);
+    const tabId = this.convTabMap.get(conversationId);
+    if (!tabId) return;
     const tab = this.tabs.get(tabId);
     if (!tab) return;
     console.log(`[BrowserService] Switched browser to conversation ${conversationId} → tab ${tabId}`);

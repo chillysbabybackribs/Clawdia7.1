@@ -11,7 +11,7 @@ import TerminalPanel from './components/TerminalPanel';
 import CreateAgentPanel from './components/agents/CreateAgentPanel';
 import AgentDetailPanel from './components/agents/AgentDetailPanel';
 import RightFilesDrawer from './components/RightFilesDrawer';
-import { makeTab, addTab, closeTab, switchTab, type ConversationTab } from './tabLogic';
+import { makeTab, addTab, closeTab, type ConversationTab } from './tabLogic';
 
 export type View = 'chat' | 'conversations' | 'settings' | 'processes' | 'agent-create' | 'agent-detail';
 
@@ -46,13 +46,23 @@ export default function App() {
   const [sessionHydrated, setSessionHydrated] = useState(false);
   const [tabs, setTabs] = useState<ConversationTab[]>(() => [makeTab(null)]);
   const [activeTabId, setActiveTabId] = useState<string>(() => tabs[0].id);
-  // Set of conversationIds that currently have a running agent — used for tab indicators.
-  const [runningConvIds, setRunningConvIds] = useState<Set<string>>(new Set());
   const [filesDrawerOpen, setFilesDrawerOpen] = useState(false);
   const browserVisible = rightPaneMode === 'browser';
   const editorOpen = rightPaneMode === 'editor';
   const terminalOpen = rightPaneMode === 'terminal';
   const activeEditorTab = editorTabs.find((tab) => tab.id === activeEditorTabId) || null;
+
+  const patchTab = useCallback((tabId: string, patch: Partial<ConversationTab>) => {
+    setTabs((current) => current.map((tab) => (tab.id === tabId ? { ...tab, ...patch } : tab)));
+  }, []);
+
+  const patchTabByConversationId = useCallback((conversationId: string, updater: (tab: ConversationTab) => Partial<ConversationTab> | null) => {
+    setTabs((current) => current.map((tab) => {
+      if (tab.conversationId !== conversationId) return tab;
+      const patch = updater(tab);
+      return patch ? { ...tab, ...patch } : tab;
+    }));
+  }, []);
 
   // Per-tab panel state helpers
   const getTabPanel = useCallback((tabId: string) => {
@@ -158,7 +168,11 @@ export default function App() {
           setRightPaneMode(session.browserVisible ? 'browser' : 'none');
         }
         if (session?.tabs && session.tabs.length > 0) {
-          setTabs(session.tabs);
+          setTabs(session.tabs.map((tab) => ({
+            ...tab,
+            mode: tab.mode ?? 'chat',
+            status: tab.status ?? 'idle',
+          })));
           const restoredActiveTabId = session.activeTabId ?? session.tabs[0].id;
           setActiveTabId(restoredActiveTabId);
           // Restore per-tab panel state for all tabs that have a conversation
@@ -193,6 +207,40 @@ export default function App() {
       browserVisible: rightPaneMode === 'browser',
     });
   }, [sessionHydrated, hasApiKey, tabs, activeTabId, activeView, rightPaneMode]);
+
+  useEffect(() => {
+    if (!sessionHydrated || !hasApiKey) return;
+    const api = (window as any).clawdia;
+    if (!api?.chat?.list || !api?.executor?.listStates) return;
+
+    let cancelled = false;
+    Promise.all([api.chat.list(), api.executor.listStates()])
+      .then(([conversations, executorStates]: [Array<any>, Record<string, any>]) => {
+        if (cancelled) return;
+        const conversationMap = new Map((conversations || []).map((conversation) => [conversation.id, conversation]));
+        setTabs((current) => current.map((tab) => {
+          if (!tab.conversationId) return tab;
+          const conversation = conversationMap.get(tab.conversationId);
+          const executorState = executorStates?.[tab.conversationId];
+          return {
+            ...tab,
+            title: conversation?.title || tab.title,
+            mode: conversation?.mode || tab.mode || 'chat',
+            status:
+              executorState?.status === 'running'
+                ? 'running'
+                : executorState?.status === 'failed'
+                  ? 'failed'
+                  : tab.status ?? 'idle',
+          };
+        }));
+      })
+      .catch(() => {});
+
+    return () => {
+      cancelled = true;
+    };
+  }, [sessionHydrated, hasApiKey]);
 
   // Push live UI state to main so agent tools (ui_state) can read it.
   useEffect(() => {
@@ -265,35 +313,61 @@ export default function App() {
     (window as any).clawdia?.browser?.focusConversation?.(convId);
   }, [activeTabId, tabs, rightPaneMode]);
 
-  // Track which conversations have a running agent so TabStrip can show indicators.
   useEffect(() => {
     const api = (window as any).clawdia;
     if (!api?.chat) return;
 
-    // Any stream text event means an agent is running for that conversation.
     const unsubText = api.chat.onStreamText((payload: { delta: string; conversationId: string }) => {
       if (!payload?.conversationId) return;
-      setRunningConvIds(prev => {
-        if (prev.has(payload.conversationId)) return prev;
-        const next = new Set(prev);
-        next.add(payload.conversationId);
-        return next;
-      });
+      patchTabByConversationId(payload.conversationId, (tab) =>
+        tab.status !== 'completed' && tab.status !== 'failed' ? { status: 'running' } : null
+      );
     });
 
-    // When a stream ends (ok or error), remove that conversation from the running set.
     const unsubEnd = api.chat.onStreamEnd((data: any) => {
       if (!data?.conversationId) return;
-      setRunningConvIds(prev => {
-        if (!prev.has(data.conversationId)) return prev;
-        const next = new Set(prev);
-        next.delete(data.conversationId);
-        return next;
-      });
+      if (data.isPipelineStart) {
+        patchTabByConversationId(data.conversationId, () => ({ status: 'running' }));
+        return;
+      }
+      patchTabByConversationId(data.conversationId, () => ({
+        status: data.ok ? 'completed' : (data.cancelled ? 'idle' : 'failed'),
+      }));
     });
 
-    return () => { unsubText?.(); unsubEnd?.(); };
-  }, []);
+    const unsubClaudeStatus = api.chat.onClaudeStatus?.((payload: { conversationId: string; status: string }) => {
+      if (!payload?.conversationId) return;
+      if (payload.status === 'starting' || payload.status === 'working') {
+        patchTabByConversationId(payload.conversationId, () => ({ status: 'running' }));
+        return;
+      }
+      if (payload.status === 'errored') {
+        patchTabByConversationId(payload.conversationId, () => ({ status: 'failed' }));
+        return;
+      }
+      if (payload.status === 'idle' || payload.status === 'ready' || payload.status === 'stopped') {
+        patchTabByConversationId(payload.conversationId, (tab) => (
+          tab.status === 'running' ? { status: 'completed' } : null
+        ));
+      }
+    });
+
+    return () => { unsubText?.(); unsubEnd?.(); unsubClaudeStatus?.(); };
+  }, [patchTabByConversationId]);
+
+  // Auto-reset completed/failed tab status back to idle after a delay
+  useEffect(() => {
+    const timers: ReturnType<typeof setTimeout>[] = [];
+    for (const tab of tabs) {
+      if (tab.status === 'completed' || tab.status === 'failed') {
+        const t = setTimeout(() => {
+          patchTab(tab.id, { status: 'idle' });
+        }, 4000);
+        timers.push(t);
+      }
+    }
+    return () => timers.forEach(clearTimeout);
+  }, [tabs, patchTab]);
 
   const handleWelcomeComplete = useCallback(() => {
     setSessionHydrated(true);
@@ -306,7 +380,7 @@ export default function App() {
     // The current tab just gets a fresh blank conversation.
     const created = api ? await api.chat.create() : null;
     setTabs(current =>
-      current.map(t => t.id === activeTabId ? { ...t, conversationId: created?.id ?? null, title: undefined } : t)
+      current.map(t => t.id === activeTabId ? { ...t, conversationId: created?.id ?? null, title: undefined, mode: 'chat', status: 'idle' } : t)
     );
     setTabPanel(activeTabId, prev => ({ chatKey: prev.chatKey + 1, loadConversationId: created?.id ?? null, replayBuffer: null }));
     setHistoryMode(false);
@@ -316,7 +390,7 @@ export default function App() {
   const handleLoadConversation = useCallback(async (id: string, buffer?: ReplayBufferItem[] | null) => {
     if (!id) return;
     setTabs(current =>
-      current.map(t => t.id === activeTabId ? { ...t, conversationId: id } : t)
+      current.map(t => t.id === activeTabId ? { ...t, conversationId: id, status: buffer?.length ? 'running' : t.status ?? 'idle' } : t)
     );
     setTabPanel(activeTabId, prev => ({ chatKey: prev.chatKey + 1, loadConversationId: id, replayBuffer: buffer || null }));
     setSelectedProcessId(null);
@@ -340,6 +414,11 @@ export default function App() {
 
   const handleCloseTab = useCallback((tabId: string) => {
     setTabs(currentTabs => {
+      // Release the conversation-scoped browser tab before removing from UI
+      const closing = currentTabs.find(t => t.id === tabId);
+      if (closing?.conversationId) {
+        (window as any).clawdia?.browser?.releaseConversationTab?.(closing.conversationId);
+      }
       const result = closeTab(currentTabs, tabId, activeTabId);
       if (result.activeTabId !== activeTabId) {
         setActiveTabId(result.activeTabId);
@@ -368,11 +447,9 @@ export default function App() {
     });
   }, []);
 
-  const handleConversationTitleResolved = useCallback((tabId: string, title: string) => {
-    setTabs(current =>
-      current.map(t => t.id === tabId ? { ...t, title } : t)
-    );
-  }, []);
+  const handleConversationMetaResolved = useCallback((tabId: string, patch: Partial<ConversationTab>) => {
+    patchTab(tabId, patch);
+  }, [patchTab]);
 
   const handleOpenConversation = useCallback((id: string) => {
     const existing = tabs.find(t => t.conversationId === id);
@@ -579,13 +656,12 @@ export default function App() {
                   replayBuffer={panel.replayBuffer}
                   tabs={tabs}
                   activeTabId={activeTabId}
-                  runningConvIds={runningConvIds}
                   onNewTab={handleNewTab}
                   onCloseTab={handleCloseTab}
                   onSwitchTab={handleSwitchTab}
                   onReorderTabs={handleReorderTabs}
                   onOpenConversation={handleOpenConversation}
-                  onConversationTitleResolved={handleConversationTitleResolved}
+                  onConversationMetaResolved={handleConversationMetaResolved}
                 />
               </div>
             );

@@ -58,6 +58,7 @@ export interface RunRow {
   estimated_cost_usd?: number;
   parent_run_id?: string | null;
   system_prompt?: string | null;
+  task_id?: string | null;
 }
 
 export interface RunEventRow {
@@ -247,6 +248,21 @@ export function initDb(): boolean {
         is_paused     INTEGER NOT NULL DEFAULT 0,
         updated_at    TEXT NOT NULL DEFAULT (datetime('now'))
       );
+
+      CREATE TABLE IF NOT EXISTS tasks (
+        id              TEXT PRIMARY KEY,
+        conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+        goal            TEXT NOT NULL DEFAULT '',
+        status          TEXT NOT NULL DEFAULT 'pending'
+                          CHECK(status IN ('pending','running','completed','failed','cancelled')),
+        executor_id     TEXT NOT NULL DEFAULT 'agentLoop',
+        active_run_id   TEXT,
+        last_error      TEXT,
+        created_at      TEXT NOT NULL DEFAULT (datetime('now')),
+        updated_at      TEXT NOT NULL DEFAULT (datetime('now')),
+        completed_at    TEXT
+      );
+      CREATE INDEX IF NOT EXISTS idx_tasks_conversation ON tasks(conversation_id, created_at DESC);
     `);
 
     // Evolution: Add token tracking to runs if missing
@@ -267,6 +283,9 @@ export function initDb(): boolean {
     } catch { }
     try {
       db.prepare(`ALTER TABLE conversations ADD COLUMN codex_chat_thread_id TEXT`).run();
+    } catch { }
+    try {
+      db.prepare(`ALTER TABLE runs ADD COLUMN task_id TEXT REFERENCES tasks(id)`).run();
     } catch { }
 
     // Mark orphaned runs as failed (app was killed mid-run)
@@ -409,7 +428,7 @@ export function createRun(run: RunRow): void {
   }
 }
 
-const RUN_COLUMNS = new Set<string>(['status', 'title', 'goal', 'updated_at', 'completed_at', 'tool_call_count', 'error', 'was_detached', 'provider', 'model', 'workflow_stage', 'tool_completed_count', 'tool_failed_count', 'estimated_cost_usd', 'total_tokens', 'system_prompt']);
+const RUN_COLUMNS = new Set<string>(['status', 'title', 'goal', 'updated_at', 'completed_at', 'tool_call_count', 'error', 'was_detached', 'provider', 'model', 'workflow_stage', 'tool_completed_count', 'tool_failed_count', 'estimated_cost_usd', 'total_tokens', 'system_prompt', 'task_id']);
 
 export function updateRun(id: string, patch: Partial<RunRow>): void {
   try {
@@ -509,5 +528,88 @@ export function getLoopPaused(runId: string): boolean {
     return row ? row.is_paused === 1 : false;
   } catch {
     return false;
+  }
+}
+
+// ── Tasks ──────────────────────────────────────────────────────────────────
+
+export interface TaskRow {
+  id: string;
+  conversation_id: string;
+  goal: string;
+  status: 'pending' | 'running' | 'completed' | 'failed' | 'cancelled';
+  executor_id: string;
+  active_run_id: string | null;
+  last_error: string | null;
+  created_at: string;
+  updated_at: string;
+  completed_at: string | null;
+}
+
+export function createTask(task: TaskRow): void {
+  try {
+    getDb()
+      .prepare(
+        `INSERT INTO tasks (id, conversation_id, goal, status, executor_id, active_run_id, last_error, created_at, updated_at, completed_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      )
+      .run(
+        task.id,
+        task.conversation_id,
+        task.goal,
+        task.status,
+        task.executor_id,
+        task.active_run_id ?? null,
+        task.last_error ?? null,
+        task.created_at,
+        task.updated_at,
+        task.completed_at ?? null,
+      );
+  } catch (err) {
+    console.error('[db] createTask failed:', err);
+  }
+}
+
+const TASK_COLUMNS = new Set<string>(['status', 'executor_id', 'active_run_id', 'last_error', 'updated_at', 'completed_at']);
+
+export function updateTask(id: string, patch: Partial<TaskRow>): void {
+  try {
+    const keys = Object.keys(patch).filter((k) => TASK_COLUMNS.has(k));
+    if (keys.length === 0) return;
+    const fields = keys.map((k) => `${k} = ?`).join(', ');
+    const values = [...keys.map((k) => (patch as Record<string, unknown>)[k]), id];
+    getDb().prepare(`UPDATE tasks SET ${fields} WHERE id = ?`).run(...values);
+  } catch (err) {
+    console.error('[db] updateTask failed:', err);
+  }
+}
+
+export function getTask(id: string): TaskRow | null {
+  try {
+    return (getDb().prepare(`SELECT * FROM tasks WHERE id = ?`).get(id) as TaskRow) ?? null;
+  } catch {
+    return null;
+  }
+}
+
+export function getLatestTaskForConversation(conversationId: string): TaskRow | null {
+  try {
+    return (
+      getDb()
+        .prepare(`SELECT * FROM tasks WHERE conversation_id = ? ORDER BY created_at DESC LIMIT 1`)
+        .get(conversationId) as TaskRow
+    ) ?? null;
+  } catch {
+    return null;
+  }
+}
+
+export function getTasksForConversation(conversationId: string, limit = 20): TaskRow[] {
+  try {
+    return getDb()
+      .prepare(`SELECT * FROM tasks WHERE conversation_id = ? ORDER BY created_at DESC LIMIT ?`)
+      .all(conversationId, limit) as TaskRow[];
+  } catch {
+    return [];
   }
 }

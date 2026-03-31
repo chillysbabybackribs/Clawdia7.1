@@ -30,8 +30,8 @@ try {
 
   contextBridge.exposeInMainWorld('clawdia', {
     chat: {
-    send: (message: string, attachments?: any[], conversationId?: string | null) =>
-      ipcRenderer.invoke(IPC.CHAT_SEND, { text: message, attachments, conversationId }),
+    send: (message: string, attachments?: any[], conversationId?: string | null, provider?: string, model?: string) =>
+      ipcRenderer.invoke(IPC.CHAT_SEND, { text: message, attachments, conversationId, provider, model }),
     openAttachment: (filePath: string) => ipcRenderer.invoke(IPC.CHAT_OPEN_ATTACHMENT, filePath),
     stop: (conversationId?: string) => ipcRenderer.invoke(IPC.CHAT_STOP, conversationId),
     pause: (conversationId?: string) => ipcRenderer.invoke(IPC.CHAT_PAUSE, conversationId),
@@ -60,6 +60,8 @@ try {
     onToolActivity: (cb: (activity: any) => void) => onEvent(IPC_EVENTS.CHAT_TOOL_ACTIVITY, cb),
     onToolStream: (cb: (payload: any) => void) => onEvent(IPC_EVENTS.CHAT_TOOL_STREAM, cb),
     onClaudeStatus: (cb: (payload: any) => void) => onEvent(IPC_EVENTS.CHAT_CLAUDE_STATUS, cb),
+    onConcurrentExecutionStart: (cb: (payload: { plan: any; conversationId: string }) => void) => onEvent(IPC_EVENTS.CONCURRENT_EXECUTION_START, cb),
+    onConcurrentExecutionEnd: (cb: (payload: { conversationId: string }) => void) => onEvent(IPC_EVENTS.CONCURRENT_EXECUTION_END, cb),
   },
 
   browser: {
@@ -80,6 +82,7 @@ try {
     listSessions: () => ipcRenderer.invoke(IPC.BROWSER_LIST_SESSIONS),
     clearSession: (domain: string) => ipcRenderer.invoke(IPC.BROWSER_CLEAR_SESSION, domain),
     focusConversation: (conversationId: string) => ipcRenderer.invoke(IPC.BROWSER_FOCUS_CONVERSATION, conversationId),
+    releaseConversationTab: (conversationId: string) => ipcRenderer.invoke(IPC.BROWSER_RELEASE_CONVERSATION_TAB, conversationId),
     openFile: (filePath: string, opts?: { mode?: 'review' | 'preview' | 'publish'; conversationId?: string }) =>
       ipcRenderer.invoke(IPC.BROWSER_OPEN_FILE, filePath, opts),
     extensions: {
@@ -266,6 +269,28 @@ try {
     push: (state: any) => ipcRenderer.invoke(IPC.UI_STATE_PUSH, state),
     /** Pull the last-known UI state from main (rarely needed; push is the primary flow) */
     get: () => ipcRenderer.invoke(IPC.UI_STATE_GET),
+  },
+
+  executor: {
+    /** List all registered executor definitions */
+    list: () => ipcRenderer.invoke(IPC.EXECUTOR_LIST),
+    /** Get runtime state for a specific conversation */
+    getState: (conversationId: string) => ipcRenderer.invoke(IPC.EXECUTOR_STATE_GET, conversationId),
+    /** Get runtime states for all conversations */
+    listStates: () => ipcRenderer.invoke(IPC.EXECUTOR_STATE_LIST),
+    /** Get config for one executor (pass id) or all (omit id) */
+    getConfig: (id?: string) => ipcRenderer.invoke(IPC.EXECUTOR_CONFIG_GET, id),
+    /** Patch config for a specific executor */
+    patchConfig: (id: string, patch: Record<string, unknown>) => ipcRenderer.invoke(IPC.EXECUTOR_CONFIG_PATCH, id, patch),
+  },
+
+  taskHistory: {
+    /** Get task state by taskId */
+    get: (taskId: string) => ipcRenderer.invoke(IPC.TASK_GET, taskId),
+    /** Get the most recent task for a conversation */
+    getLatest: (conversationId: string) => ipcRenderer.invoke(IPC.TASK_GET_LATEST, conversationId),
+    /** Get recent tasks for a conversation */
+    list: (conversationId: string, limit?: number) => ipcRenderer.invoke(IPC.TASK_LIST, conversationId, limit),
   },
 
     videoExtractor: {

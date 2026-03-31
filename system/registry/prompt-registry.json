@@ -1,0 +1,65 @@
+{
+  "version": "1.0",
+  "description": "Runtime prompt asset registry for prompt composition",
+  "defaults": {
+    "assets": [
+      "system/context.md"
+    ]
+  },
+  "profiles": {
+    "browser": {
+      "assets": [
+        "domains/browser.md",
+        "contracts/browser-task-done.md"
+      ]
+    },
+    "desktop": {
+      "assets": [
+        "domains/desktop.md",
+        "system/tasks/desktop-automation.md"
+      ]
+    },
+    "coding": {
+      "assets": [
+        "domains/coding.md",
+        "contracts/code-task-done.md"
+      ]
+    },
+    "core": {
+      "assets": [
+        "domains/filesystem.md",
+        "contracts/file-task-done.md"
+      ]
+    },
+    "full": {
+      "assets": [
+        "domains/filesystem.md"
+      ]
+    }
+  },
+  "recoveries": {
+    "browser_blocked": "system/recovery/browser-blocked.md",
+    "element_not_found": "system/recovery/element-not-found.md",
+    "navigation_timeout": "system/recovery/navigation-timeout.md",
+    "stall_detected": "system/recovery/stall-detected.md"
+  },
+  "overrides": [
+    {
+      "id": "full-coding-intent",
+      "pattern": "\\b(code|debug|refactor|test|typescript|javascript|python)\\b",
+      "toolGroups": ["full"],
+      "assets": [
+        "domains/coding.md",
+        "contracts/code-task-done.md"
+      ]
+    },
+    {
+      "id": "desktop-app-mapping",
+      "pattern": "\\bmap\\b.*\\b(ui|app|application|screen|interface)\\b",
+      "toolGroups": ["desktop"],
+      "assets": [
+        "contracts/app-mapping-done.md"
+      ]
+    }
+  ]
+}

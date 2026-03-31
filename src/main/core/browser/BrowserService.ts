@@ -144,8 +144,9 @@ export interface BrowserService {
   // releaseTab: removes the conversation→tab mapping and closes the tab.
   //   Called on conversation deletion or on explicit cleanup.
   // focusConversation: activates the conversation's owned tab as the visible
-  //   browser panel. Creates the tab lazily if it has never been used. This is
-  //   a UI-only operation — it does not affect execution routing.
+  //   browser panel, but only if one already exists. It must not allocate a new
+  //   browser tab just because the user switched chat tabs. This is a UI-only
+  //   operation — it does not affect execution routing.
   getOrAssignTab(conversationId: string): Promise<string>;
   releaseTab(conversationId: string): Promise<void>;
   focusConversation(conversationId: string): Promise<void>;

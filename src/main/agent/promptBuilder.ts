@@ -1,5 +1,7 @@
 // src/main/agent/promptBuilder.ts
 import type { AgentProfile, DispatchContext, BrowserMode } from './types';
+import { CLAWDIA_IDENTITY, appendPromptAddenda } from '../prompts/promptAssembler';
+import { detectStall as detectRecoveryStall } from './recoveryGuidance';
 
 const TOOL_GROUP_GUIDANCE: Record<AgentProfile['toolGroup'], string> = {
   browser: `You have browser tools available. Use them to navigate, extract, and interact with web pages.
@@ -32,10 +34,14 @@ CRITICAL CONTEXT — READ BEFORE USING GUI TOOLS:
 CONTEXT: You are running INSIDE Clawdia, a desktop AI assistant application. If you use gui_interact or take screenshots, Clawdia's own UI will be visible — do NOT interact with it. Only automate apps the user has explicitly asked you to control.`,
 };
 
-export function buildStaticPrompt(profile: AgentProfile, unrestrictedMode: boolean): string {
+export function buildStaticPrompt(
+  profile: AgentProfile,
+  unrestrictedMode: boolean,
+  runtimeGuidance = '',
+): string {
   const groupGuidance = TOOL_GROUP_GUIDANCE[profile.toolGroup];
 
-  const base = `You are Clawdia, an agentic AI assistant built into the Clawdia desktop application. You are running locally on the user's machine inside an Electron app with a live embedded Chromium browser. The user is talking to you through the Clawdia chat panel.
+  const body = `${CLAWDIA_IDENTITY}
 
 You have access to local CLI tools and a browser.
 
@@ -45,17 +51,7 @@ CRITICAL RULES:
 1. Always use your tools — never tell the user to run commands themselves.
 2. Do not ask for permission before using tools unless the action is permanently destructive (deleting files, dropping databases).
 3. When a task involves web content, use browser tools directly — do not instruct the user to open a browser.`;
-
-  if (unrestrictedMode) {
-    return base + `
-
-UNRESTRICTED MODE — ACTIVE:
-- Full autonomy to install, download, update, or configure anything needed.
-- If a tool, binary, or package is missing: install it using shell_exec and proceed.
-- Never refuse a task because you lack a capability — acquire it and complete the task.`;
-  }
-
-  return base;
+  return appendPromptAddenda(body, { runtimeGuidance, unrestrictedMode });
 }
 
 export function buildDynamicPrompt(profile: AgentProfile, ctx: DispatchContext): string {
@@ -76,12 +72,13 @@ export function buildDynamicPrompt(profile: AgentProfile, ctx: DispatchContext):
     parts.push('You are approaching the iteration limit. Begin wrapping up and produce a final answer.');
   }
 
+  if (detectRecoveryStall(ctx.allToolCalls)) {
+    parts.push('Stall detected: you are repeating the same tool pattern without new evidence. Change strategy immediately and use a different grounding or recovery approach.');
+  }
+
   return parts.join('\n');
 }
-
-export function detectStall(_allToolCalls: DispatchContext['allToolCalls']): string | null {
-  return null;
-}
+export { detectStall } from './recoveryGuidance';
 
 export function advanceBrowserMode(
   current: BrowserMode,

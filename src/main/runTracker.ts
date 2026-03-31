@@ -16,9 +16,15 @@ function getNextSeq(runId: string): number {
 
 /**
  * Start a new run for a conversation.
+ * @param taskId  Optional — links this run to the parent task identity.
  * Returns the runId — pass it to trackToolCall/completeRun/failRun.
  */
-export function startRun(conversationId: string, provider: string, model: string): string {
+export function startRun(
+  conversationId: string,
+  provider: string,
+  model: string,
+  taskId?: string | null,
+): string {
   const runId = `run-${uuid()}`;
   const now = new Date().toISOString();
 
@@ -35,6 +41,7 @@ export function startRun(conversationId: string, provider: string, model: string
     provider,
     model,
     workflow_stage: 'executing',
+    task_id: taskId ?? null,
   });
 
   // Reserve a 1-cent estimate for the run locally
@@ -43,6 +50,38 @@ export function startRun(conversationId: string, provider: string, model: string
   runSequences.set(runId, 0);
 
   return runId;
+}
+
+/**
+ * Register an externally-generated runId (e.g. from agentLoop or Claude Code)
+ * so it exists as a real DB row with task linkage.
+ */
+export function registerRun(
+  runId: string,
+  conversationId: string,
+  provider: string,
+  model: string,
+  taskId?: string | null,
+): void {
+  const now = new Date().toISOString();
+  createRun({
+    id: runId,
+    conversation_id: conversationId,
+    title: 'Assistant Task',
+    goal: 'Automated execution',
+    status: 'running',
+    started_at: now,
+    updated_at: now,
+    tool_call_count: 0,
+    was_detached: 0,
+    provider,
+    model,
+    workflow_stage: 'executing',
+    task_id: taskId ?? null,
+  });
+  const txId = reserveEstimate(runId, provider, 1);
+  runTransactions.set(runId, txId);
+  runSequences.set(runId, 0);
 }
 
 /**

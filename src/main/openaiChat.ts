@@ -12,10 +12,30 @@ import { buildSharedSystemPrompt } from './core/cli/systemPrompt';
 import { startRun, trackToolCall, trackToolResult, completeRun, failRun } from './runTracker';
 import { executeGuiInteract, DESKTOP_TOOL_NAMES, renderCapabilities } from './core/desktop';
 import { checkBudget } from './agent/spending-budget';
-import type { ToolUseBlock, LLMTurn, LoopOptions } from './agent/types';
+import { evaluatePolicy } from './agent/policy-engine';
+import { detectStall, detectRecoveryFromTurn, buildRecoveryGuidanceMessage } from './agent/recoveryGuidance';
+import { trimOpenAIHistory } from './agent/historyTrimmer';
+import { getMemoryContext } from './db/memory';
+import { initBrowserBudget, checkBrowserBudget, updateBrowserBudget, checkBrowserScreenshotPolicy } from './agent/browserBudget';
+import type { BrowserBudgetState, ToolCallRecord, ToolUseBlock, LLMTurn, LoopOptions } from './agent/types';
 import { prepareOpenAIMessagesForSend } from './core/providers/openAIMessageProtocol';
 
 type OpenAIMessage = OpenAI.Chat.ChatCompletionMessageParam;
+
+function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
+  return Promise.race([
+    promise,
+    new Promise<T>((_, reject) =>
+      setTimeout(() => reject(new Error(`Tool timed out after ${ms}ms: ${label}`)), ms)
+    ),
+  ]);
+}
+
+const TOOL_TIMEOUTS: Record<string, number> = {
+  browser: 60_000,
+  desktop: 15_000,
+  shell: 30_000,
+};
 
 
 function buildUserContent(
@@ -99,7 +119,7 @@ export async function streamOpenAIChat({
     }
 
     const caps = await renderCapabilities();
-    const systemPrompt = await Promise.resolve(buildSharedSystemPrompt(unrestrictedMode)) + (caps ? `\n\nOS CONTEXT:\n${caps}` : '');
+    const systemPrompt = await Promise.resolve(buildSharedSystemPrompt(unrestrictedMode, userText)) + (caps ? `\n\nOS CONTEXT:\n${caps}` : '');
 
     // Repair stale tool history before appending the new user message
     const repairedSession = prepareOpenAIMessagesForSend([...sessionMessages] as OpenAIMessage[], {
@@ -117,6 +137,13 @@ export async function streamOpenAIChat({
       ...repairedSession,
     ];
 
+    // Inject memory context as a prefill pair so the model has relevant stored facts
+    const memoryContext = getMemoryContext(userText);
+    if (memoryContext) {
+      loopMessages.push({ role: 'user', content: `[Memory context]\n${memoryContext}` });
+      loopMessages.push({ role: 'assistant', content: 'Understood.' });
+    }
+
     // Start with only the search meta-tool; tools are loaded on demand
     let activeTools: OpenAI.Chat.ChatCompletionTool[] = [SEARCH_TOOL_OPENAI];
     // Pre-load shell tools since they're small and almost always needed
@@ -126,9 +153,24 @@ export async function streamOpenAIChat({
     let fullText = '';
     const MAX_TOOL_TURNS = 20;
     let turns = 0;
+    const toolCallHistory: ToolCallRecord[] = [];
+    const browserBudget: BrowserBudgetState = initBrowserBudget();
 
     while (turns < MAX_TOOL_TURNS) {
       turns++;
+
+      // Inject iteration hint + stall detection before each LLM call
+      {
+        const hints: string[] = [`[Iteration ${turns} | Tools called so far: ${toolCallHistory.length}]`];
+        if (turns >= 15) hints.push('You are approaching the iteration limit. Begin wrapping up and produce a final answer.');
+        if (detectStall(toolCallHistory)) {
+          hints.push('Stall detected: you are repeating the same tool pattern without new evidence. Change strategy immediately.');
+        }
+        loopMessages.push({ role: 'user', content: hints.join('\n') });
+        loopMessages.push({ role: 'assistant', content: 'Understood.' });
+      }
+
+      trimOpenAIHistory(loopMessages);
 
       const safeLoopMessages = prepareOpenAIMessagesForSend(loopMessages as OpenAIMessage[], {
         caller: 'streamOpenAIChat.turn',
@@ -209,92 +251,141 @@ export async function streamOpenAIChat({
         if (line) sendThinking(line.length > 80 ? line.slice(0, 77) + '…' : line);
       }
 
-      // Execute tools and push results
-      for (const [idx, tc] of Object.entries(toolCallAccumulators)) {
-        const toolCallId = toolCallIds[idx];
-        const startMs = Date.now();
-        const argsSummary = tc.args.slice(0, 120);
-        const eventId = (runId && tc.name !== 'search_tools') ? trackToolCall(runId, tc.name, argsSummary) : '';
-        let resultStr: string;
-
+      // Browser budget check before executing tools this turn
+      const turnToolBlocks: ToolUseBlock[] = Object.entries(toolCallAccumulators).map(([idx, tc]) => {
         let args: Record<string, unknown> = {};
         try { args = JSON.parse(tc.args || '{}'); } catch { /* leave empty */ }
+        return { id: toolCallIds[idx], name: tc.name, input: args };
+      });
+      const budgetViolation = unrestrictedMode
+        ? null
+        : checkBrowserBudget(turnToolBlocks, browserBudget)
+          ?? checkBrowserScreenshotPolicy(turnToolBlocks, userText, toolCallHistory);
+      if (budgetViolation) {
+        loopMessages.push({ role: 'user', content: `[POLICY] ${budgetViolation}` });
+        // Don't execute tools this turn — let the model adjust
+        continue;
+      }
 
-        if (!webContents.isDestroyed()) {
-          webContents.send(IPC_EVENTS.CHAT_TOOL_ACTIVITY, {
-            id: toolCallId,
-            name: tc.name,
-            status: 'running',
-            detail: tc.args.slice(0, 200),
-            input: tc.args,
-          });
-        }
+      // Execute tools in parallel and push results (order preserved via index)
+      const toolResults = await Promise.all(
+        Object.entries(toolCallAccumulators).map(async ([idx, tc]) => {
+          const toolCallId = toolCallIds[idx];
+          const startMs = Date.now();
+          const argsSummary = tc.args.slice(0, 120);
+          const eventId = (runId && tc.name !== 'search_tools') ? trackToolCall(runId, tc.name, argsSummary) : '';
+          let resultStr: string;
 
-        // Handle search_tools meta-tool
-        if (tc.name === 'search_tools') {
-          const searchResult = executeSearchTools(args);
-          const parsed = JSON.parse(searchResult);
-          // Add newly discovered tools to activeTools for subsequent turns
-          if (parsed.schemas) {
-            for (const schema of parsed.schemas) {
-              const oaiTool = toOpenAITool(schema);
-              if (!activeTools.find(t => (t as any).function?.name === schema.name)) {
-                activeTools.push(oaiTool);
-              }
-            }
-          }
-          // Send tool activity to UI
+          let args: Record<string, unknown> = {};
+          try { args = JSON.parse(tc.args || '{}'); } catch { /* leave empty */ }
+
           if (!webContents.isDestroyed()) {
             webContents.send(IPC_EVENTS.CHAT_TOOL_ACTIVITY, {
-              id: toolCallId,
-              name: 'search_tools',
-              status: 'success',
-              detail: `Loaded: ${parsed.tools_loaded?.join(', ') ?? 'catalog'}`,
-              durationMs: Date.now() - startMs,
+              id: toolCallId, name: tc.name, status: 'running',
+              detail: tc.args.slice(0, 200), input: tc.args,
             });
           }
-          loopMessages.push({
-            role: 'tool',
-            tool_call_id: toolCallId,
-            content: searchResult,
-          } as OpenAIMessage);
-          continue; // don't fall through to regular tool execution
-        }
 
-        try {
-          if (tc.name.startsWith('browser_') && browserService) {
-            const output = await executeBrowserTool(tc.name, args, browserService);
-            resultStr = truncateBrowserResult(JSON.stringify(output));
-          } else if (DESKTOP_TOOL_NAMES.has(tc.name)) {
-            resultStr = await executeGuiInteract(args);
-          } else {
-            resultStr = await executeShellTool(tc.name, args);
+          // Handle search_tools meta-tool (synchronous — mutates activeTools)
+          if (tc.name === 'search_tools') {
+            const searchResult = executeSearchTools(args);
+            const parsed = JSON.parse(searchResult);
+            if (parsed.schemas) {
+              for (const schema of parsed.schemas) {
+                const oaiTool = toOpenAITool(schema);
+                if (!activeTools.find(t => (t as any).function?.name === schema.name)) {
+                  activeTools.push(oaiTool);
+                }
+              }
+            }
+            if (!webContents.isDestroyed()) {
+              webContents.send(IPC_EVENTS.CHAT_TOOL_ACTIVITY, {
+                id: toolCallId, name: 'search_tools', status: 'success',
+                detail: `Loaded: ${parsed.tools_loaded?.join(', ') ?? 'catalog'}`,
+                durationMs: Date.now() - startMs,
+              });
+            }
+            return { role: 'tool' as const, tool_call_id: toolCallId, content: searchResult };
           }
-        } catch (err) {
-          resultStr = JSON.stringify({ ok: false, error: (err as Error).message });
-        }
 
-        const durationMs = Date.now() - startMs;
-        if (runId && eventId) {
-          trackToolResult(runId, eventId, resultStr.slice(0, 200), durationMs);
-        }
-        if (!webContents.isDestroyed()) {
-          webContents.send(IPC_EVENTS.CHAT_TOOL_ACTIVITY, {
-            id: toolCallId,
-            name: tc.name,
-            status: 'success',
-            detail: resultStr.slice(0, 200),
-            input: tc.args,
-            output: resultStr,
-            durationMs,
-          });
-        }
+          // ── Policy gate ──────────────────────────────────────────────────────
+          const policyDecision = evaluatePolicy(tc.name, args);
+          if (policyDecision.effect === 'deny') {
+            resultStr = `[POLICY DENIED] ${policyDecision.reason} (rule: ${policyDecision.ruleId ?? 'none'}, profile: ${policyDecision.profileName})`;
+            if (!webContents.isDestroyed()) {
+              webContents.send(IPC_EVENTS.CHAT_TOOL_ACTIVITY, {
+                id: toolCallId, name: tc.name, status: 'error',
+                detail: `Policy denied: ${policyDecision.reason}`, policyDenied: true,
+              });
+            }
+            return { role: 'tool' as const, tool_call_id: toolCallId, content: resultStr };
+          }
+          if (policyDecision.effect === 'require_approval') {
+            resultStr = `[POLICY HELD] This action requires your approval: ${policyDecision.reason}. ` +
+              `Tool "${tc.name}" was not executed. Change the policy profile in Settings to allow it.`;
+            if (!webContents.isDestroyed()) {
+              webContents.send(IPC_EVENTS.CHAT_TOOL_ACTIVITY, {
+                id: toolCallId, name: tc.name, status: 'error',
+                detail: `Requires approval: ${policyDecision.reason}`, policyHeld: true,
+              });
+            }
+            return { role: 'tool' as const, tool_call_id: toolCallId, content: resultStr };
+          }
+          // ── End policy gate ──────────────────────────────────────────────────
 
-        loopMessages.push({
-          role: 'tool',
-          tool_call_id: toolCallId,
-          content: resultStr,
-        } as OpenAIMessage);
+          let visionContent: OpenAI.Chat.ChatCompletionContentPart[] | null = null;
+          try {
+            if (tc.name.startsWith('browser_') && browserService) {
+              const output = await withTimeout(executeBrowserTool(tc.name, args, browserService, conversationId), TOOL_TIMEOUTS.browser, tc.name);
+              // Screenshots: provide image as vision content so the model can actually see it
+              if (tc.name === 'browser_screenshot' && (output as any)?.data) {
+                const shot = output as { type: string; mimeType: string; data: string; width?: number; height?: number };
+                resultStr = JSON.stringify({ ok: true, width: shot.width, height: shot.height, note: 'Screenshot captured — image provided as vision content below.' });
+                visionContent = [
+                  { type: 'text', text: `[browser_screenshot result — ${shot.width ?? '?'}×${shot.height ?? '?'}]` },
+                  { type: 'image_url', image_url: { url: `data:${shot.mimeType};base64,${shot.data}` } },
+                ];
+              } else {
+                resultStr = truncateBrowserResult(JSON.stringify(output));
+              }
+            } else if (DESKTOP_TOOL_NAMES.has(tc.name)) {
+              resultStr = await withTimeout(executeGuiInteract(args), TOOL_TIMEOUTS.desktop, tc.name);
+            } else {
+              resultStr = await withTimeout(executeShellTool(tc.name, args), TOOL_TIMEOUTS.shell, tc.name);
+            }
+          } catch (err) {
+            resultStr = JSON.stringify({ ok: false, error: (err as Error).message });
+          }
+
+          const durationMs = Date.now() - startMs;
+          if (runId && eventId) trackToolResult(runId, eventId, resultStr.slice(0, 200), durationMs);
+          toolCallHistory.push({ id: toolCallId, name: tc.name, input: args, result: resultStr });
+          if (!webContents.isDestroyed()) {
+            webContents.send(IPC_EVENTS.CHAT_TOOL_ACTIVITY, {
+              id: toolCallId, name: tc.name, status: 'success',
+              detail: resultStr.slice(0, 200), input: tc.args, output: resultStr, durationMs,
+            });
+          }
+          // Return vision content array for screenshots, plain string for everything else
+          const content = visionContent ?? resultStr;
+          return { role: 'tool' as const, tool_call_id: toolCallId, content } as any;
+        })
+      );
+
+      for (const result of toolResults) {
+        loopMessages.push(result as OpenAIMessage);
+      }
+
+      // Update browser budget with this turn's results (normalize array content to string)
+      const turnResults = toolResults.map(r =>
+        typeof r.content === 'string' ? r.content : JSON.stringify(r.content)
+      );
+      updateBrowserBudget(turnToolBlocks, turnResults, browserBudget);
+
+      // Inject recovery guidance if a browser failure pattern was detected
+      const recoveryKey = detectRecoveryFromTurn(turnToolBlocks, turnResults);
+      if (recoveryKey) {
+        loopMessages.push({ role: 'user', content: buildRecoveryGuidanceMessage(recoveryKey) });
       }
     }
 

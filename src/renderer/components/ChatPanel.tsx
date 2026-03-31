@@ -3,6 +3,7 @@ import type {
   Message,
   ToolCall,
   FeedItem,
+  ConcurrentFeedSource,
   ProcessInfo,
   RunApproval,
   RunHumanIntervention,
@@ -20,6 +21,7 @@ import PipelineBlock from './PipelineBlock';
 import HistoryBrowser from './HistoryBrowser';
 import CapabilityHelperBlock from './capability-helper/CapabilityHelperBlock';
 import { useCapabilityHelper } from '../helpers/capabilityHelper/useCapabilityHelper';
+import TaskHistoryPanel from './TaskHistoryPanel';
 
 type StreamEndPayload = {
   ok?: boolean;
@@ -46,13 +48,15 @@ interface ChatPanelProps {
   replayBuffer?: Array<{ type: string; data: any }> | null;
   tabs: import('../tabLogic').ConversationTab[];
   activeTabId: string;
-  runningConvIds?: Set<string>;
   onNewTab: () => void;
   onCloseTab: (tabId: string) => void;
   onSwitchTab: (tabId: string) => void;
   onReorderTabs: (fromIndex: number, toIndex: number) => void;
   onOpenConversation: (id: string) => void;
-  onConversationTitleResolved: (tabId: string, title: string) => void;
+  onConversationMetaResolved: (
+    tabId: string,
+    patch: Partial<import('../tabLogic').ConversationTab>,
+  ) => void;
 }
 
 function ApprovalBanner({
@@ -537,6 +541,53 @@ function renderTranscriptTokens(line: string, keyPrefix: string) {
   });
 }
 
+const CONCURRENT_SOURCE_UI: Record<ConcurrentFeedSource, { label: string; className: string }> = {
+  planner: {
+    label: 'Planner',
+    className: 'text-[#cbd5e1] bg-white/[0.06] border-white/[0.10]',
+  },
+  claudeCode: {
+    label: 'Claude Code',
+    className: 'text-[#f4a35a] bg-[#f4a35a]/10 border-[#f4a35a]/20',
+  },
+  codex: {
+    label: 'Codex',
+    className: 'text-[#9ab8f7] bg-[#9ab8f7]/10 border-[#9ab8f7]/20',
+  },
+  synthesis: {
+    label: 'Synthesis',
+    className: 'text-[#cbd5e1] bg-white/[0.06] border-white/[0.10]',
+  },
+};
+
+function SourceBadge({ source }: { source?: ConcurrentFeedSource }) {
+  if (!source) return null;
+  const ui = CONCURRENT_SOURCE_UI[source];
+  return (
+    <div className="mb-2">
+      <span className={`inline-flex items-center rounded-md border px-2 py-1 text-[10px] font-semibold uppercase tracking-[0.16em] ${ui.className}`}>
+        {ui.label}
+      </span>
+    </div>
+  );
+}
+
+function SourceFeedBlock({
+  source,
+  children,
+}: {
+  source?: ConcurrentFeedSource;
+  children: React.ReactNode;
+}) {
+  if (!source) return <>{children}</>;
+  return (
+    <div className="rounded-xl border border-white/[0.06] bg-white/[0.02] px-3 py-3">
+      <SourceBadge source={source} />
+      {children}
+    </div>
+  );
+}
+
 function classifyTranscriptLine(line: string): 'blank' | 'command' | 'bullet' | 'numbered' | 'status' | 'heading' | 'body' {
   if (!line.trim()) return 'blank';
   if (/^\$ /.test(line) || /^> /.test(line)) return 'command';
@@ -680,21 +731,35 @@ const AssistantMessage = React.memo(function AssistantMessage({
     // ToolActivityComponent can manage visibility (live: last 3, finalized: summary).
     // Text items between tool groups stay in their original position.
     type FeedGroup =
-      | { kind: 'text'; key: number; text: string; streaming: boolean }
-      | { kind: 'tools'; key: number; tools: ToolCall[]; lastToolId: string };
+      | { kind: 'text'; key: number; text: string; streaming: boolean; source?: ConcurrentFeedSource }
+      | { kind: 'tools'; key: number; tools: ToolCall[]; lastToolId: string; source?: ConcurrentFeedSource };
 
     const groups: FeedGroup[] = [];
     for (let i = 0; i < (message.feed ?? []).length; i++) {
       const item = (message.feed ?? [])[i];
       if (item.kind === 'text') {
-        if (item.text.trim()) groups.push({ kind: 'text', key: i, text: item.text, streaming: item.isStreaming === true });
+        if (item.text.trim()) {
+          groups.push({
+            kind: 'text',
+            key: i,
+            text: item.text,
+            streaming: item.isStreaming === true,
+            source: item.source,
+          });
+        }
       } else if (item.kind === 'tool') {
         const last = groups[groups.length - 1];
-        if (last?.kind === 'tools') {
+        if (last?.kind === 'tools' && last.source === item.tool.source) {
           last.tools.push(item.tool);
           last.lastToolId = item.tool.id;
         } else {
-          groups.push({ kind: 'tools', key: i, tools: [item.tool], lastToolId: item.tool.id });
+          groups.push({
+            kind: 'tools',
+            key: i,
+            tools: [item.tool],
+            lastToolId: item.tool.id,
+            source: item.tool.source,
+          });
         }
       }
     }
@@ -704,14 +769,19 @@ const AssistantMessage = React.memo(function AssistantMessage({
         <div className="w-full px-1 py-2 text-text-primary flex flex-col gap-3">
           {groups.map(group => {
             if (group.kind === 'text') {
-              return <MarkdownRenderer key={group.key} content={group.text} isStreaming={group.streaming} />;
+              return (
+                <SourceFeedBlock key={group.key} source={group.source}>
+                  <MarkdownRenderer content={group.text} isStreaming={group.streaming} />
+                </SourceFeedBlock>
+              );
             }
             return (
-              <ToolActivityComponent
-                key={group.lastToolId}
-                tools={group.tools}
-                isStreaming={!!message.isStreaming}
-              />
+              <SourceFeedBlock key={group.lastToolId} source={group.source}>
+                <ToolActivityComponent
+                  tools={group.tools}
+                  isStreaming={!!message.isStreaming}
+                />
+              </SourceFeedBlock>
             );
           })}
           {!!message.fileRefs?.length && <FileRefList fileRefs={message.fileRefs} />}
@@ -1151,16 +1221,15 @@ export default function ChatPanel({
   replayBuffer,
   tabs,
   activeTabId,
-  runningConvIds,
   onNewTab,
   onCloseTab,
   onSwitchTab,
   onReorderTabs,
   onOpenConversation,
-  onConversationTitleResolved,
+  onConversationMetaResolved,
 }: ChatPanelProps) {
   const MIN_THINKING_VISIBLE_MS = 2400;
-  const DEFAULT_CHAT_ZOOM = 100;
+  const DEFAULT_CHAT_ZOOM = 120;
   const MIN_CHAT_ZOOM = 80;
   const MAX_CHAT_ZOOM = 160;
   const [messages, setMessages] = useState<Message[]>([]);
@@ -1172,14 +1241,15 @@ export default function ChatPanel({
   const [pendingApprovals, setPendingApprovals] = useState<RunApproval[]>([]);
   const [pendingHumanRunId, setPendingHumanRunId] = useState<string | null>(null);
   const [pendingHumanInterventions, setPendingHumanInterventions] = useState<RunHumanIntervention[]>([]);
-  const [conversationMode, setConversationMode] = useState<'chat' | 'claude_terminal' | 'codex_terminal'>('chat');
+  const [conversationMode, setConversationMode] = useState<'chat' | 'claude_terminal' | 'codex_terminal' | 'concurrent'>('chat');
   const [claudeStatus, setClaudeStatus] = useState<'idle' | 'starting' | 'ready' | 'working' | 'errored' | 'stopped'>('idle');
+  const [showTaskHistory, setShowTaskHistory] = useState(false);
   const [workflowPlanDraft, setWorkflowPlanDraft] = useState('');
   const [isWorkflowPlanStreaming, setIsWorkflowPlanStreaming] = useState(false);
   const [loadedConversationId, setLoadedConversationId] = useState<string | null>(null);
-  const [activeStreamMode, setActiveStreamMode] = useState<'chat' | 'claude_terminal' | 'codex_terminal'>('chat');
+  const [activeStreamMode, setActiveStreamMode] = useState<'chat' | 'claude_terminal' | 'codex_terminal' | 'concurrent'>('chat');
   const [chatZoom, setChatZoom] = useState(DEFAULT_CHAT_ZOOM);
-  const activeStreamModeRef = useRef<'chat' | 'claude_terminal' | 'codex_terminal'>('chat');
+  const activeStreamModeRef = useRef<'chat' | 'claude_terminal' | 'codex_terminal' | 'concurrent'>('chat');
   const chatRootRef = useRef<HTMLDivElement>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
   // Flat append-only feed — each item appended once, never moved
@@ -1356,10 +1426,14 @@ export default function ChatPanel({
     };
   }, [handleChatZoomIn, handleChatZoomOut, handleChatZoomReset, historyMode]);
 
-  const handleStreamTextChunk = useCallback((chunk: string) => {
+  const handleStreamTextChunk = useCallback((chunk: string, source?: ConcurrentFeedSource) => {
     ensureAssistantReplayMessage();
     if (chunk.includes('__RESET__')) {
-      while (feedRef.current.length > 0 && feedRef.current[feedRef.current.length - 1].kind === 'text') {
+      while (
+        feedRef.current.length > 0
+        && feedRef.current[feedRef.current.length - 1].kind === 'text'
+        && ((feedRef.current[feedRef.current.length - 1] as Extract<FeedItem, { kind: 'text' }>).source ?? undefined) === source
+      ) {
         feedRef.current.pop();
       }
       scheduleStreamUpdate();
@@ -1371,10 +1445,10 @@ export default function ChatPanel({
 
     // Append to existing text item only if it's still actively streaming
     // (not frozen by a tool activity) and is a text item
-    if (lastItem && lastItem.kind === 'text' && lastItem.isStreaming) {
-      feedRef.current[lastIdx] = { kind: 'text', text: lastItem.text + chunk, isStreaming: true };
+    if (lastItem && lastItem.kind === 'text' && lastItem.isStreaming && lastItem.source === source) {
+      feedRef.current[lastIdx] = { kind: 'text', text: lastItem.text + chunk, isStreaming: true, source };
     } else {
-      feedRef.current.push({ kind: 'text', text: chunk, isStreaming: true });
+      feedRef.current.push({ kind: 'text', text: chunk, isStreaming: true, source });
     }
     scheduleStreamUpdate();
   }, [ensureAssistantReplayMessage, scheduleStreamUpdate]);
@@ -1533,6 +1607,10 @@ export default function ChatPanel({
       api.chat.getMode(loadConversationId).then((conversation: any) => {
         setConversationMode(conversation?.mode || 'chat');
         setClaudeStatus(conversation?.claudeTerminalStatus || 'idle');
+        onConversationMetaResolved(tabId, {
+          conversationId: loadConversationId,
+          mode: conversation?.mode || 'chat',
+        });
       }).catch(() => {});
       return;
     }
@@ -1549,11 +1627,13 @@ export default function ChatPanel({
       clearThinkingAdvanceTimer();
       setMessages(result.messages || []);
       setLoadedConversationId(loadConversationId);
-      if (result.title && tabId) {
-        onConversationTitleResolved(tabId, result.title);
-      }
       setConversationMode(result.mode || 'chat');
       setClaudeStatus(result.claudeTerminalStatus || 'idle');
+      onConversationMetaResolved(tabId, {
+        conversationId: loadConversationId,
+        title: result.title || undefined,
+        mode: result.mode || 'chat',
+      });
       // If an agent is still running for this conversation, re-enter streaming
       // mode so incoming events render correctly after a tab switch.
       setIsStreaming(!!result.isRunning);
@@ -1561,7 +1641,7 @@ export default function ChatPanel({
         if (scrollRef.current) scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
       });
     }).catch(() => {});
-  }, [loadConversationId, replayBuffer, tabId, onConversationTitleResolved]);
+  }, [loadConversationId, replayBuffer, tabId, onConversationMetaResolved]);
 
   useEffect(() => () => clearThinkingAdvanceTimer(), [clearThinkingAdvanceTimer]);
 
@@ -1579,7 +1659,10 @@ export default function ChatPanel({
     const replay = async () => {
       let sawStreamEnd = false;
       for (const item of replayBuffer) {
-        if (item.type === 'chat:stream:text') handleStreamTextChunk(item.data);
+        if (item.type === 'chat:stream:text') {
+          if (typeof item.data === 'string') handleStreamTextChunk(item.data);
+          else handleStreamTextChunk(item.data.delta, item.data.source);
+        }
         if (item.type === 'chat:workflow-plan:text') handleWorkflowPlanTextEvent(item.data);
         if (item.type === 'chat:workflow-plan:end') handleWorkflowPlanEndEvent();
         if (item.type === 'chat:thinking') handleThinkingEvent(item.data);
@@ -1669,9 +1752,9 @@ export default function ChatPanel({
     // of events that belong to another tab's conversation.
     const isMyConv = (evtConvId: string) => !!myConvId && evtConvId === myConvId;
 
-    cleanups.push(api.chat.onStreamText((payload: { delta: string; conversationId: string }) => {
+    cleanups.push(api.chat.onStreamText((payload: { delta: string; conversationId: string; source?: ConcurrentFeedSource }) => {
       if (!isMyConv(payload.conversationId)) return;
-      handleStreamTextChunk(payload.delta);
+      handleStreamTextChunk(payload.delta, payload.source);
     }));
 
     cleanups.push(api.chat.onThinking((payload: { thought: string; conversationId: string }) => {
@@ -1730,13 +1813,15 @@ export default function ChatPanel({
       setMessages([]);
       setConversationMode('chat');
       setClaudeStatus('idle');
+      onConversationMetaResolved(tabId, { conversationId: created.id, mode: 'chat' });
     }
     const nextMode = conversationMode === 'claude_terminal' ? 'chat' : 'claude_terminal';
     const result = await api.chat.setMode(conversationId, nextMode);
     if (result?.error) return;
     setConversationMode(nextMode);
     setClaudeStatus(result.claudeTerminalStatus || (nextMode === 'claude_terminal' ? 'idle' : 'stopped'));
-  }, [conversationMode, loadConversationId, loadedConversationId]);
+    onConversationMetaResolved(tabId, { conversationId, mode: nextMode });
+  }, [conversationMode, loadConversationId, loadedConversationId, onConversationMetaResolved, tabId]);
 
   const handleToggleCodexMode = useCallback(async () => {
     const api = (window as any).clawdia;
@@ -1750,17 +1835,43 @@ export default function ChatPanel({
       setMessages([]);
       setConversationMode('chat');
       setClaudeStatus('idle');
+      onConversationMetaResolved(tabId, { conversationId: created.id, mode: 'chat' });
     }
     const nextMode = conversationMode === 'codex_terminal' ? 'chat' : 'codex_terminal';
     const result = await api.chat.setMode(conversationId, nextMode);
     if (result?.error) return;
     setConversationMode(nextMode);
     setClaudeStatus(result.claudeTerminalStatus || (nextMode === 'codex_terminal' ? 'idle' : 'stopped'));
-  }, [conversationMode, loadConversationId, loadedConversationId]);
+    onConversationMetaResolved(tabId, { conversationId, mode: nextMode });
+  }, [conversationMode, loadConversationId, loadedConversationId, onConversationMetaResolved, tabId]);
 
-  const handleSend = useCallback(async (text: string, attachments: MessageAttachment[] = []) => {
+  const handleToggleConcurrentMode = useCallback(async () => {
     const api = (window as any).clawdia;
     if (!api) return;
+    let conversationId = loadedConversationId || loadConversationId;
+    if (!conversationId) {
+      const created = await api.chat.new();
+      if (!created?.id) return;
+      conversationId = created.id;
+      setLoadedConversationId(created.id);
+      setMessages([]);
+      setConversationMode('chat');
+      setClaudeStatus('idle');
+      onConversationMetaResolved(tabId, { conversationId: created.id, mode: 'chat' });
+    }
+    const nextMode = conversationMode === 'concurrent' ? 'chat' : 'concurrent';
+    const result = await api.chat.setMode(conversationId, nextMode);
+    if (result?.error) return;
+    setConversationMode(nextMode as any);
+    setClaudeStatus('idle');
+    onConversationMetaResolved(tabId, { conversationId, mode: nextMode as any });
+  }, [conversationMode, loadConversationId, loadedConversationId, onConversationMetaResolved, tabId]);
+
+  const handleSend = useCallback(async (text: string, attachments: MessageAttachment[] = [], provider?: string, model?: string) => {
+    const api = (window as any).clawdia;
+    if (!api) return;
+    const nextTitle = text.trim().slice(0, 60) || 'New conversation';
+    onConversationMetaResolved(tabId, { title: nextTitle, mode: conversationMode, status: 'running' });
 
     isUserScrolledUpRef.current = false;
     const userMsg: Message = {
@@ -1796,7 +1907,16 @@ export default function ChatPanel({
 
     try {
       if (conversationMode !== 'chat') setClaudeStatus('working');
-      const result = await api.chat.send(text, attachments, loadedConversationId ?? loadConversationId ?? null);
+      const result = await api.chat.send(text, attachments, loadedConversationId ?? loadConversationId ?? null, provider, model);
+      if (result?.conversationId && result.conversationId !== loadedConversationId) {
+        setLoadedConversationId(result.conversationId);
+      }
+      onConversationMetaResolved(tabId, {
+        conversationId: result?.conversationId ?? loadedConversationId ?? loadConversationId ?? null,
+        title: nextTitle,
+        mode: conversationMode,
+        status: result.error ? 'failed' : 'completed',
+      });
 
       const finalFeed = [...feedRef.current].map(item =>
         item.kind === 'text' ? { ...item, isStreaming: false } : item
@@ -1843,6 +1963,7 @@ export default function ChatPanel({
       isUserScrolledUpRef.current = false;
       requestAnimationFrame(() => scrollToBottom('smooth'));
     } catch (err: any) {
+      onConversationMetaResolved(tabId, { title: nextTitle, mode: conversationMode, status: 'failed' });
       setMessages(prev => prev.map(m =>
         m.id === assistantId ? { ...m, content: `⚠️ ${err.message || 'Unknown error'}`, isStreaming: false } : m
       ));
@@ -1854,7 +1975,7 @@ export default function ChatPanel({
       assistantMsgIdRef.current = null;
       setActiveStreamMode('chat');
     }
-  }, [conversationMode, scrollMessageToTop, loadedConversationId, loadConversationId]);
+  }, [conversationMode, scrollMessageToTop, loadedConversationId, loadConversationId, onConversationMetaResolved, tabId]);
 
   const handleStop = useCallback(() => {
     (window as any).clawdia?.chat.stop(loadedConversationId ?? undefined);
@@ -1978,7 +2099,6 @@ export default function ChatPanel({
         <TabStrip
           tabs={tabs}
           activeTabId={activeTabId}
-          runningConvIds={runningConvIds}
           onSwitch={onSwitchTab}
           onClose={onCloseTab}
           onNew={onNewTab}
@@ -1994,7 +2114,39 @@ export default function ChatPanel({
           />
         </div>
       ) : (
-        <div className="relative flex-1 min-h-0">
+        <div className="relative flex flex-1 min-h-0 flex-col">
+        {/* Chat nav: prev chevron */}
+        {tabs.length > 1 && tabs.findIndex(t => t.id === activeTabId) > 0 && (
+          <button
+            onClick={() => {
+              const idx = tabs.findIndex(t => t.id === activeTabId);
+              if (idx > 0) onSwitchTab(tabs[idx - 1].id);
+            }}
+            title={`Previous chat: ${tabs[tabs.findIndex(t => t.id === activeTabId) - 1]?.title || 'Previous'}`}
+            className="chat-nav-chevron"
+            style={{ left: 6 }}
+          >
+            <svg width="20" height="20" viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M13 4 7 10l6 6" />
+            </svg>
+          </button>
+        )}
+        {/* Chat nav: next chevron */}
+        {tabs.length > 1 && tabs.findIndex(t => t.id === activeTabId) < tabs.length - 1 && (
+          <button
+            onClick={() => {
+              const idx = tabs.findIndex(t => t.id === activeTabId);
+              if (idx < tabs.length - 1) onSwitchTab(tabs[idx + 1].id);
+            }}
+            title={`Next chat: ${tabs[tabs.findIndex(t => t.id === activeTabId) + 1]?.title || 'Next'}`}
+            className="chat-nav-chevron"
+            style={{ right: 6 }}
+          >
+            <svg width="20" height="20" viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M7 4l6 6-6 6" />
+            </svg>
+          </button>
+        )}
         {/* Scroll to top */}
         {showScrollToTop && (
           <button
@@ -2010,12 +2162,14 @@ export default function ChatPanel({
           <button
             onClick={() => { isUserScrolledUpRef.current = false; scrollToBottom('smooth'); }}
             title="Scroll to bottom"
-            className="absolute bottom-3 right-4 z-20 flex items-center justify-center w-7 h-7 rounded-full bg-surface-2 border border-white/[0.10] text-text-muted hover:text-text-primary hover:border-white/[0.20] shadow-lg transition-all cursor-pointer"
+            className={`absolute right-4 z-20 flex items-center justify-center w-7 h-7 rounded-full bg-surface-2 border border-white/[0.10] text-text-muted hover:text-text-primary hover:border-white/[0.20] shadow-lg transition-all cursor-pointer ${
+              showTaskHistory ? 'bottom-[calc(40%+12px)]' : 'bottom-3'
+            }`}
           >
             <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><polyline points="6 9 12 15 18 9"/></svg>
           </button>
         )}
-        <div ref={scrollRef} onScroll={handleScroll} className="h-full overflow-y-auto overflow-x-hidden scroll-smooth">
+        <div ref={scrollRef} onScroll={handleScroll} className="flex-1 overflow-y-auto overflow-x-hidden scroll-smooth">
           <div
             className="flex min-h-full flex-col px-5 pt-5 pb-8"
             style={{ zoom: chatZoom / 100 }}
@@ -2086,6 +2240,14 @@ export default function ChatPanel({
             <div className="h-2" />
           </div>
         </div>
+        {showTaskHistory && (
+          <div className="h-[40%] min-h-[220px] flex-shrink-0 border-t border-white/[0.08]">
+            <TaskHistoryPanel
+              conversationId={loadedConversationId}
+              onClose={() => setShowTaskHistory(false)}
+            />
+          </div>
+        )}
         </div>
       )}
 
@@ -2111,11 +2273,17 @@ export default function ChatPanel({
         codexStatus={claudeStatus}
         onToggleCodexMode={handleToggleCodexMode}
         codexModeDisabled={false}
+        concurrentMode={conversationMode === 'concurrent'}
+        onToggleConcurrentMode={handleToggleConcurrentMode}
+        concurrentModeDisabled={false}
         disabled={historyMode}
         chatZoom={chatZoom}
         onChatZoomIn={handleChatZoomIn}
         onChatZoomOut={handleChatZoomOut}
         onChatZoomReset={handleChatZoomReset}
+        taskHistoryAvailable={Boolean(loadedConversationId)}
+        taskHistoryOpen={showTaskHistory}
+        onToggleTaskHistory={() => setShowTaskHistory((prev) => !prev)}
       />
 
     </div>

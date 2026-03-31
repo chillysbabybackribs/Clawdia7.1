@@ -7,6 +7,16 @@ interface SettingsViewProps {
   onBack: () => void;
 }
 
+interface ExecutorConfigEntry {
+  id: string;
+  displayName: string;
+  description: string;
+  enabled: boolean;
+  resumeSession?: boolean;
+  resumeThread?: boolean;
+  synthesize?: boolean;
+}
+
 export default function SettingsView({ onBack: _onBack }: SettingsViewProps) {
   const [providerKeys, setProviderKeys] = useState<Record<ProviderId, string>>({ anthropic: '', openai: '', gemini: '' });
   const [keyVisible, setKeyVisible] = useState<Record<ProviderId, boolean>>({ anthropic: false, openai: false, gemini: false });
@@ -17,6 +27,7 @@ export default function SettingsView({ onBack: _onBack }: SettingsViewProps) {
   const [policyProfiles, setPolicyProfiles] = useState<PolicyProfile[]>([]);
   const [selectedPolicyProfile, setSelectedPolicyProfile] = useState('standard');
   const [performanceStance, setPerformanceStance] = useState<PerformanceStance>('standard');
+  const [executorConfigs, setExecutorConfigs] = useState<ExecutorConfigEntry[]>([]);
 
   useEffect(() => {
     const api = (window as any).clawdia;
@@ -29,7 +40,9 @@ export default function SettingsView({ onBack: _onBack }: SettingsViewProps) {
       api.settings.getPolicyProfile(),
       api.settings.getPerformanceStance(),
       api.policy.list(),
-    ]).then(([keys, provider, models, unrestricted, policyProfile, stance, profiles]: [
+      api.executor?.list().catch(() => []),
+      api.executor?.getConfig().catch(() => null),
+    ]).then(([keys, provider, models, unrestricted, policyProfile, stance, profiles, defs, configs]: [
       Record<ProviderId, string>,
       ProviderId,
       string[],
@@ -37,6 +50,8 @@ export default function SettingsView({ onBack: _onBack }: SettingsViewProps) {
       string,
       PerformanceStance,
       PolicyProfile[],
+      any[],
+      any,
     ]) => {
       setProviderKeys(keys || { anthropic: '', openai: '', gemini: '' });
       setSelectedProvider(provider || DEFAULT_PROVIDER);
@@ -49,8 +64,28 @@ export default function SettingsView({ onBack: _onBack }: SettingsViewProps) {
       setSelectedPolicyProfile(policyProfile || 'standard');
       setPerformanceStance(stance || 'standard');
       setPolicyProfiles(profiles || []);
+
+      if (defs && configs) {
+        const entries: ExecutorConfigEntry[] = (defs as any[]).map((def: any) => ({
+          id: def.id,
+          displayName: def.displayName,
+          description: def.description,
+          enabled: configs[def.id]?.enabled ?? def.defaultEnabled,
+          resumeSession: configs[def.id]?.resumeSession,
+          resumeThread: configs[def.id]?.resumeThread,
+          synthesize: configs[def.id]?.synthesize,
+        }));
+        setExecutorConfigs(entries);
+      }
     });
   }, []);
+
+  const handleExecutorToggle = async (id: string, field: string, value: boolean) => {
+    const api = (window as any).clawdia;
+    if (!api?.executor) return;
+    await api.executor.patchConfig(id, { [field]: value });
+    setExecutorConfigs(prev => prev.map(e => e.id === id ? { ...e, [field]: value } : e));
+  };
 
   const handleSave = async () => {
     const api = (window as any).clawdia;
@@ -244,6 +279,74 @@ export default function SettingsView({ onBack: _onBack }: SettingsViewProps) {
               ))}
             </div>
           </section>
+
+          {executorConfigs.length > 0 && (
+            <section className={`${sectionCardClass} xl:col-span-2`}>
+              <label className="text-xs font-medium text-text-secondary uppercase tracking-wider">Executors</label>
+              <p className="text-2xs text-text-muted -mt-1">Enable or disable execution paths. Claude Code and Codex require their respective CLIs installed.</p>
+              <div className="flex flex-col gap-2">
+                {executorConfigs.map(exec => (
+                  <div key={exec.id} className="rounded-xl border border-white/[0.06] bg-white/[0.02] px-4 py-3 flex flex-col gap-2">
+                    {/* Row 1: name + enable toggle */}
+                    <div className="flex items-center justify-between gap-3">
+                      <div className="flex flex-col gap-0.5 min-w-0">
+                        <span className="text-sm text-text-primary font-medium">{exec.displayName}</span>
+                        <span className="text-2xs text-text-muted leading-snug">{exec.description}</span>
+                      </div>
+                      {/* Toggle switch */}
+                      <button
+                        onClick={() => { void handleExecutorToggle(exec.id, 'enabled', !exec.enabled); }}
+                        className={`relative flex-shrink-0 w-9 h-5 rounded-full transition-colors cursor-pointer ${exec.enabled ? 'bg-accent' : 'bg-white/[0.12]'}`}
+                        role="switch"
+                        aria-checked={exec.enabled}
+                      >
+                        <span className={`absolute top-0.5 left-0.5 w-4 h-4 rounded-full bg-white shadow transition-transform ${exec.enabled ? 'translate-x-4' : 'translate-x-0'}`} />
+                      </button>
+                    </div>
+
+                    {/* Row 2: sub-options (only shown when enabled) */}
+                    {exec.enabled && (
+                      <div className="flex flex-wrap gap-x-6 gap-y-1.5 pl-0.5">
+                        {exec.resumeSession !== undefined && (
+                          <label className="flex items-center gap-2 cursor-pointer text-xs text-text-secondary">
+                            <input
+                              type="checkbox"
+                              checked={exec.resumeSession}
+                              onChange={e => { void handleExecutorToggle(exec.id, 'resumeSession', e.target.checked); }}
+                              className="w-3 h-3 accent-accent cursor-pointer"
+                            />
+                            Resume session across restarts
+                          </label>
+                        )}
+                        {exec.resumeThread !== undefined && (
+                          <label className="flex items-center gap-2 cursor-pointer text-xs text-text-secondary">
+                            <input
+                              type="checkbox"
+                              checked={exec.resumeThread}
+                              onChange={e => { void handleExecutorToggle(exec.id, 'resumeThread', e.target.checked); }}
+                              className="w-3 h-3 accent-accent cursor-pointer"
+                            />
+                            Resume thread across restarts
+                          </label>
+                        )}
+                        {exec.synthesize !== undefined && (
+                          <label className="flex items-center gap-2 cursor-pointer text-xs text-text-secondary">
+                            <input
+                              type="checkbox"
+                              checked={exec.synthesize}
+                              onChange={e => { void handleExecutorToggle(exec.id, 'synthesize', e.target.checked); }}
+                              className="w-3 h-3 accent-accent cursor-pointer"
+                            />
+                            Synthesize results after both executors complete
+                          </label>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                ))}
+              </div>
+            </section>
+          )}
 
           <div className="xl:col-span-2">
             <div className="h-px bg-border-subtle mb-6" />

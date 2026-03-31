@@ -92,23 +92,25 @@ describe('streamOpenAIChat protocol repair', () => {
 
     expect(mockCreate).toHaveBeenCalledOnce();
     const body = mockCreate.mock.calls[0][0];
-    expect(body.messages).toEqual([
-      { role: 'system', content: 'You are a helpful assistant.' },
-      {
-        role: 'assistant',
-        content: null,
-        tool_calls: [{ id: 'call_1', type: 'function', function: { name: 'shell_exec', arguments: '{}' } }],
-      },
-      {
-        role: 'tool',
-        tool_call_id: 'call_1',
-        content: JSON.stringify({
-          status: 'interrupted',
-          reason: 'protocol_repair',
-          message: 'Tool run was interrupted before completion.',
-        }),
-      },
-      { role: 'user', content: 'continue' },
-    ]);
+    // The core protocol repair should be present: synthetic tool result for the
+    // stale tool_call, followed by the user message. Iteration-tracking hints
+    // may be appended after the user message by the loop machinery.
+    const msgs = body.messages;
+    expect(msgs[0]).toEqual({ role: 'system', content: 'You are a helpful assistant.' });
+    expect(msgs[1]).toEqual({
+      role: 'assistant',
+      content: null,
+      tool_calls: [{ id: 'call_1', type: 'function', function: { name: 'shell_exec', arguments: '{}' } }],
+    });
+    expect(msgs[2]).toEqual({
+      role: 'tool',
+      tool_call_id: 'call_1',
+      content: JSON.stringify({
+        status: 'interrupted',
+        reason: 'protocol_repair',
+        message: 'Tool run was interrupted before completion.',
+      }),
+    });
+    expect(msgs[3]).toEqual({ role: 'user', content: 'continue' });
   });
 });

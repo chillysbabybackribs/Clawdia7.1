@@ -44,6 +44,8 @@ export function registerBrowserIpc(browserService: ElectronBrowserService): void
   ipcMain.handle(IPC.BROWSER_CLEAR_SESSION, (_e, domain: string) => browserService.clearSession(domain));
   ipcMain.handle(IPC.BROWSER_FOCUS_CONVERSATION, (_e, conversationId: string) =>
     browserService.focusConversation(conversationId));
+  ipcMain.handle(IPC.BROWSER_RELEASE_CONVERSATION_TAB, (_e, conversationId: string) =>
+    browserService.releaseTab(conversationId).catch(() => {}));
 
   ipcMain.handle(IPC.BROWSER_OPEN_FILE, (
     _e,

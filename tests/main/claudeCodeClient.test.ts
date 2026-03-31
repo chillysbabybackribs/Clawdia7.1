@@ -19,7 +19,7 @@ vi.mock('../../src/main/mcpBridge', () => ({
 }));
 
 import { spawn } from 'child_process';
-import { runClaudeCode, clearSessions } from '../../src/main/claudeCodeClient';
+import { buildClaudeCodePrompt, runClaudeCode, clearSessions } from '../../src/main/claudeCodeClient';
 
 beforeEach(() => {
   clearSessions();
@@ -30,6 +30,14 @@ beforeEach(() => {
 });
 
 describe('runClaudeCode', () => {
+  it('buildClaudeCodePrompt injects runtime guidance for coding tasks', () => {
+    const prompt = buildClaudeCodePrompt('audit the gemini implementation and fix the response path');
+    expect(prompt).toContain('RUNTIME GUIDANCE');
+    expect(prompt).toContain('Situational Context');
+    expect(prompt).toContain('ACTIVE SKILLS');
+    expect(prompt).toContain('[User task]');
+  });
+
   it('spawns claude with required flags', async () => {
     const promise = runClaudeCode({ conversationId: 'conv-1', prompt: 'hello', onText: () => {} });
     await Promise.resolve();
@@ -88,6 +96,21 @@ describe('runClaudeCode', () => {
     await promise;
 
     expect(chunks).toContain('Hi there');
+  });
+
+  it('writes the compiled runtime-guided prompt to stdin', async () => {
+    const promise = runClaudeCode({
+      conversationId: 'conv-1',
+      prompt: 'audit the gemini implementation',
+      onText: () => {},
+    });
+    await Promise.resolve();
+    mockStdout.emit('data', Buffer.from(''));
+    mockChild.emit('close', 0);
+    await promise;
+
+    expect(mockChild.stdin.write).toHaveBeenCalledWith(expect.stringContaining('RUNTIME GUIDANCE'));
+    expect(mockChild.stdin.write).toHaveBeenCalledWith(expect.stringContaining('[User task]'));
   });
 
   it('stores session_id and passes --resume on second call', async () => {

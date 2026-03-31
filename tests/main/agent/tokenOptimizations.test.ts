@@ -78,7 +78,7 @@ import {
   getOpenAIToolsForTest,
   getGeminiToolsForTest,
 } from '../../../src/main/agent/streamLLM';
-import { trimMessageHistoryForTest } from '../../../src/main/agent/agentLoop';
+import { trimMessageHistoryForTest, normalizeHistoryForProviderForTest } from '../../../src/main/agent/agentLoop';
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 function makeSignal() { return new AbortController().signal; }
@@ -227,6 +227,24 @@ describe('Fix 2: injectDynamicPrompt puts context in user message, not system', 
     const messages = [{ role: 'user', content: 'task' }];
     const result = injectDynamicPromptForTest(messages, '');
     expect(result).toBe(messages); // same reference
+  });
+});
+
+describe('Fix 2b: Gemini message history is normalized before send', () => {
+  it('converts generic content messages into Gemini parts', () => {
+    const messages: any[] = [
+      { role: 'user', content: 'audit the gemini path' },
+      { role: 'assistant', content: 'Checking the runtime path.' },
+      { role: 'user', content: '[Recovery] Try a different approach.' },
+    ];
+
+    normalizeHistoryForProviderForTest(messages, 'gemini', 'test.gemini.normalize');
+
+    expect(messages).toEqual([
+      { role: 'user', parts: [{ text: 'audit the gemini path' }] },
+      { role: 'model', parts: [{ text: 'Checking the runtime path.' }] },
+      { role: 'user', parts: [{ text: '[Recovery] Try a different approach.' }] },
+    ]);
   });
 });
 

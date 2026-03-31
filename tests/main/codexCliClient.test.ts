@@ -26,7 +26,7 @@ vi.mock('../../src/main/settingsStore', () => ({
 
 import { spawn } from 'child_process';
 import { initDb } from '../../src/main/db';
-import { clearCodexSessions, runCodexCli } from '../../src/main/codexCliClient';
+import { buildCodexPrompt, clearCodexSessions, runCodexCli } from '../../src/main/codexCliClient';
 
 beforeEach(() => {
   initDb();
@@ -37,6 +37,15 @@ beforeEach(() => {
 });
 
 describe('runCodexCli', () => {
+  it('buildCodexPrompt injects matched skill instructions', () => {
+    const prompt = buildCodexPrompt('audit the codex implementation and improve performance');
+    expect(prompt).toContain('RUNTIME GUIDANCE');
+    expect(prompt).toContain('Situational Context');
+    expect(prompt).toContain('ACTIVE SKILLS');
+    expect(prompt).toContain('[User task]');
+    expect(prompt).toContain('audit the codex implementation');
+  });
+
   it('spawns codex exec in json mode', async () => {
     const promise = runCodexCli({ conversationId: 'conv-1', prompt: 'hello', onText: () => {} });
     await Promise.resolve();
@@ -49,6 +58,21 @@ describe('runCodexCli', () => {
       ['-c', 'mcp_servers.clawdia.url="http://127.0.0.1:9999/mcp/test"', 'exec', '--dangerously-bypass-approvals-and-sandbox', '--json', '-'],
       expect.any(Object),
     );
+  });
+
+  it('writes the compiled prompt with matched skill context to stdin', async () => {
+    const promise = runCodexCli({
+      conversationId: 'conv-1',
+      prompt: 'audit the codex implementation',
+      onText: () => {},
+    });
+    await Promise.resolve();
+    mockStdout.emit('data', Buffer.from(''));
+    mockChild.emit('close', 0);
+    await promise;
+
+    expect(mockChild.stdin.write).toHaveBeenCalledWith(expect.stringContaining('ACTIVE SKILLS'));
+    expect(mockChild.stdin.write).toHaveBeenCalledWith(expect.stringContaining('[User task]'));
   });
 
   it('emits completed agent messages via onText', async () => {
@@ -70,6 +94,60 @@ describe('runCodexCli', () => {
     expect(chunks).toEqual(['Hi there']);
     expect(result.finalText).toBe('Hi there');
     expect(result.sessionId).toBe('thread-1');
+  });
+
+  it('emits non-message item lifecycle as tool activity', async () => {
+    const activities: any[] = [];
+    const promise = runCodexCli({
+      conversationId: 'conv-1',
+      prompt: 'hello',
+      onText: () => {},
+      onToolActivity: (activity) => activities.push(activity),
+    });
+    await Promise.resolve();
+
+    mockStdout.emit('data', Buffer.from(
+      `${JSON.stringify({ type: 'item.started', item: { id: 'item_tool_1', type: 'exec_command', command: 'npm test' } })}\n`
+      + `${JSON.stringify({ type: 'item.completed', item: { id: 'item_tool_1', type: 'exec_command', command: 'npm test', output: 'ok' } })}\n`,
+    ));
+    mockChild.emit('close', 0);
+
+    await promise;
+    expect(activities).toHaveLength(2);
+    expect(activities[0]).toMatchObject({
+      id: 'item_tool_1',
+      name: 'codex_exec_command',
+      status: 'running',
+      detail: 'npm test',
+    });
+    expect(activities[1]).toMatchObject({
+      id: 'item_tool_1',
+      name: 'codex_exec_command',
+      status: 'success',
+      detail: 'npm test',
+      output: 'ok',
+    });
+  });
+
+  it('streams updated agent_message text incrementally', async () => {
+    const chunks: string[] = [];
+    const promise = runCodexCli({
+      conversationId: 'conv-1',
+      prompt: 'hello',
+      onText: (text) => chunks.push(text),
+    });
+    await Promise.resolve();
+
+    mockStdout.emit('data', Buffer.from(
+      `${JSON.stringify({ type: 'item.updated', item: { id: 'item_msg_1', type: 'agent_message', text: 'Planning' } })}\n`
+      + `${JSON.stringify({ type: 'item.updated', item: { id: 'item_msg_1', type: 'agent_message', text: 'Planning changes' } })}\n`
+      + `${JSON.stringify({ type: 'item.completed', item: { id: 'item_msg_1', type: 'agent_message', text: 'Planning changes' } })}\n`,
+    ));
+    mockChild.emit('close', 0);
+
+    const result = await promise;
+    expect(chunks).toEqual(['Planning', ' changes']);
+    expect(result.finalText).toBe('Planning changes');
   });
 
   it('stores thread id and resumes on the next call', async () => {

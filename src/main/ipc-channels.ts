@@ -100,6 +100,8 @@ export const IPC = {
   BROWSER_CLEAR_SESSION: 'browser:clear-session',
   // Switch the visible browser panel to the tab owned by this conversation.
   BROWSER_FOCUS_CONVERSATION: 'browser:focus-conversation',
+  // Release (close) the browser tab owned by a conversation without deleting the conversation.
+  BROWSER_RELEASE_CONVERSATION_TAB: 'browser:release-conversation-tab',
   // Open a local file in the browser with review / preview / publish mode
   BROWSER_OPEN_FILE: 'browser:open-file',
   // Browser extensions
@@ -141,6 +143,16 @@ export const IPC = {
   // UI state — renderer pushes live layout state; agent tools read it
   UI_STATE_PUSH: 'ui-state:push',
   UI_STATE_GET: 'ui-state:get',
+  // Executor registry / config / state
+  EXECUTOR_LIST: 'executor:list',
+  EXECUTOR_STATE_GET: 'executor:state:get',
+  EXECUTOR_STATE_LIST: 'executor:state:list',
+  EXECUTOR_CONFIG_GET: 'executor:config:get',
+  EXECUTOR_CONFIG_PATCH: 'executor:config:patch',
+  // Task identity + tracking
+  TASK_GET: 'task:get',
+  TASK_GET_LATEST: 'task:get-latest',
+  TASK_LIST: 'task:list',
 } as const;
 
 export const IPC_EVENTS = {
@@ -164,6 +176,12 @@ export const IPC_EVENTS = {
   CALENDAR_EVENTS_CHANGED: 'calendar:events-changed',
   // Swarm events (pushed from main to renderer)
   SWARM_STATE_CHANGED: 'swarm:state-changed',
+  // Concurrent planner events (pushed from main to renderer)
+  CONCURRENT_PLAN_START: 'concurrent:plan:start',
+  CONCURRENT_PLAN_TEXT: 'concurrent:plan:text',
+  CONCURRENT_PLAN_END: 'concurrent:plan:end',
+  CONCURRENT_EXECUTION_START: 'concurrent:execution:start',
+  CONCURRENT_EXECUTION_END: 'concurrent:execution:end',
   // Identity events (pushed from main to renderer)
   IDENTITY_ACCOUNTS_CHANGED: 'identity:accounts-changed',
   // Spending events (pushed from main to renderer)

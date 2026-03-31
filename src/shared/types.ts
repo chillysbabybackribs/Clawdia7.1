@@ -5,10 +5,26 @@ export interface MessageIteration {
   toolCalls: ToolCall[]; // tool calls dispatched after this text (may be [])
 }
 
+export type ConcurrentFeedSource = 'claudeCode' | 'codex' | 'synthesis' | 'planner';
+
+export interface ConcurrentSubtask {
+  id: string;
+  executor: 'claudeCode' | 'codex';
+  label: string;
+  prompt: string;
+  dependsOn: string[];   // ids of subtasks that must complete first
+}
+
+export interface ConcurrentPlan {
+  goal: string;
+  subtasks: ConcurrentSubtask[];
+  synthesisHint: string;  // guidance for the final synthesis step
+}
+
 // Flat append-only feed item — renderer-only, NOT persisted to DB
 export type FeedItem =
   | { kind: 'tool'; tool: ToolCall }
-  | { kind: 'text'; text: string; isStreaming?: boolean };
+  | { kind: 'text'; text: string; isStreaming?: boolean; source?: ConcurrentFeedSource };
 
 export interface MessageAttachment {
   id: string;
@@ -67,6 +83,7 @@ export interface ToolCall {
   id: string;
   name: string;
   status: 'running' | 'success' | 'error';
+  source?: ConcurrentFeedSource;
   detail?: string;
   input?: string;         // NEW: full command/input for tool call
   output?: string;        // NEW: full result/output from tool call

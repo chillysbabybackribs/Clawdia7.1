@@ -4,13 +4,16 @@ export interface ConversationTab {
   id: string;
   conversationId: string | null;
   title?: string;
-  mode?: 'chat' | 'claude_terminal' | 'codex_terminal';
+  mode?: 'chat' | 'claude_terminal' | 'codex_terminal' | 'concurrent';
+  status?: 'idle' | 'running' | 'completed' | 'failed';
 }
 
 export function makeTab(conversationId: string | null): ConversationTab {
   return {
     id: `tab-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
     conversationId,
+    mode: 'chat',
+    status: 'idle',
   };
 }
 

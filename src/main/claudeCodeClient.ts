@@ -4,6 +4,8 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import { getClaudeMcpConfigPath } from './mcpBridge';
+import { classify } from './agent/classify';
+import { buildPromptComposition } from './skills/promptComposition';
 import type { ToolCall } from '../shared/types';
 
 const sessions = new Map<string, string>();
@@ -17,6 +19,8 @@ export interface RunClaudeCodeOptions {
   skipPermissions?: boolean;
   /** Seed the in-memory cache from a previously persisted session id (e.g. loaded from DB on startup). */
   persistedSessionId?: string | null;
+  /** When aborted, the spawned claude process will be killed immediately. */
+  signal?: AbortSignal;
 }
 
 export interface RunClaudeCodeResult {
@@ -26,6 +30,22 @@ export interface RunClaudeCodeResult {
 
 export function clearSessions(): void {
   sessions.clear();
+}
+
+export function buildClaudeCodePrompt(prompt: string): string {
+  const profile = classify(prompt);
+  const promptComposition = buildPromptComposition({
+    message: prompt,
+    toolGroup: profile.toolGroup,
+    executor: 'agentLoop',
+  });
+
+  if (!promptComposition.promptBlock) return prompt;
+
+  return `${promptComposition.promptBlock}
+
+[User task]
+${prompt}`;
 }
 
 // ── Tool-name → human-readable summary helpers ────────────────────────────────
@@ -106,7 +126,7 @@ function parseToolResult(content: unknown): { text: string; isError: boolean } {
 }
 
 export function runClaudeCode(options: RunClaudeCodeOptions): Promise<RunClaudeCodeResult> {
-  const { conversationId, prompt, attachments, onText, onToolActivity, skipPermissions, persistedSessionId } = options;
+  const { conversationId, prompt, attachments, onText, onToolActivity, skipPermissions, persistedSessionId, signal } = options;
   const claudeBin = process.env.CLAUDE_BIN || 'claude';
 
   // Seed the in-memory cache from a durable persisted value when the process
@@ -120,7 +140,7 @@ export function runClaudeCode(options: RunClaudeCodeOptions): Promise<RunClaudeC
   return getClaudeMcpConfigPath(conversationId).then((mcpConfigPath) => {
   // Write attachments to temp files and append their paths/content to the prompt
   const tmpFiles: string[] = [];
-  let finalPrompt = prompt;
+  let finalPrompt = buildClaudeCodePrompt(prompt);
   for (const a of (attachments ?? [])) {
     try {
       if (a.kind === 'image') {
@@ -174,6 +194,17 @@ export function runClaudeCode(options: RunClaudeCodeOptions): Promise<RunClaudeC
       env: { ...process.env },
       stdio: ['pipe', 'pipe', 'pipe'],
     });
+
+    // Kill the subprocess immediately when the abort signal fires.
+    if (signal) {
+      if (signal.aborted) {
+        child.kill('SIGTERM');
+      } else {
+        signal.addEventListener('abort', () => {
+          child.kill('SIGTERM');
+        }, { once: true });
+      }
+    }
 
     if (finalPrompt) {
       child.stdin.write(finalPrompt);

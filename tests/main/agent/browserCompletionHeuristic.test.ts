@@ -17,6 +17,10 @@ vi.mock('../../../src/main/agent/recovery', () => ({
   verifyOutcomes: vi.fn(() => null),
 }));
 
+vi.mock('../../../src/main/agent/spending-budget', () => ({
+  checkBudget: vi.fn(() => ({ allowed: true, remaining: 9999, blockedBy: null })),
+}));
+
 import { agentLoop } from '../../../src/main/agent/agentLoop';
 import { streamLLM } from '../../../src/main/agent/streamLLM';
 import { dispatch } from '../../../src/main/agent/dispatch';

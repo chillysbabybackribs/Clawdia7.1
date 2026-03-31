@@ -103,4 +103,5 @@ export interface ToolUseBlock {
   id: string;
   name: string;
   input: Record<string, unknown>;
+  thoughtSignature?: string;
 }

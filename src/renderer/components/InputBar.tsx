@@ -4,7 +4,7 @@ import type { MessageAttachment } from '../../shared/types';
 import ScreenshotSelector from './ScreenshotSelector';
 
 interface InputBarProps {
-  onSend: (message: string, attachments?: MessageAttachment[]) => void;
+  onSend: (message: string, attachments?: MessageAttachment[], provider?: string, model?: string) => void;
   isStreaming: boolean;
   isPaused: boolean;
   onStop: () => void;
@@ -20,11 +20,17 @@ interface InputBarProps {
   codexStatus?: 'idle' | 'starting' | 'ready' | 'working' | 'errored' | 'stopped';
   onToggleCodexMode?: () => void;
   codexModeDisabled?: boolean;
+  concurrentMode?: boolean;
+  onToggleConcurrentMode?: () => void;
+  concurrentModeDisabled?: boolean;
   disabled?: boolean;
   chatZoom?: number;
   onChatZoomIn?: () => void;
   onChatZoomOut?: () => void;
   onChatZoomReset?: () => void;
+  taskHistoryAvailable?: boolean;
+  taskHistoryOpen?: boolean;
+  onToggleTaskHistory?: () => void;
 }
 
 const LARGE_PASTE_CHAR_THRESHOLD = 2000;
@@ -47,11 +53,17 @@ export default function InputBar({
   codexStatus = 'idle',
   onToggleCodexMode,
   codexModeDisabled = false,
+  concurrentMode = false,
+  onToggleConcurrentMode,
+  concurrentModeDisabled = false,
   disabled = false,
   chatZoom,
   onChatZoomIn,
   onChatZoomOut,
   onChatZoomReset,
+  taskHistoryAvailable = false,
+  taskHistoryOpen = false,
+  onToggleTaskHistory,
 }: InputBarProps) {
   const [text, setText] = useState('');
   const [attachments, setAttachments] = useState<MessageAttachment[]>([]);
@@ -187,7 +199,7 @@ export default function InputBar({
     const trimmed = text.trim();
     if (!trimmed && attachments.length === 0) return;
     if (isStreaming) onAddContext(trimmed);
-    else onSend(trimmed, attachments);
+    else onSend(trimmed, attachments, provider, models[modelIdx]?.id);
     setText('');
     setAttachments([]);
     if (textareaRef.current) textareaRef.current.style.height = 'auto';
@@ -311,7 +323,9 @@ export default function InputBar({
     ? 'Claude Code'
     : codexMode
       ? 'Codex'
-      : (currentModel?.label || 'Select model');
+      : concurrentMode
+        ? 'Concurrent'
+        : (currentModel?.label || 'Select model');
   const reversedProviders = [...PROVIDERS].reverse();
 
   const ensureChatMode = useCallback(async () => {
@@ -338,10 +352,11 @@ export default function InputBar({
 
   const handleClaudeCodeSelect = useCallback(async () => {
     if (codexMode) await onToggleCodexMode?.();
+    if (concurrentMode) await onToggleConcurrentMode?.();
     if (!claudeMode) await onToggleClaudeMode?.();
     setActiveProviderMenu(null);
     setModelOpen(false);
-  }, [claudeMode, codexMode, onToggleClaudeMode, onToggleCodexMode]);
+  }, [claudeMode, codexMode, concurrentMode, onToggleClaudeMode, onToggleCodexMode, onToggleConcurrentMode]);
 
   const toggleProviderSection = useCallback((providerId: ProviderId) => {
     setActiveProviderMenu((current) => current === providerId ? null : providerId);
@@ -349,10 +364,19 @@ export default function InputBar({
 
   const handleCodexSelect = useCallback(async () => {
     if (claudeMode) await onToggleClaudeMode?.();
+    if (concurrentMode) await onToggleConcurrentMode?.();
     if (!codexMode) await onToggleCodexMode?.();
     setActiveProviderMenu(null);
     setModelOpen(false);
-  }, [claudeMode, codexMode, onToggleClaudeMode, onToggleCodexMode]);
+  }, [claudeMode, codexMode, concurrentMode, onToggleClaudeMode, onToggleCodexMode, onToggleConcurrentMode]);
+
+  const handleConcurrentSelect = useCallback(async () => {
+    if (claudeMode) await onToggleClaudeMode?.();
+    if (codexMode) await onToggleCodexMode?.();
+    if (!concurrentMode) await onToggleConcurrentMode?.();
+    setActiveProviderMenu(null);
+    setModelOpen(false);
+  }, [claudeMode, codexMode, concurrentMode, onToggleClaudeMode, onToggleCodexMode, onToggleConcurrentMode]);
 
   return (
     <>
@@ -399,6 +423,29 @@ export default function InputBar({
               <polyline points="6 9 12 15 18 9" />
             </svg>
           </button>
+
+          {/* Executor status badge — visible only when a non-chat mode is active */}
+          {(claudeMode || codexMode || concurrentMode) && (() => {
+            const activeStatus = claudeMode ? claudeStatus : codexMode ? codexStatus : 'idle';
+            const dot: Record<string, string> = {
+              idle:     'bg-white/20',
+              starting: 'bg-yellow-400 animate-pulse',
+              ready:    'bg-emerald-400',
+              working:  'bg-accent animate-pulse',
+              errored:  'bg-red-400',
+              stopped:  'bg-white/20',
+            };
+            const label: Record<string, string> = {
+              idle: 'idle', starting: 'starting…', ready: 'ready',
+              working: 'working…', errored: 'error', stopped: 'stopped',
+            };
+            return (
+              <span className="ml-2 flex items-center gap-1.5 text-[11px] text-text-muted select-none">
+                <span className={`w-1.5 h-1.5 rounded-full flex-shrink-0 ${dot[activeStatus] ?? 'bg-white/20'}`} />
+                <span>{label[activeStatus] ?? activeStatus}</span>
+              </span>
+            );
+          })()}
 
           {modelOpen && (
             <div className="absolute bottom-full left-0 mb-2 min-w-[210px] overflow-visible animate-fade-in z-50">
@@ -456,6 +503,21 @@ export default function InputBar({
                       <svg className="text-text-secondary flex-shrink-0" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><polyline points="20 6 9 17 4 12" /></svg>
                     )}
                   </button>
+                  {!concurrentModeDisabled && (
+                    <button
+                      onClick={() => { void handleConcurrentSelect(); }}
+                      className={`w-full flex items-center gap-2.5 px-3.5 py-2 text-left text-[13px] transition-all ${
+                        concurrentMode
+                          ? 'bg-white/[0.08] cursor-pointer'
+                          : 'hover:bg-white/[0.05] cursor-pointer'
+                      }`}
+                    >
+                      <span className="flex-1 font-medium" style={{ color: '#a78bfa' }}>Concurrent</span>
+                      {concurrentMode && (
+                        <svg className="text-text-secondary flex-shrink-0" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><polyline points="20 6 9 17 4 12" /></svg>
+                      )}
+                    </button>
+                  )}
                 </div>
               </div>
               {activeProviderMenu && (
@@ -496,6 +558,23 @@ export default function InputBar({
           )}
 
           <div className="flex-1 flex items-center justify-end gap-2">
+            {taskHistoryAvailable && (
+              <button
+                onClick={onToggleTaskHistory}
+                title={taskHistoryOpen ? 'Close task history' : 'Open task history'}
+                className={`flex items-center gap-1.5 text-[11px] transition-colors cursor-pointer ${
+                  taskHistoryOpen
+                    ? 'text-text-primary'
+                    : 'text-text-muted hover:text-text-secondary'
+                }`}
+              >
+                <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                  <circle cx="12" cy="12" r="10" />
+                  <polyline points="12 6 12 12 16 14" />
+                </svg>
+                <span>Tasks</span>
+              </button>
+            )}
           </div>
         </div>
       )}

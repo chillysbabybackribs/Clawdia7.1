@@ -304,10 +304,10 @@ export class PipelineOrchestrator {
     let subtasks: Subtask[] = [];
     try {
       const plannerPrompt =
-        'You are a task planner. Break the user goal into 2–5 independent parallel subtasks. ' +
-        'Each subtask should be self-contained and executable by a separate agent. ' +
-        'Respond ONLY with a JSON array: [{"id":"sub-1","subtask":"short name","goal":"what the agent should accomplish"}]. ' +
-        'Maximum 5 subtasks. Minimum 2.';
+        'You are a task decomposition assistant. Your only job is to break the user goal into 2–5 independent subtasks and return them as JSON. ' +
+        'Do not execute the tasks. Do not explain your reasoning. Do not refuse. Just output the JSON array. ' +
+        'Respond ONLY with a JSON array in this exact format: [{"id":"sub-1","subtask":"short name","goal":"what should be accomplished"}]. ' +
+        'Maximum 5 subtasks. Minimum 2. Output JSON only — no other text.';
 
       const { text } = await streamLLM(
         [{ role: 'user', content: goal }],

@@ -8,6 +8,7 @@ describe('prompt identity wiring', () => {
     const prompt = buildStaticPrompt(
       { toolGroup: 'browser', modelTier: 'powerful', isGreeting: false },
       false,
+      'ACTIVE SKILLS:\n- Browser Grounding',
     );
 
     expect(prompt).toContain('You are Clawdia, an agentic AI assistant');
@@ -19,10 +20,11 @@ describe('prompt identity wiring', () => {
     expect(prompt).toContain('Use browser_screenshot only when the task is explicitly visual');
     expect(prompt).toContain('Always use your tools');
     expect(prompt).toContain('When a task involves web content, use browser tools directly');
+    expect(prompt).toContain('ACTIVE SKILLS');
   });
 
   it('buildSharedSystemPrompt includes the current shared identity and tool-loading rules', async () => {
-    const prompt = await buildSharedSystemPrompt(false);
+    const prompt = await buildSharedSystemPrompt(false, 'debug this code path');
 
     expect(prompt).toContain('You are Clawdia, an agentic AI assistant');
     expect(prompt).toContain('You have access to a local CLI environment and a browser.');
@@ -31,5 +33,7 @@ describe('prompt identity wiring', () => {
     expect(prompt).toContain('- search_tools: discover additional tools');
     expect(prompt).toContain('call search_tools FIRST');
     expect(prompt).toContain('Prefer structured tools');
+    expect(prompt).toContain('RUNTIME GUIDANCE');
+    expect(prompt).toContain('Domain: Coding');
   });
 });
