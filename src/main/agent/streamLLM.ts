@@ -1,5 +1,6 @@
 // src/main/agent/streamLLM.ts
 import Anthropic from '@anthropic-ai/sdk';
+import { modelHasCapability } from '../../shared/model-registry';
 import { BROWSER_TOOLS } from '../core/cli/browserTools';
 import { searchTools, toOpenAITool, toGeminiDeclaration, getSearchToolGemini, SEARCH_TOOL_OPENAI } from '../core/cli/toolRegistry';
 import { SELF_AWARE_TOOLS } from '../core/cli/selfAwareTools';
@@ -52,9 +53,9 @@ const _openAIToolCache = new Map<string, ReturnType<typeof toOpenAITool>[]>();
 const _geminiToolCache = new Map<string, any[]>();
 
 function applyAnthropicToolCompatibility(model: string, tools: Anthropic.Tool[]): Anthropic.Tool[] {
-  // Claude Haiku 4.5 does not support programmatic tool calling for server web tools.
-  // Restrict those specific tools to direct invocation while leaving other models unchanged.
-  if (!model.startsWith('claude-haiku-4-5')) return tools;
+  // Some models (e.g. Haiku 4.5) do not support programmatic tool calling for
+  // server web tools. Restrict those tools to direct invocation only.
+  if (!modelHasCapability(model, 'restrictServerToolCallers')) return tools;
 
   return tools.map((tool) => {
     if (!WEB_TOOL_NAMES.has(tool.name)) return tool;

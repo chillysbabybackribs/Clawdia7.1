@@ -7,6 +7,18 @@ export interface ModelOption {
   family: string;
   tier: 'fast' | 'balanced' | 'deep';
   description: string;
+  /**
+   * Whether the model supports extended thinking (budget_tokens / thinking blocks).
+   * Anthropic: Opus 4+, Sonnet 4+, claude-3-7. OpenAI/Gemini: false.
+   */
+  supportsExtendedThinking: boolean;
+  /**
+   * Whether server-side tool callers (web_search, web_fetch) must be restricted
+   * to allowed_callers: ['direct'] due to the model not supporting programmatic
+   * tool calling for those tools.
+   * Anthropic: Haiku 4.5. All others: false.
+   */
+  restrictServerToolCallers: boolean;
 }
 
 export const PROVIDERS: Array<{ id: ProviderId; label: string }> = [
@@ -23,6 +35,8 @@ export const MODEL_REGISTRY: ModelOption[] = [
     family: 'Claude',
     tier: 'deep',
     description: 'Most capable for architecture, review, and deep reasoning.',
+    supportsExtendedThinking: true,
+    restrictServerToolCallers: false,
   },
   {
     id: 'claude-sonnet-4-6',
@@ -31,6 +45,8 @@ export const MODEL_REGISTRY: ModelOption[] = [
     family: 'Claude',
     tier: 'balanced',
     description: 'Balanced default for day-to-day coding and execution.',
+    supportsExtendedThinking: true,
+    restrictServerToolCallers: false,
   },
   {
     id: 'claude-haiku-4-5-20251001',
@@ -39,6 +55,8 @@ export const MODEL_REGISTRY: ModelOption[] = [
     family: 'Claude',
     tier: 'fast',
     description: 'Fastest Claude option for lightweight work.',
+    supportsExtendedThinking: false,
+    restrictServerToolCallers: true,
   },
   {
     id: 'gpt-5.4',
@@ -47,6 +65,8 @@ export const MODEL_REGISTRY: ModelOption[] = [
     family: 'GPT',
     tier: 'deep',
     description: 'Current OpenAI flagship for agentic, coding, and professional workflows.',
+    supportsExtendedThinking: false,
+    restrictServerToolCallers: false,
   },
   {
     id: 'gpt-5.4-mini',
@@ -55,6 +75,8 @@ export const MODEL_REGISTRY: ModelOption[] = [
     family: 'GPT',
     tier: 'balanced',
     description: 'Balanced GPT-5.4 class model for coding and subagents.',
+    supportsExtendedThinking: false,
+    restrictServerToolCallers: false,
   },
   {
     id: 'gpt-5.4-nano',
@@ -63,6 +85,8 @@ export const MODEL_REGISTRY: ModelOption[] = [
     family: 'GPT',
     tier: 'fast',
     description: 'Fastest, cheapest GPT-5.4 model for simple high-volume tasks.',
+    supportsExtendedThinking: false,
+    restrictServerToolCallers: false,
   },
   {
     id: 'gpt-5',
@@ -71,6 +95,8 @@ export const MODEL_REGISTRY: ModelOption[] = [
     family: 'GPT',
     tier: 'deep',
     description: 'OpenAI GPT-5 flagship (Aug 2025).',
+    supportsExtendedThinking: false,
+    restrictServerToolCallers: false,
   },
   {
     id: 'gpt-5-mini',
@@ -79,6 +105,8 @@ export const MODEL_REGISTRY: ModelOption[] = [
     family: 'GPT',
     tier: 'balanced',
     description: 'GPT-5 balanced model.',
+    supportsExtendedThinking: false,
+    restrictServerToolCallers: false,
   },
   {
     id: 'gpt-5-nano',
@@ -87,6 +115,8 @@ export const MODEL_REGISTRY: ModelOption[] = [
     family: 'GPT',
     tier: 'fast',
     description: 'GPT-5 fast/lightweight model.',
+    supportsExtendedThinking: false,
+    restrictServerToolCallers: false,
   },
   {
     id: 'gpt-4.1',
@@ -95,6 +125,8 @@ export const MODEL_REGISTRY: ModelOption[] = [
     family: 'GPT',
     tier: 'deep',
     description: 'Strong coding and instruction-following model (Apr 2025).',
+    supportsExtendedThinking: false,
+    restrictServerToolCallers: false,
   },
   {
     id: 'gpt-4.1-mini',
@@ -103,6 +135,8 @@ export const MODEL_REGISTRY: ModelOption[] = [
     family: 'GPT',
     tier: 'balanced',
     description: 'Fast and cost-efficient GPT-4.1 variant.',
+    supportsExtendedThinking: false,
+    restrictServerToolCallers: false,
   },
   {
     id: 'gpt-4.1-nano',
@@ -111,6 +145,8 @@ export const MODEL_REGISTRY: ModelOption[] = [
     family: 'GPT',
     tier: 'fast',
     description: 'Smallest, fastest GPT-4.1 variant.',
+    supportsExtendedThinking: false,
+    restrictServerToolCallers: false,
   },
   {
     id: 'o3',
@@ -119,6 +155,8 @@ export const MODEL_REGISTRY: ModelOption[] = [
     family: 'Reasoning',
     tier: 'deep',
     description: 'OpenAI o3 reasoning model for complex multi-step problems.',
+    supportsExtendedThinking: false,
+    restrictServerToolCallers: false,
   },
   {
     id: 'o4-mini',
@@ -127,6 +165,8 @@ export const MODEL_REGISTRY: ModelOption[] = [
     family: 'Reasoning',
     tier: 'balanced',
     description: 'Fast reasoning model, strong at coding and math.',
+    supportsExtendedThinking: false,
+    restrictServerToolCallers: false,
   },
   {
     id: 'o3-mini',
@@ -135,6 +175,8 @@ export const MODEL_REGISTRY: ModelOption[] = [
     family: 'Reasoning',
     tier: 'fast',
     description: 'Compact reasoning model for cost-efficient inference.',
+    supportsExtendedThinking: false,
+    restrictServerToolCallers: false,
   },
   {
     id: 'gemini-2.5-pro',
@@ -143,6 +185,8 @@ export const MODEL_REGISTRY: ModelOption[] = [
     family: 'Gemini',
     tier: 'deep',
     description: 'Top Gemini model for complex reasoning and coding.',
+    supportsExtendedThinking: false,
+    restrictServerToolCallers: false,
   },
   {
     id: 'gemini-2.5-flash',
@@ -151,6 +195,8 @@ export const MODEL_REGISTRY: ModelOption[] = [
     family: 'Gemini',
     tier: 'balanced',
     description: 'Balanced Gemini default with strong tool use support.',
+    supportsExtendedThinking: false,
+    restrictServerToolCallers: false,
   },
   {
     id: 'gemini-2.5-flash-lite',
@@ -159,6 +205,8 @@ export const MODEL_REGISTRY: ModelOption[] = [
     family: 'Gemini',
     tier: 'fast',
     description: 'Most cost-efficient Gemini option for lightweight tasks.',
+    supportsExtendedThinking: false,
+    restrictServerToolCallers: false,
   },
   {
     id: 'gemini-3-pro-preview',
@@ -167,6 +215,8 @@ export const MODEL_REGISTRY: ModelOption[] = [
     family: 'Gemini',
     tier: 'deep',
     description: 'Next-gen Gemini flagship, preview access only.',
+    supportsExtendedThinking: false,
+    restrictServerToolCallers: false,
   },
   {
     id: 'gemini-3-flash-preview',
@@ -175,6 +225,8 @@ export const MODEL_REGISTRY: ModelOption[] = [
     family: 'Gemini',
     tier: 'balanced',
     description: 'Next-gen Gemini fast model, preview access only.',
+    supportsExtendedThinking: false,
+    restrictServerToolCallers: false,
   },
 ];
 
@@ -192,6 +244,17 @@ export function getModelsForProvider(provider: ProviderId): ModelOption[] {
 
 export function getModelById(modelId: string): ModelOption | undefined {
   return MODEL_REGISTRY.find((model) => model.id === modelId);
+}
+
+/**
+ * Check a capability flag for a model ID.
+ * Falls back to `false` for unrecognised model IDs (safe default).
+ */
+export function modelHasCapability(
+  modelId: string,
+  capability: 'supportsExtendedThinking' | 'restrictServerToolCallers',
+): boolean {
+  return getModelById(modelId)?.[capability] ?? false;
 }
 
 /**

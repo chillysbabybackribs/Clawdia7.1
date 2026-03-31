@@ -3,6 +3,7 @@ import type { WebContents } from 'electron';
 import * as fs from 'fs';
 import { IPC_EVENTS } from './ipc-channels';
 import type { MessageAttachment } from '../shared/types';
+import { modelHasCapability } from '../shared/model-registry';
 import { BROWSER_TOOLS, executeBrowserTool } from './core/cli/browserTools';
 import { executeShellTool } from './core/cli/shellTools';
 import type { BrowserService } from './core/browser/BrowserService';
@@ -71,11 +72,7 @@ function buildUserContent(
 }
 
 function modelSupportsExtendedThinking(apiModelId: string): boolean {
-  return (
-    apiModelId.includes('claude-opus-4')
-    || apiModelId.includes('claude-sonnet-4')
-    || apiModelId.includes('claude-3-7')
-  );
+  return modelHasCapability(apiModelId, 'supportsExtendedThinking');
 }
 
 type StreamParams = {
