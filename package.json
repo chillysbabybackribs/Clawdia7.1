@@ -10,7 +10,7 @@
     "node": ">=20.0.0"
   },
   "scripts": {
-    "rebuild:native": "electron-rebuild -f -w better-sqlite3,node-pty",
+    "rebuild:native": "node ./node_modules/@electron/rebuild/lib/cli.js -f -w better-sqlite3,node-pty -v 39.5.1",
     "postinstall": "npm run rebuild:native",
     "predev": "npm run rebuild:native && tsc -p tsconfig.main.json",
     "dev": "concurrently --kill-others-on-fail \"npm run dev:main\" \"npm run dev:renderer\" \"npm run dev:electron\"",

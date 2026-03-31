@@ -450,24 +450,24 @@ function TerminalPane({
           )}
         </div>
         <div className="flex items-center gap-2">
-          <div className="flex items-center gap-1 rounded border border-white/[0.06] bg-white/[0.03] px-1 py-0.5">
+          <div className="flex items-center gap-1 rounded border border-white/[0.06] bg-white/[0.03] px-1.5 py-1">
             <button
               onClick={handleZoomOut}
-              className="rounded px-1 text-[11px] leading-none text-text-secondary transition-colors hover:bg-white/[0.06] hover:text-text-primary"
+              className="rounded px-1.5 text-[13px] leading-none text-text-secondary transition-colors hover:bg-white/[0.06] hover:text-text-primary"
               title="Zoom out"
             >
               -
             </button>
             <button
               onClick={handleZoomReset}
-              className="rounded px-1 text-[10px] font-medium text-text-secondary transition-colors hover:bg-white/[0.06] hover:text-text-primary"
+              className="rounded px-1.5 text-[12px] font-medium text-text-secondary transition-colors hover:bg-white/[0.06] hover:text-text-primary"
               title="Reset zoom"
             >
               {fontSize}px
             </button>
             <button
               onClick={handleZoomIn}
-              className="rounded px-1 text-[11px] leading-none text-text-secondary transition-colors hover:bg-white/[0.06] hover:text-text-primary"
+              className="rounded px-1.5 text-[13px] leading-none text-text-secondary transition-colors hover:bg-white/[0.06] hover:text-text-primary"
               title="Zoom in"
             >
               +
@@ -476,7 +476,7 @@ function TerminalPane({
           {onClose && (
             <button
               onClick={onClose}
-              className="rounded px-1.5 py-0.5 text-[11px] leading-none text-text-secondary transition-colors hover:bg-white/[0.06] hover:text-text-primary"
+              className="rounded px-2 py-1 text-[14px] leading-none text-text-secondary transition-colors hover:bg-white/[0.06] hover:text-text-primary"
               title={closeTitle}
             >
               ×
@@ -485,7 +485,7 @@ function TerminalPane({
           {sessionMode === 'agent_owned' && !isObserving && (
             <button
               onClick={handleRequestTakeover}
-              className="rounded px-2 py-1 text-[10px] font-medium text-sky-200 transition-colors hover:bg-sky-400/10"
+              className="rounded px-2.5 py-1 text-[12px] font-medium text-sky-200 transition-colors hover:bg-sky-400/10"
               title="Request terminal takeover"
             >
               Request takeover
@@ -494,10 +494,10 @@ function TerminalPane({
           {!isObserving && (
             <button
               onClick={handleRestart}
-              className="rounded p-1 text-text-secondary transition-colors hover:bg-white/[0.06] hover:text-text-primary"
+              className="rounded p-1.5 text-text-secondary transition-colors hover:bg-white/[0.06] hover:text-text-primary"
               title="Restart terminal"
             >
-              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                 <path d="M21 2v6h-6" />
                 <path d="M3 12a9 9 0 0 1 15-6.7L21 8" />
                 <path d="M3 22v-6h6" />
@@ -627,13 +627,13 @@ function TerminalTabBar({
   onToggleObserve,
 }: TerminalTabBarProps) {
   return (
-    <div className="flex h-9 flex-shrink-0 items-center border-b border-white/[0.06] bg-[#0d0d10] px-2 gap-1">
+    <div className="flex h-10 flex-shrink-0 items-center border-b border-white/[0.06] bg-[#0d0d10] px-2 gap-1">
       {/* Tab pills */}
       {tabs.map((tab) => (
         <div
           key={tab.id}
           onClick={() => onSelectTab(tab.id)}
-          className={`flex items-center gap-1 rounded px-2 py-1 text-[11px] font-medium cursor-pointer select-none transition-colors ${
+          className={`flex items-center gap-1.5 rounded px-2.5 py-1.5 text-[13px] font-medium cursor-pointer select-none transition-colors ${
             tab.id === activeTabId
               ? 'bg-white/[0.10] text-text-primary'
               : 'text-text-secondary hover:bg-white/[0.06] hover:text-text-primary'
@@ -643,7 +643,7 @@ function TerminalTabBar({
           {tabs.length > 1 && (
             <button
               onClick={(e) => { e.stopPropagation(); onCloseTab(tab.id); }}
-              className="ml-1 rounded p-0.5 hover:bg-white/[0.12] text-text-secondary hover:text-text-primary leading-none"
+              className="ml-1 rounded p-0.5 hover:bg-white/[0.12] text-text-secondary hover:text-text-primary leading-none text-[14px]"
               title="Close tab"
             >
               ×
@@ -655,7 +655,7 @@ function TerminalTabBar({
       {/* Add tab */}
       <button
         onClick={onAddTab}
-        className="rounded px-1.5 py-1 text-[13px] leading-none text-text-secondary hover:bg-white/[0.06] hover:text-text-primary transition-colors"
+        className="rounded px-2 py-1.5 text-[15px] leading-none text-text-secondary hover:bg-white/[0.06] hover:text-text-primary transition-colors"
         title="New terminal tab"
       >
         +
@@ -668,7 +668,7 @@ function TerminalTabBar({
       {splitActive && (
         <button
           onClick={onToggleObserve}
-          className={`rounded px-2 py-1 text-[10px] font-medium transition-colors ${
+          className={`rounded px-2.5 py-1.5 text-[12px] font-medium transition-colors ${
             splitIsObserving
               ? 'bg-sky-400/20 text-sky-300'
               : 'text-text-secondary hover:bg-white/[0.06] hover:text-text-primary'
@@ -682,7 +682,7 @@ function TerminalTabBar({
       {/* Split toggle */}
       <button
         onClick={onToggleSplit}
-        className={`rounded px-2 py-1 text-[10px] font-medium transition-colors ${
+        className={`rounded px-2.5 py-1.5 text-[12px] font-medium transition-colors ${
           splitActive
             ? 'bg-white/[0.10] text-text-primary'
             : 'text-text-secondary hover:bg-white/[0.06] hover:text-text-primary'

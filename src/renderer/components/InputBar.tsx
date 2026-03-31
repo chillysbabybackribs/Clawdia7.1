@@ -1,6 +1,7 @@
 import React, { useState, useRef, useCallback, useEffect } from 'react';
 import { DEFAULT_PROVIDER, getModelsForProvider, PROVIDERS, MODEL_REGISTRY, type ProviderId } from '../../shared/model-registry';
 import type { MessageAttachment } from '../../shared/types';
+import ScreenshotSelector from './ScreenshotSelector';
 
 interface InputBarProps {
   onSend: (message: string, attachments?: MessageAttachment[]) => void;
@@ -51,6 +52,7 @@ export default function InputBar({
 }: InputBarProps) {
   const [text, setText] = useState('');
   const [attachments, setAttachments] = useState<MessageAttachment[]>([]);
+  const [screenshotActive, setScreenshotActive] = useState(false);
   const [provider, setProvider] = useState<ProviderId>(DEFAULT_PROVIDER);
   const [models, setModels] = useState(() => getModelsForProvider(DEFAULT_PROVIDER));
   const [modelIdx, setModelIdx] = useState(0);
@@ -205,6 +207,20 @@ export default function InputBar({
     fileInputRef.current?.click();
   }, []);
 
+  const handleScreenshotCapture = useCallback((dataUrl: string) => {
+    setScreenshotActive(false);
+    const attachment: MessageAttachment = {
+      id: `screenshot-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+      kind: 'image',
+      name: `screenshot-${Date.now()}.png`,
+      size: Math.round((dataUrl.length * 3) / 4),
+      mimeType: 'image/png',
+      dataUrl,
+    };
+    setAttachments((prev) => [...prev, attachment]);
+    textareaRef.current?.focus();
+  }, []);
+
   const handleRemoveAttachment = useCallback((id: string) => {
     setAttachments((prev) => prev.filter((attachment) => attachment.id !== id));
   }, []);
@@ -288,6 +304,13 @@ export default function InputBar({
   }, [claudeMode, codexMode, onToggleClaudeMode, onToggleCodexMode]);
 
   return (
+    <>
+    {screenshotActive && (
+      <ScreenshotSelector
+        onCapture={handleScreenshotCapture}
+        onCancel={() => setScreenshotActive(false)}
+      />
+    )}
     <div
       className={`w-full px-5 pb-5 pt-4${disabled ? ' opacity-50 pointer-events-none' : ''}`}
       style={{
@@ -431,8 +454,8 @@ export default function InputBar({
           bg-[#18181c] border
           border-[1.5px] transition-colors duration-200
           ${focused
-            ? 'border-[#a0a0ad] shadow-[inset_0_1px_4px_rgba(0,0,0,0.2),0_-2px_8px_rgba(0,0,0,0.25),0_0_0_1px_rgba(160,160,173,0.15)]'
-            : 'border-[#7a7a85] shadow-[inset_0_1px_4px_rgba(0,0,0,0.2),0_-2px_8px_rgba(0,0,0,0.25)]'
+            ? 'border-[#a0a0ad] shadow-[0_14px_30px_rgba(0,0,0,0.42),0_4px_12px_rgba(0,0,0,0.28),inset_0_1px_0_rgba(255,255,255,0.06),inset_0_3px_8px_rgba(255,255,255,0.025),inset_0_-8px_18px_rgba(0,0,0,0.42),0_0_0_1px_rgba(160,160,173,0.15)]'
+            : 'border-[#7a7a85] shadow-[0_12px_26px_rgba(0,0,0,0.38),0_3px_10px_rgba(0,0,0,0.25),inset_0_1px_0_rgba(255,255,255,0.05),inset_0_2px_6px_rgba(255,255,255,0.02),inset_0_-7px_16px_rgba(0,0,0,0.4)]'
           }
         `}
       >
@@ -510,6 +533,23 @@ export default function InputBar({
                 <path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48" />
               </svg>
             </button>
+            <button
+              onClick={() => setScreenshotActive(true)}
+              disabled={isStreaming}
+              title="Screenshot selection"
+              className={`flex items-center justify-center w-9 h-9 rounded-lg transition-all no-drag ${
+                isStreaming
+                  ? 'text-text-tertiary/35 cursor-default'
+                  : screenshotActive
+                    ? 'text-white bg-white/[0.10] cursor-pointer'
+                    : 'text-text-tertiary hover:text-text-secondary hover:bg-white/[0.05] cursor-pointer'
+              }`}
+            >
+              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z" />
+                <circle cx="12" cy="13" r="4" />
+              </svg>
+            </button>
             {isStreaming ? (
               <>
                 <button
@@ -561,5 +601,6 @@ export default function InputBar({
         </div>
       </div>
     </div>
+    </>
   );
 }

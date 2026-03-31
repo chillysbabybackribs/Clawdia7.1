@@ -135,6 +135,57 @@ describe('Fix 1: cache_control on system prompt in agent loop path', () => {
     expect(systemText).toBe('STATIC_SYSTEM');
     expect(systemText).not.toContain('Iteration');
   });
+
+  it('repairs stale pending Anthropic tool_use blocks before the single-turn send', async () => {
+    const streamObj = makeStreamMock('hi');
+    mockStream.mockReturnValue(streamObj);
+
+    await streamAnthropicLLM(
+      [
+        { role: 'assistant', content: [
+          { type: 'tool_use', id: 'toolu_011jbof2ZiFLD63Z85tNTGRN', name: 'shell_exec', input: {} },
+          { type: 'tool_use', id: 'toolu_014HTTKte3xbAe41c7VHLJuH', name: 'file_search', input: {} },
+        ] },
+      ] as any,
+      'You are a test assistant.',
+      [],
+      { provider: 'anthropic', model: 'claude-haiku-4-5', apiKey: 'k', onText: vi.fn(), signal: makeSignal() } as any,
+    );
+
+    const body = mockStream.mock.calls[0][0];
+    expect(body.messages).toEqual([
+      {
+        role: 'assistant',
+        content: [
+          { type: 'tool_use', id: 'toolu_011jbof2ZiFLD63Z85tNTGRN', name: 'shell_exec', input: {} },
+          { type: 'tool_use', id: 'toolu_014HTTKte3xbAe41c7VHLJuH', name: 'file_search', input: {} },
+        ],
+      },
+      {
+        role: 'user',
+        content: [
+          {
+            type: 'tool_result',
+            tool_use_id: 'toolu_011jbof2ZiFLD63Z85tNTGRN',
+            content: JSON.stringify({
+              status: 'interrupted',
+              reason: 'protocol_repair',
+              message: 'Tool run was interrupted before completion.',
+            }),
+          },
+          {
+            type: 'tool_result',
+            tool_use_id: 'toolu_014HTTKte3xbAe41c7VHLJuH',
+            content: JSON.stringify({
+              status: 'interrupted',
+              reason: 'protocol_repair',
+              message: 'Tool run was interrupted before completion.',
+            }),
+          },
+        ],
+      },
+    ]);
+  });
 });
 
 // ── 2. Dynamic prompt injected into user message ─────────────────────────────
@@ -193,12 +244,12 @@ describe('Fix 3: trimMessageHistory token-aware', () => {
   });
 
   it('trims when serialized history exceeds the token budget', () => {
-    // 20 × 6_000 chars ≈ 120_000 chars > 112_000 char budget
-    const msgs = Array.from({ length: 20 }, (_, i) => ({ role: 'user', content: `${i}:${LARGE_CONTENT}` }));
+    // 100 × 6_000 chars is decisively above the budget in all environments.
+    const msgs = Array.from({ length: 100 }, (_, i) => ({ role: 'user', content: `${i}:${LARGE_CONTENT}` }));
     trimMessageHistoryForTest(msgs);
-    expect(msgs.length).toBeLessThan(20);        // trimming occurred
+    expect(msgs.length).toBeLessThan(100);       // trimming occurred
     expect(msgs[0].content).toMatch(/^0:/);      // first message preserved
-    expect(msgs[msgs.length - 1].content).toMatch(/^19:/); // last message preserved
+    expect(msgs[msgs.length - 1].content).toMatch(/^99:/); // last message preserved
   });
 
   it('middle messages are dropped before first and last', () => {

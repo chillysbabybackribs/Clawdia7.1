@@ -26,10 +26,40 @@ export interface BrowserPageState {
   textSample: string;
 }
 
+/** Deterministic page profile collected immediately after navigation — no LLM involved. */
+export interface PageProfile {
+  /** Hostname of the page (e.g. "www.reddit.com") */
+  hostname: string;
+  /** Detected JS framework(s) active on the page */
+  frameworks: string[];
+  /** All interactable input selectors with metadata */
+  inputs: Array<{
+    selector: string;
+    type: string;
+    placeholder: string;
+    label: string;
+    inShadowDom: boolean;
+  }>;
+  /** All buttons with their visible text */
+  buttons: Array<{ selector: string; text: string }>;
+  /** All links (up to 30) */
+  links: Array<{ href: string; text: string }>;
+  /** Top-level forms with their field selectors */
+  forms: Array<{ action: string; method: string; fields: string[] }>;
+  /** Whether any input/textarea lives inside a shadow root */
+  hasShadowInputs: boolean;
+  /** Content landmark selectors present (main, article, [role=feed], etc.) */
+  contentAreas: string[];
+  /** Auth state hint — true if a user avatar/username element was found */
+  likelyLoggedIn: boolean;
+}
+
 export interface BrowserNavigationResult {
   tabId: string;
   url: string;
   title: string;
+  /** Page profile collected synchronously after load — available immediately */
+  profile?: PageProfile;
 }
 
 export interface BrowserScreenshotResult {
@@ -95,6 +125,8 @@ export interface BrowserService {
   keyPress(key: string): Promise<BrowserServiceResult>;
   /** Get the visible text content of an element matching a CSS selector */
   getElementText(selector: string): Promise<BrowserServiceResult>;
+  /** Run the deterministic page profiler and return a PageProfile */
+  profilePage(): Promise<PageProfile>;
   // Session maintenance is currently treated as browser UI/session management,
   // not as a brokered capability mutation.
   listSessions(): Promise<string[]>;

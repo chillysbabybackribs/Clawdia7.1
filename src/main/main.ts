@@ -21,6 +21,9 @@ if (isLinux) {
   // Some Linux/X11 environments expose visuals that Chromium's EGL path rejects.
   // Force software compositing early so startup does not depend on GPU init.
   app.disableHardwareAcceleration();
+  // The embedded BrowserView intentionally touches WebGL for fingerprint spoofing.
+  // On Linux software rendering paths, Chromium now requires an explicit opt-in.
+  app.commandLine.appendSwitch('enable-unsafe-swiftshader');
 }
 
 function createWindow(): BrowserWindow {
@@ -73,12 +76,16 @@ function loadWindowContent(win: BrowserWindow): void {
 }
 
 app.whenReady().then(async () => {
-  initDb();
+  if (!initDb()) {
+    console.error('[main] Database initialization failed during startup; runtime DB calls will attempt lazy re-initialization.');
+  }
   const win = createWindow();
   const browserService = new ElectronBrowserService(win, app.getPath('userData'));
   const extManager = new ExtensionManager(app.getPath('userData'));
   // Load persisted extensions before any BrowserView is created
   await extManager.init();
+  // Restore persisted tabs (and their authenticated sessions) from the last run
+  await browserService.init();
   const terminalController = new TerminalSessionController();
   registerIpc(browserService, terminalController);
   registerTerminalIpc(terminalController, win);

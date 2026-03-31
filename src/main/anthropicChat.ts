@@ -3,6 +3,7 @@ import type { WebContents } from 'electron';
 import * as fs from 'fs';
 import { IPC_EVENTS } from './ipc-channels';
 import type { MessageAttachment } from '../shared/types';
+import { modelHasCapability } from '../shared/model-registry';
 import { BROWSER_TOOLS, executeBrowserTool } from './core/cli/browserTools';
 import { executeShellTool } from './core/cli/shellTools';
 import type { BrowserService } from './core/browser/BrowserService';
@@ -16,38 +17,14 @@ import { checkBudget } from './agent/spending-budget';
 import { executeMemoryStore, executeMemorySearch, executeMemoryForget } from './agent/memoryExecutors';
 import { MEMORY_TOOLS } from './core/cli/memoryTools';
 import type { ToolUseBlock, LLMTurn, LoopOptions } from './agent/types';
+import {
+  prepareAnthropicMessagesForSend,
+  prepareAnthropicRequestBodyForSend,
+} from './core/providers/anthropicMessageProtocol';
 
 /** Anthropic API accepts the same model ids as the in-app registry (e.g. claude-sonnet-4-6). */
 export function resolveAnthropicModelId(registryId: string): string {
   return registryId;
-}
-
-const PROTOCOL_REPAIR_RESULT = JSON.stringify({
-  status: 'interrupted',
-  reason: 'protocol_repair',
-  message: 'Tool run was interrupted before completion.',
-});
-
-/**
- * If the last assistant message has unanswered tool_use blocks, inject
- * synthetic tool_result messages so the next API call doesn't 400.
- */
-function repairAnthropicHistory(messages: Anthropic.MessageParam[]): void {
-  if (messages.length === 0) return;
-  const last = messages[messages.length - 1];
-  if (last.role !== 'assistant' || !Array.isArray(last.content)) return;
-  const pendingIds = (last.content as any[])
-    .filter((b: any) => b.type === 'tool_use')
-    .map((b: any) => b.id as string);
-  if (pendingIds.length === 0) return;
-  messages.push({
-    role: 'user',
-    content: pendingIds.map(id => ({
-      type: 'tool_result' as const,
-      tool_use_id: id,
-      content: PROTOCOL_REPAIR_RESULT,
-    })),
-  });
 }
 
 function buildUserContent(
@@ -95,11 +72,7 @@ function buildUserContent(
 }
 
 function modelSupportsExtendedThinking(apiModelId: string): boolean {
-  return (
-    apiModelId.includes('claude-opus-4')
-    || apiModelId.includes('claude-sonnet-4')
-    || apiModelId.includes('claude-3-7')
-  );
+  return modelHasCapability(apiModelId, 'supportsExtendedThinking');
 }
 
 type StreamParams = {
@@ -257,9 +230,29 @@ export async function streamAnthropicChat({
 
   const tryThinking = modelSupportsExtendedThinking(apiModelId);
 
-  const repairedSession = [...sessionMessages].filter((m: any) => m.role !== 'tool') as Anthropic.MessageParam[];
-  repairAnthropicHistory(repairedSession);
-  const messagesForRequest: Anthropic.MessageParam[] = [...repairedSession, userMessage];
+  const repairedSession = prepareAnthropicMessagesForSend(
+    [...sessionMessages].filter((m: any) => m.role !== 'tool') as Anthropic.MessageParam[],
+    {
+      caller: 'streamAnthropicChat.session',
+      closePendingToolUses: true,
+      pendingToolUseReason: 'protocol_repair',
+      onRepair: (issues) => {
+        console.warn(`[anthropic] pre-flight repaired session history: ${issues.join(' | ')}`);
+      },
+    },
+  ).messages as Anthropic.MessageParam[];
+  // Inject memory context as a user/assistant preflight pair rather than
+  // embedding it in the system prompt. This keeps the system prompt string
+  // identical across every turn so Anthropic's prompt cache actually hits.
+  const memCtx = getMemoryContext(userText);
+  const messagesForRequest: Anthropic.MessageParam[] = [
+    ...repairedSession,
+    ...(memCtx ? [
+      { role: 'user' as const, content: `[Memory context]\n${memCtx}` },
+      { role: 'assistant' as const, content: 'Understood.' },
+    ] : []),
+    userMessage,
+  ];
 
   const runStream = async (withThinking: boolean): Promise<string> => {
     const budget = checkBudget(1); // Check with 1 cent minimum
@@ -267,14 +260,21 @@ export async function streamAnthropicChat({
       return `Budget exceeded: ${budget.periodLimit} cents limit reached for ${budget.blockedBy} period.`;
     }
     const caps = await renderCapabilities();
-    const basePrompt = buildAnthropicStreamSystemPrompt(unrestrictedMode) + (caps ? `\n\nOS CONTEXT:\n${caps}` : '');
-    const memCtx = getMemoryContext(userText);
-    const systemInstructions = memCtx ? `${memCtx}\n\n${basePrompt}` : basePrompt;
+    const systemInstructions = buildAnthropicStreamSystemPrompt(unrestrictedMode) + (caps ? `\n\nOS CONTEXT:\n${caps}` : '');
 
-    const body: Anthropic.MessageCreateParams = {
+    const safeMessages = prepareAnthropicMessagesForSend(messagesForRequest, {
+      caller: 'streamAnthropicChat.stream',
+      closePendingToolUses: true,
+      pendingToolUseReason: 'protocol_repair',
+      onRepair: (issues) => {
+        console.warn(`[anthropic] pre-flight repaired stream request: ${issues.join(' | ')}`);
+      },
+    }).messages as Anthropic.MessageParam[];
+
+    const rawBody: Anthropic.MessageCreateParams = {
       model: apiModelId,
       max_tokens: 16000,
-      messages: messagesForRequest,
+      messages: safeMessages,
       system: [
         {
           type: 'text' as const,
@@ -289,8 +289,17 @@ export async function streamAnthropicChat({
     };
 
     if (withThinking && tryThinking) {
-      (body as any).thinking = { type: 'adaptive' };
+      (rawBody as any).thinking = { type: 'adaptive' };
     }
+
+    const body = prepareAnthropicRequestBodyForSend(rawBody, {
+      caller: 'streamAnthropicChat.stream.body',
+      closePendingToolUses: true,
+      pendingToolUseReason: 'protocol_repair',
+      onRepair: (issues) => {
+        console.warn(`[anthropic] send wrapper repaired stream body: ${issues.join(' | ')}`);
+      },
+    });
 
     const stream = await withAnthropicRetry(
       async () => client.messages.stream(body, { signal }),
@@ -368,14 +377,21 @@ export async function streamAnthropicChat({
     const deferredBrowserTools = BROWSER_TOOLS.map(t => ({ ...t, defer_loading: true }));
 
     const caps = await renderCapabilities();
-    const basePrompt = buildSharedSystemPrompt(unrestrictedMode) + (caps ? `\n\nOS CONTEXT:\n${caps}` : '');
-    const memCtx = getMemoryContext(userText);
-    const systemInstruction = memCtx ? `${memCtx}\n\n${basePrompt}` : basePrompt;
+    const systemInstruction = buildSharedSystemPrompt(unrestrictedMode) + (caps ? `\n\nOS CONTEXT:\n${caps}` : '');
 
-    const body: Anthropic.MessageCreateParams = {
+    const safeMessages = prepareAnthropicMessagesForSend(messages, {
+      caller: 'streamAnthropicChat.toolTurn',
+      closePendingToolUses: true,
+      pendingToolUseReason: 'protocol_repair',
+      onRepair: (issues) => {
+        console.warn(`[anthropic] pre-flight repaired tool-turn request: ${issues.join(' | ')}`);
+      },
+    }).messages as Anthropic.MessageParam[];
+
+    const rawBody: Anthropic.MessageCreateParams = {
       model: apiModelId,
       max_tokens: 16000,
-      messages,
+      messages: safeMessages,
       system: systemInstruction,
       tools: [
         { type: 'tool_search_tool_bm25_20251119', name: 'tool_search_tool_bm25' } as any,
@@ -388,6 +404,14 @@ export async function streamAnthropicChat({
         ...deferredBrowserTools,
       ] as any,
     };
+    const body = prepareAnthropicRequestBodyForSend(rawBody, {
+      caller: 'streamAnthropicChat.toolTurn.body',
+      closePendingToolUses: true,
+      pendingToolUseReason: 'protocol_repair',
+      onRepair: (issues) => {
+        console.warn(`[anthropic] send wrapper repaired tool-turn body: ${issues.join(' | ')}`);
+      },
+    });
     return withAnthropicRetry(
       async () => client.messages.create(body, { signal }),
       signal,
@@ -638,9 +662,19 @@ export async function streamAnthropicLLM(
   const client = new Anthropic({ apiKey: options.apiKey, timeout: 120_000 });
 
   // Filter out OpenAI-format tool messages (role: 'tool') which are invalid for Anthropic
-  const anthropicMessages = (messages as any[]).filter((m: any) => m.role !== 'tool') as Anthropic.MessageParam[];
+  const anthropicMessages = prepareAnthropicMessagesForSend(
+    (messages as any[]).filter((m: any) => m.role !== 'tool') as Anthropic.MessageParam[],
+    {
+      caller: 'streamAnthropicLLM',
+      closePendingToolUses: true,
+      pendingToolUseReason: 'protocol_repair',
+      onRepair: (issues) => {
+        console.warn(`[anthropic] pre-flight repaired single-turn request: ${issues.join(' | ')}`);
+      },
+    },
+  ).messages as Anthropic.MessageParam[];
 
-  const body: Anthropic.MessageCreateParams = {
+  const rawBody: Anthropic.MessageCreateParams = {
     model: options.model,
     max_tokens: 16000,
     messages: anthropicMessages,
@@ -654,6 +688,15 @@ export async function streamAnthropicLLM(
     tools: tools as Anthropic.Tool[],
     stream: true,
   };
+
+  const body = prepareAnthropicRequestBodyForSend(rawBody, {
+    caller: 'streamAnthropicLLM.body',
+    closePendingToolUses: true,
+    pendingToolUseReason: 'protocol_repair',
+    onRepair: (issues) => {
+      console.warn(`[anthropic] send wrapper repaired single-turn body: ${issues.join(' | ')}`);
+    },
+  });
 
   const stream = await withAnthropicRetry(
     async () => client.messages.stream(body, { signal: options.signal }),

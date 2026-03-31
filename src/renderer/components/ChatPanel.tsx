@@ -1,4 +1,4 @@
-import React, { useState, useRef, useEffect, useCallback } from 'react';
+import React, { useState, useRef, useEffect, useCallback, useMemo } from 'react';
 import type {
   Message,
   ToolCall,
@@ -18,6 +18,8 @@ import SwarmPanel from './SwarmPanel';
 import TabStrip from './TabStrip';
 import PipelineBlock from './PipelineBlock';
 import HistoryBrowser from './HistoryBrowser';
+import CapabilityHelperBlock from './capability-helper/CapabilityHelperBlock';
+import { useCapabilityHelper } from '../helpers/capabilityHelper/useCapabilityHelper';
 
 type StreamEndPayload = {
   ok?: boolean;
@@ -28,6 +30,8 @@ type StreamEndPayload = {
 };
 
 interface ChatPanelProps {
+  /** The tab ID this panel belongs to — used for title resolution. */
+  tabId: string;
   historyMode: boolean;
   onToggleHistory: () => void;
   browserVisible: boolean;
@@ -46,6 +50,7 @@ interface ChatPanelProps {
   onNewTab: () => void;
   onCloseTab: (tabId: string) => void;
   onSwitchTab: (tabId: string) => void;
+  onReorderTabs: (fromIndex: number, toIndex: number) => void;
   onOpenConversation: (id: string) => void;
   onConversationTitleResolved: (tabId: string, title: string) => void;
 }
@@ -174,11 +179,11 @@ function MessageActionButton({
       title={title}
       disabled={disabled}
       className={[
-        'flex items-center justify-center w-7 h-7 rounded-md transition-all duration-200',
+        'flex items-center justify-center w-5 h-5 transition-all duration-150',
         disabled
           ? 'cursor-not-allowed text-text-muted/35'
-          : 'cursor-pointer hover:text-text-secondary hover:bg-white/[0.06]',
-        alwaysVisible ? 'text-text-muted' : 'text-text-muted/0 group-hover:text-text-muted',
+          : 'cursor-pointer hover:text-white',
+        alwaysVisible ? 'text-text-muted/50' : 'text-text-muted/0 group-hover:text-text-muted/50',
       ].join(' ')}
     >
       {children}
@@ -231,18 +236,22 @@ function CopyButton({ text, alwaysVisible = false }: { text: string; alwaysVisib
 }
 
 function RetryButton({
-  onRetry,
+  messageContent,
   disabled = false,
   alwaysVisible = false,
 }: {
-  onRetry: () => void;
+  messageContent: string;
   disabled?: boolean;
   alwaysVisible?: boolean;
 }) {
+  const handleClick = () => {
+    window.dispatchEvent(new CustomEvent('clawdia:prefill-input', { detail: messageContent }));
+  };
+
   return (
     <MessageActionButton
-      onClick={onRetry}
-      title={disabled ? 'Wait for the current response to finish' : 'Retry prompt'}
+      onClick={handleClick}
+      title={disabled ? 'Wait for the current response to finish' : 'Edit and resend'}
       disabled={disabled}
       alwaysVisible={alwaysVisible}
     >
@@ -260,6 +269,50 @@ function formatAttachmentSize(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+function formatToolCallForCopy(tool: ToolCall): string {
+  const parts = [`[${tool.name}]`];
+
+  if (tool.input) {
+    parts.push(`IN:\n${tool.input}`);
+  }
+
+  if (tool.output) {
+    parts.push(`OUT:\n${tool.output}`);
+  } else if (tool.status === 'running') {
+    parts.push('OUT:\nRunning...');
+  }
+
+  return parts.join('\n');
+}
+
+function formatMessageForCopy(message: Message): string {
+  const sections: string[] = [];
+
+  if (message.feed && message.feed.length > 0) {
+    for (const item of message.feed) {
+      if (item.kind === 'tool') {
+        sections.push(formatToolCallForCopy(item.tool));
+        continue;
+      }
+      if (item.kind === 'text' && item.text.trim()) {
+        sections.push(item.text.trim());
+      }
+    }
+  } else {
+    if (message.toolCalls?.length) {
+      for (const tool of message.toolCalls) {
+        sections.push(formatToolCallForCopy(tool));
+      }
+    }
+
+    if (message.content.trim()) {
+      sections.push(message.content.trim());
+    }
+  }
+
+  return sections.join('\n\n').trim();
 }
 
 function AttachmentGallery({ attachments }: { attachments: MessageAttachment[] }) {
@@ -506,6 +559,7 @@ function TerminalTranscriptCard({
   const isStreaming = showStreamingStatus;
   const [elapsedSec, setElapsedSec] = useState(0);
   const lines = message.content.split(/\r?\n/);
+  const copyText = formatMessageForCopy(message);
 
   useEffect(() => {
     if (!isStreaming) {
@@ -589,9 +643,9 @@ function TerminalTranscriptCard({
             <div className="thinking-shimmer-line h-[2px] min-w-0 flex-1 rounded-full" aria-hidden />
           </div>
         )}
-        <div className="mt-3 flex items-center gap-2">
+        <div className="mt-3 flex items-center justify-end gap-1">
+          {!isStreaming && copyText && <CopyButton text={copyText} />}
           <span className="text-[11px] text-text-secondary/70">{message.timestamp}</span>
-          {!isStreaming && message.content && <CopyButton text={message.content} />}
           <button
             onClick={onOpenTerminal}
             className="rounded px-1.5 py-0.5 text-[11px] text-text-secondary transition-colors hover:bg-white/[0.06] hover:text-text-primary"
@@ -613,6 +667,8 @@ const AssistantMessage = React.memo(function AssistantMessage({
   onOpenTerminal: () => void;
   fillAvailableSpace?: boolean;
 }) {
+  const copyText = formatMessageForCopy(message);
+
   // Live path: active streaming message (feed may be empty while shimmer is showing)
   if (message.isStreaming || (message.feed && message.feed.length > 0)) {
     const hasContent = (message.feed ?? []).some(item =>
@@ -621,7 +677,7 @@ const AssistantMessage = React.memo(function AssistantMessage({
     if (!hasContent && !message.isStreaming) return null;
 
     return (
-      <div className={`flex justify-start animate-slide-up group ${fillAvailableSpace ? 'flex-1 min-h-[12rem]' : ''}`}>
+      <div className={`flex justify-start animate-slide-up group ${fillAvailableSpace ? 'flex-1' : ''}`} style={{ minHeight: fillAvailableSpace ? '12rem' : '0', transition: 'min-height 0.25s ease-out' }}>
         <div className="w-full px-1 py-2 text-text-primary flex flex-col gap-3">
           {(message.feed ?? []).map((item, idx) => {
             if (item.kind === 'text') {
@@ -635,10 +691,10 @@ const AssistantMessage = React.memo(function AssistantMessage({
           })}
           {!!message.fileRefs?.length && <FileRefList fileRefs={message.fileRefs} />}
           {!!message.linkPreviews?.length && <LinkPreviewList linkPreviews={message.linkPreviews} />}
-          {!message.isStreaming && message.content && (
-            <div className="flex items-center gap-2 mt-1">
+          {!message.isStreaming && copyText && (
+            <div className="mt-1 flex items-center justify-end gap-1">
+              <CopyButton text={copyText} />
               <span className="text-[11px] text-text-secondary/70">{message.timestamp}</span>
-              <CopyButton text={message.content} />
             </div>
           )}
         </div>
@@ -663,10 +719,10 @@ const AssistantMessage = React.memo(function AssistantMessage({
         {hasContent && <MarkdownRenderer content={message.content} isStreaming={false} />}
         {!!message.fileRefs?.length && <FileRefList fileRefs={message.fileRefs} />}
         {!!message.linkPreviews?.length && <LinkPreviewList linkPreviews={message.linkPreviews} />}
-        {hasContent && (
-          <div className="flex items-center gap-2 mt-2">
+        {copyText && (
+          <div className="mt-2 flex items-center justify-end gap-1">
+            <CopyButton text={copyText} />
             <span className="text-[11px] text-text-secondary/70">{message.timestamp}</span>
-            <CopyButton text={message.content} />
           </div>
         )}
       </div>
@@ -700,14 +756,14 @@ const UserMessage = React.memo(function UserMessage({
         )}
         {message.content.trim() && <div className="text-[1rem] leading-relaxed whitespace-pre-wrap">{message.content}</div>}
       </div>
-      <div className="flex items-center gap-2">
-        <span className="text-[11px] text-text-secondary/70">{message.timestamp}</span>
+      <div className="flex items-center justify-end gap-1">
         {message.content.trim() && (
           <>
             <CopyButton text={message.content} alwaysVisible />
-            <RetryButton onRetry={() => onRetry(message)} disabled={retryDisabled} alwaysVisible />
+            <RetryButton messageContent={message.content} disabled={retryDisabled} alwaysVisible />
           </>
         )}
+        <span className="text-[11px] text-text-secondary/70">{message.timestamp}</span>
       </div>
     </div>
   );
@@ -1034,10 +1090,20 @@ function toolToShimmerLabel(name: string, detail?: string): string {
   return labels[name] ?? 'Working…';
 }
 
-function InlineShimmer({ text }: { text: string }) {
-  if (!text) return null;
+function InlineShimmer({ text, visible }: { text: string; visible: boolean }) {
   return (
-    <div className="flex items-center gap-2 px-5 py-2">
+    <div
+      className="flex items-center gap-2 px-5 py-2"
+      style={{
+        opacity: visible && text ? 1 : 0,
+        maxHeight: visible && text ? '40px' : '0px',
+        paddingTop: visible && text ? undefined : 0,
+        paddingBottom: visible && text ? undefined : 0,
+        overflow: 'hidden',
+        transition: 'opacity 0.2s ease-out, max-height 0.25s ease-out, padding 0.25s ease-out',
+        pointerEvents: 'none',
+      }}
+    >
       <span className="text-text-secondary text-[14px] flex-shrink-0" aria-hidden>✱</span>
       <span className="inline-shimmer text-[13px] leading-relaxed line-clamp-1 overflow-hidden text-ellipsis">{text}</span>
     </div>
@@ -1045,6 +1111,7 @@ function InlineShimmer({ text }: { text: string }) {
 }
 
 export default function ChatPanel({
+  tabId,
   historyMode,
   onToggleHistory: _onToggleHistory,
   browserVisible,
@@ -1063,6 +1130,7 @@ export default function ChatPanel({
   onNewTab,
   onCloseTab,
   onSwitchTab,
+  onReorderTabs,
   onOpenConversation,
   onConversationTitleResolved,
 }: ChatPanelProps) {
@@ -1120,7 +1188,9 @@ export default function ChatPanel({
   }, []);
 
   const autoScroll = useCallback(() => {
-    if (!isUserScrolledUpRef.current) scrollToBottom();
+    const container = scrollRef.current;
+    if (!container || isUserScrolledUpRef.current) return;
+    scrollToBottom('auto');
   }, [scrollToBottom]);
 
   const clearThinkingAdvanceTimer = useCallback(() => {
@@ -1145,6 +1215,22 @@ export default function ChatPanel({
   const handleChatZoomReset = useCallback(() => {
     applyChatZoom(DEFAULT_CHAT_ZOOM);
   }, [applyChatZoom]);
+
+  const helperTargetMessageId = useMemo(() => {
+    for (let idx = messages.length - 1; idx >= 0; idx -= 1) {
+      const message = messages[idx];
+      if (message.role !== 'assistant' || message.isStreaming) continue;
+      if ((message.toolCalls?.length ?? 0) === 0) continue;
+      return message.id;
+    }
+    return undefined;
+  }, [messages]);
+
+  const {
+    model: capabilityHelperModel,
+    dismissHelper: dismissCapabilityHelper,
+    recordSuggestionUsed,
+  } = useCapabilityHelper(messages, helperTargetMessageId);
 
   const flushStreamUpdate = useCallback(() => {
     if (!assistantMsgIdRef.current) return;
@@ -1183,8 +1269,10 @@ export default function ChatPanel({
     }]);
     setIsStreaming(true);
     setShimmerText(''); thinkingBatchRef.current = [];
-    // Scroll to show the new assistant message as soon as it appears
-    requestAnimationFrame(() => autoScroll());
+    // New response starting — treat as user-initiated, scroll to bottom.
+    // Double-rAF: first frame lets React flush the new bubble, second lets layout reflow.
+    isUserScrolledUpRef.current = false;
+    requestAnimationFrame(() => requestAnimationFrame(() => scrollToBottom('smooth')));
     return assistantId;
   }, [autoScroll]);
 
@@ -1378,8 +1466,8 @@ export default function ChatPanel({
     clearThinkingAdvanceTimer();
     assistantMsgIdRef.current = null;
     setActiveStreamMode('chat');
-    // Scroll to bottom when stream ends so the full response is visible
-    requestAnimationFrame(() => scrollToBottom('smooth'));
+    // Scroll after layout transitions settle (double rAF avoids reflow-before-paint jump)
+    requestAnimationFrame(() => requestAnimationFrame(() => scrollToBottom('smooth')));
   }, [clearThinkingAdvanceTimer, flushStreamUpdate, scrollToBottom]);
 
   useEffect(() => {
@@ -1424,8 +1512,8 @@ export default function ChatPanel({
       clearThinkingAdvanceTimer();
       setMessages(result.messages || []);
       setLoadedConversationId(loadConversationId);
-      if (result.title && activeTabId) {
-        onConversationTitleResolved(activeTabId, result.title);
+      if (result.title && tabId) {
+        onConversationTitleResolved(tabId, result.title);
       }
       setConversationMode(result.mode || 'chat');
       setClaudeStatus(result.claudeTerminalStatus || 'idle');
@@ -1436,7 +1524,7 @@ export default function ChatPanel({
         if (scrollRef.current) scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
       });
     }).catch(() => {});
-  }, [loadConversationId, replayBuffer, activeTabId, onConversationTitleResolved]);
+  }, [loadConversationId, replayBuffer, tabId, onConversationTitleResolved]);
 
   useEffect(() => () => clearThinkingAdvanceTimer(), [clearThinkingAdvanceTimer]);
 
@@ -1539,7 +1627,10 @@ export default function ChatPanel({
     // we don't drop events during the brief gap between tab switch and load completion.
     // Fall back to loadedConversationId for the case where neither is set yet.
     const myConvId = loadConversationId ?? loadedConversationId;
-    const isMyConv = (evtConvId: string) => !myConvId || evtConvId === myConvId;
+    // Only accept events for our specific conversation. If we don't have a
+    // conversation yet (new blank tab), reject all — we can't claim ownership
+    // of events that belong to another tab's conversation.
+    const isMyConv = (evtConvId: string) => !!myConvId && evtConvId === myConvId;
 
     cleanups.push(api.chat.onStreamText((payload: { delta: string; conversationId: string }) => {
       if (!isMyConv(payload.conversationId)) return;
@@ -1665,7 +1756,7 @@ export default function ChatPanel({
 
     try {
       if (conversationMode !== 'chat') setClaudeStatus('working');
-      const result = await api.chat.send(text, attachments);
+      const result = await api.chat.send(text, attachments, loadedConversationId ?? loadConversationId ?? null);
 
       const finalFeed = [...feedRef.current].map(item =>
         item.kind === 'text' ? { ...item, isStreaming: false } : item
@@ -1725,7 +1816,7 @@ export default function ChatPanel({
       assistantMsgIdRef.current = null;
       setActiveStreamMode('chat');
     }
-  }, [conversationMode, scrollMessageToTop]);
+  }, [conversationMode, scrollMessageToTop, loadedConversationId, loadConversationId]);
 
   const handleStop = useCallback(() => {
     (window as any).clawdia?.chat.stop(loadedConversationId ?? undefined);
@@ -1853,6 +1944,7 @@ export default function ChatPanel({
           onSwitch={onSwitchTab}
           onClose={onCloseTab}
           onNew={onNewTab}
+          onReorder={onReorderTabs}
         />
       )}
       {historyMode ? (
@@ -1866,7 +1958,7 @@ export default function ChatPanel({
       ) : (
         <div ref={scrollRef} onScroll={handleScroll} className="flex-1 overflow-y-auto overflow-x-hidden scroll-smooth">
           <div
-            className={`flex min-h-full flex-col px-5 pt-5 pb-8 ${showCodexEmptyState || showClaudeCodeEmptyState || showClawdiaEmptyState ? '' : 'gap-4'}`}
+            className="flex min-h-full flex-col px-5 pt-5 pb-8"
             style={{ zoom: chatZoom / 100 }}
           >
             {showClawdiaEmptyState && (
@@ -1880,10 +1972,10 @@ export default function ChatPanel({
             )}
             {messages.map((msg, idx) =>
               msg.type === 'pipeline'
-              ? <div key={msg.id} data-message-id={msg.id}><PipelineBlock /></div>
+              ? <div key={msg.id} data-message-id={msg.id} className={idx === 0 ? '' : 'border-t border-white/[0.06] pt-4 mt-4'}><PipelineBlock /></div>
               : msg.role === 'assistant'
               ? (
-                <div key={msg.id} data-message-id={msg.id}>
+                <div key={msg.id} data-message-id={msg.id} className={idx === 0 ? '' : 'border-t border-white/[0.06] pt-4 mt-4'}>
                   <AssistantMessage
                     message={msg}
                     fillAvailableSpace={msg.isStreaming && idx === messages.length - 1}
@@ -1891,10 +1983,24 @@ export default function ChatPanel({
                       if (!terminalOpen) onToggleTerminal();
                     }}
                   />
+                  {msg.id === helperTargetMessageId && capabilityHelperModel && (
+                    <div className="px-1">
+                      <CapabilityHelperBlock
+                        model={capabilityHelperModel}
+                        onDismiss={dismissCapabilityHelper}
+                        onRunSuggestion={(prompt) => {
+                          if (isStreaming) return;
+                          const suggestion = capabilityHelperModel.suggestions.find((item) => item.prompt === prompt);
+                          if (suggestion) recordSuggestionUsed(suggestion.id);
+                          void handleSend(prompt);
+                        }}
+                      />
+                    </div>
+                  )}
                 </div>
               )
               : (
-                <div key={msg.id} data-message-id={msg.id}>
+                <div key={msg.id} data-message-id={msg.id} className={idx === 0 ? '' : 'border-t border-white/[0.06] pt-4 mt-4'}>
                   <UserMessage
                     message={msg}
                     onRetry={(message) => {
@@ -1907,7 +2013,7 @@ export default function ChatPanel({
               )
             )}
             {pendingApprovalRunId && nonWorkflowApproval && (
-              <div className="flex justify-start animate-slide-up">
+              <div className={`flex justify-start animate-slide-up ${messages.length > 0 ? 'border-t border-white/[0.06] pt-4 mt-4' : ''}`}>
                 <div className="max-w-[92%] px-1 py-1 text-text-primary">
                   <ApprovalBanner
                     approval={nonWorkflowApproval}
@@ -1925,8 +2031,8 @@ export default function ChatPanel({
 
       <SwarmPanel />
 
-      {isStreaming && shimmerText && !historyMode && (
-        <InlineShimmer text={shimmerText} />
+      {!historyMode && (
+        <InlineShimmer text={shimmerText} visible={isStreaming && !!shimmerText} />
       )}
 
       <InputBar

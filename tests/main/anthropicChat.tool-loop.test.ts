@@ -214,7 +214,7 @@ describe('streamAnthropicChat — agentic tool loop', () => {
 
     expect(mockCreate).toHaveBeenCalledTimes(3);
     expect(browser.navigate).toHaveBeenCalledTimes(1);
-    expect(browser.getPageState).toHaveBeenCalledTimes(1);
+    expect(browser.getPageState).toHaveBeenCalledTimes(2);
     expect(result.response).toBe('All done.');
   });
 
@@ -246,6 +246,51 @@ describe('streamAnthropicChat — agentic tool loop', () => {
     expect(sessionMessages[1].role).toBe('assistant');
     expect(sessionMessages[2].role).toBe('user');
     expect(sessionMessages[3].role).toBe('assistant');
+  });
+
+  it('repairs stale tool_use history before sending Anthropic messages', async () => {
+    const wc = makeWebContents();
+
+    mockStream.mockReturnValue({
+      on: vi.fn((event: string, cb: (arg: string) => void) => {
+        if (event === 'text') cb('Recovered.');
+      }),
+      finalMessage: vi.fn().mockResolvedValue({}),
+    });
+
+    await streamAnthropicChat({
+      ...BASE_PARAMS,
+      webContents: wc as unknown as import('electron').WebContents,
+      userText: 'continue',
+      sessionMessages: [
+        {
+          role: 'assistant',
+          content: [{ type: 'tool_use', id: 'toolu_012LKovRsy5y74u3qFwLtWgw', name: 'shell_exec', input: { command: 'pwd' } }],
+        } as any,
+      ],
+    });
+
+    expect(mockStream).toHaveBeenCalledOnce();
+    const body = mockStream.mock.calls[0][0];
+    expect(body.messages).toEqual([
+      {
+        role: 'assistant',
+        content: [{ type: 'tool_use', id: 'toolu_012LKovRsy5y74u3qFwLtWgw', name: 'shell_exec', input: { command: 'pwd' } }],
+      },
+      {
+        role: 'user',
+        content: [{
+          type: 'tool_result',
+          tool_use_id: 'toolu_012LKovRsy5y74u3qFwLtWgw',
+          content: JSON.stringify({
+            status: 'interrupted',
+            reason: 'protocol_repair',
+            message: 'Tool run was interrupted before completion.',
+          }),
+        }],
+      },
+      { role: 'user', content: 'continue' },
+    ]);
   });
 
   it('uses streaming path (no create) when browserService is not provided', async () => {

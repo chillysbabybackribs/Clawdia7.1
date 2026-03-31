@@ -34,9 +34,8 @@ export default function App() {
   const [viewTransitionStage, setViewTransitionStage] = useState<'idle' | 'exit' | 'enter'>('idle');
   const [historyMode, setHistoryMode] = useState(false);
   const [rightPaneMode, setRightPaneMode] = useState<RightPaneMode>('browser');
-  const [chatKey, setChatKey] = useState(0);
-  const [loadConversationId, setLoadConversationId] = useState<string | null>(null);
-  const [replayBuffer, setReplayBuffer] = useState<ReplayBufferItem[] | null>(null);
+  // Per-tab panel state — keyed by tab ID so each tab's ChatPanel stays mounted with its own state
+  const [tabPanelState, setTabPanelState] = useState<Record<string, { chatKey: number; loadConversationId: string | null; replayBuffer: ReplayBufferItem[] | null }>>({});
   const [selectedProcessId, setSelectedProcessId] = useState<string | null>(null);
   const [selectedAgentId, setSelectedAgentId] = useState<string | null>(null);
   const [hasApiKey, setHasApiKey] = useState<boolean | null>(null); // null = bridge/settings still loading
@@ -52,6 +51,21 @@ export default function App() {
   const editorOpen = rightPaneMode === 'editor';
   const terminalOpen = rightPaneMode === 'terminal';
   const activeEditorTab = editorTabs.find((tab) => tab.id === activeEditorTabId) || null;
+
+  // Per-tab panel state helpers
+  const getTabPanel = useCallback((tabId: string) => {
+    return tabPanelState[tabId] ?? { chatKey: 0, loadConversationId: null, replayBuffer: null };
+  }, [tabPanelState]);
+
+  const setTabPanel = useCallback((tabId: string, updater: (prev: { chatKey: number; loadConversationId: string | null; replayBuffer: ReplayBufferItem[] | null }) => { chatKey: number; loadConversationId: string | null; replayBuffer: ReplayBufferItem[] | null }) => {
+    setTabPanelState(prev => {
+      const current = prev[tabId] ?? { chatKey: 0, loadConversationId: null, replayBuffer: null };
+      return { ...prev, [tabId]: updater(current) };
+    });
+  }, []);
+
+  // Convenience alias: active tab's conversation ID (used by TerminalPanel)
+  const loadConversationId = getTabPanel(activeTabId).loadConversationId;
 
   useEffect(() => {
     if (activeView === displayedView) return;
@@ -145,15 +159,20 @@ export default function App() {
           setTabs(session.tabs);
           const restoredActiveTabId = session.activeTabId ?? session.tabs[0].id;
           setActiveTabId(restoredActiveTabId);
-          const activeTab = session.tabs.find(t => t.id === restoredActiveTabId) ?? session.tabs[0];
-          if (activeTab.conversationId) {
-            setLoadConversationId(activeTab.conversationId);
-          }
+          // Restore per-tab panel state for all tabs that have a conversation
+          setTabPanelState(() => {
+            const state: Record<string, { chatKey: number; loadConversationId: string | null; replayBuffer: ReplayBufferItem[] | null }> = {};
+            for (const t of session.tabs!) {
+              state[t.id] = { chatKey: 0, loadConversationId: t.conversationId ?? null, replayBuffer: null };
+            }
+            return state;
+          });
         } else if (session?.activeConversationId) {
-          setLoadConversationId(session.activeConversationId);
-          setTabs(current =>
-            current.map((t, i) => i === 0 ? { ...t, conversationId: session.activeConversationId ?? null } : t)
-          );
+          setTabs(current => {
+            const updated = current.map((t, i) => i === 0 ? { ...t, conversationId: session.activeConversationId ?? null } : t);
+            setTabPanelState({ [updated[0].id]: { chatKey: 0, loadConversationId: session.activeConversationId ?? null, replayBuffer: null } });
+            return updated;
+          });
         }
       })
       .finally(() => {
@@ -270,29 +289,27 @@ export default function App() {
 
   const handleNewChat = useCallback(async () => {
     const api = (window as any).clawdia;
-    if (api) await api.chat.new();
+    // Use chat.create() so agents running in other tabs are not aborted.
+    // The current tab just gets a fresh blank conversation.
+    const created = api ? await api.chat.create() : null;
     setTabs(current =>
-      current.map(t => t.id === activeTabId ? { ...t, conversationId: null, title: undefined } : t)
+      current.map(t => t.id === activeTabId ? { ...t, conversationId: created?.id ?? null, title: undefined } : t)
     );
-    setLoadConversationId(null);
-    setReplayBuffer(null);
-    setChatKey(k => k + 1);
+    setTabPanel(activeTabId, prev => ({ chatKey: prev.chatKey + 1, loadConversationId: created?.id ?? null, replayBuffer: null }));
     setHistoryMode(false);
     setActiveView('chat');
-  }, [activeTabId]);
+  }, [activeTabId, setTabPanel]);
 
   const handleLoadConversation = useCallback(async (id: string, buffer?: ReplayBufferItem[] | null) => {
     if (!id) return;
     setTabs(current =>
       current.map(t => t.id === activeTabId ? { ...t, conversationId: id } : t)
     );
-    setLoadConversationId(id);
-    setReplayBuffer(buffer || null);
+    setTabPanel(activeTabId, prev => ({ chatKey: prev.chatKey + 1, loadConversationId: id, replayBuffer: buffer || null }));
     setSelectedProcessId(null);
-    setChatKey(k => k + 1);
     setHistoryMode(false);
     setActiveView('chat');
-  }, [activeTabId]);
+  }, [activeTabId, setTabPanel]);
 
   const handleNewTab = useCallback(async () => {
     const api = (window as any).clawdia;
@@ -304,40 +321,39 @@ export default function App() {
       setActiveTabId(result.activeTabId);
       return result.tabs;
     });
-    setLoadConversationId(created?.id ?? null);
-    setReplayBuffer(null);
-    setChatKey(k => k + 1);
+    setTabPanel(newTab.id, () => ({ chatKey: 0, loadConversationId: created?.id ?? null, replayBuffer: null }));
     setActiveView('chat');
-  }, []);
+  }, [setTabPanel]);
 
   const handleCloseTab = useCallback((tabId: string) => {
     setTabs(currentTabs => {
       const result = closeTab(currentTabs, tabId, activeTabId);
       if (result.activeTabId !== activeTabId) {
-        const nextTab = result.tabs.find(t => t.id === result.activeTabId);
-        if (nextTab?.conversationId) {
-          setLoadConversationId(nextTab.conversationId);
-          setChatKey(k => k + 1);
-        } else {
-          setLoadConversationId(null);
-          setChatKey(k => k + 1);
-        }
         setActiveTabId(result.activeTabId);
       }
       return result.tabs;
     });
+    // Clean up panel state for the closed tab
+    setTabPanelState(prev => {
+      const next = { ...prev };
+      delete next[tabId];
+      return next;
+    });
   }, [activeTabId]);
 
   const handleSwitchTab = useCallback((tabId: string) => {
-    const result = switchTab(tabs, tabId);
-    setActiveTabId(result.activeTabId);
-    const tab = tabs.find(t => t.id === tabId);
-    // Do NOT bump chatKey — keeping the panel mounted preserves streaming state.
-    // ChatPanel's useEffect on loadConversationId will reload the conversation.
-    setLoadConversationId(tab?.conversationId ?? null);
-    setReplayBuffer(null);
+    setActiveTabId(tabId);
     setActiveView('chat');
-  }, [tabs]);
+  }, []);
+
+  const handleReorderTabs = useCallback((fromIndex: number, toIndex: number) => {
+    setTabs(current => {
+      const next = [...current];
+      const [moved] = next.splice(fromIndex, 1);
+      next.splice(toIndex, 0, moved);
+      return next;
+    });
+  }, []);
 
   const handleConversationTitleResolved = useCallback((tabId: string, title: string) => {
     setTabs(current =>
@@ -356,13 +372,11 @@ export default function App() {
         setActiveTabId(result.activeTabId);
         return result.tabs;
       });
-      setLoadConversationId(id);
-      setReplayBuffer(null);
-      setChatKey(k => k + 1);
+      setTabPanel(newTab.id, () => ({ chatKey: 0, loadConversationId: id, replayBuffer: null }));
       setHistoryMode(false);
       setActiveView('chat');
     }
-  }, [tabs, handleSwitchTab]);
+  }, [tabs, handleSwitchTab, setTabPanel]);
 
   const handleOpenProcess = useCallback((processId: string) => {
     setSelectedProcessId(processId);
@@ -525,29 +539,45 @@ export default function App() {
   const renderPrimaryView = () => {
     if (displayedView === 'chat') {
       return (
-        <ChatPanel
-          key={chatKey}
-          historyMode={historyMode}
-          onToggleHistory={() => setHistoryMode((current) => !current)}
-          browserVisible={browserVisible}
-          onToggleBrowser={handleToggleBrowser}
-          onHideBrowser={handleHideBrowser}
-          onShowBrowser={handleShowBrowser}
-          terminalOpen={terminalOpen}
-          onToggleTerminal={handleToggleTerminal}
-          onOpenSettings={() => setActiveView('settings')}
-          onOpenPendingApproval={handleOpenProcess}
-          loadConversationId={loadConversationId}
-          replayBuffer={replayBuffer}
-          tabs={tabs}
-          activeTabId={activeTabId}
-          runningConvIds={runningConvIds}
-          onNewTab={handleNewTab}
-          onCloseTab={handleCloseTab}
-          onSwitchTab={handleSwitchTab}
-          onOpenConversation={handleOpenConversation}
-          onConversationTitleResolved={handleConversationTitleResolved}
-        />
+        <>
+          {tabs.map(tab => {
+            const panel = getTabPanel(tab.id);
+            const isActive = tab.id === activeTabId;
+            return (
+              <div
+                key={tab.id}
+                className="flex min-h-0 w-full min-w-0 flex-1 self-stretch"
+                style={{ display: isActive ? 'flex' : 'none' }}
+              >
+                <ChatPanel
+                  key={`${tab.id}-${panel.chatKey}`}
+                  tabId={tab.id}
+                  historyMode={historyMode}
+                  onToggleHistory={() => setHistoryMode((current) => !current)}
+                  browserVisible={browserVisible}
+                  onToggleBrowser={handleToggleBrowser}
+                  onHideBrowser={handleHideBrowser}
+                  onShowBrowser={handleShowBrowser}
+                  terminalOpen={terminalOpen}
+                  onToggleTerminal={handleToggleTerminal}
+                  onOpenSettings={() => setActiveView('settings')}
+                  onOpenPendingApproval={handleOpenProcess}
+                  loadConversationId={panel.loadConversationId}
+                  replayBuffer={panel.replayBuffer}
+                  tabs={tabs}
+                  activeTabId={activeTabId}
+                  runningConvIds={runningConvIds}
+                  onNewTab={handleNewTab}
+                  onCloseTab={handleCloseTab}
+                  onSwitchTab={handleSwitchTab}
+                  onReorderTabs={handleReorderTabs}
+                  onOpenConversation={handleOpenConversation}
+                  onConversationTitleResolved={handleConversationTitleResolved}
+                />
+              </div>
+            );
+          })}
+        </>
       );
     }
 

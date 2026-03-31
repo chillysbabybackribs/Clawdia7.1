@@ -60,7 +60,7 @@ export default function MarkdownRenderer({ content, isStreaming }: MarkdownRende
   const normalizedContent = useMemo(() => normalizeLinkedLabelText(content), [content]);
 
   return (
-    <div className={`markdown-prose${isStreaming ? ' pb-2' : ' animate-md-in'}`}>
+    <div className="markdown-prose">
       <ReactMarkdown
         remarkPlugins={plugins}
         components={{

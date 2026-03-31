@@ -12,8 +12,8 @@
 
 import type { CapabilityBroker } from '../capabilities/CapabilityBroker';
 import type { ProviderClient, ProviderTurnRequest, ProviderTurnResult } from '../providers/ProviderClient';
-import { normalizeAnthropicMessages, validateAnthropicMessages } from '../providers/anthropicMessageProtocol';
-import { normalizeOpenAIMessages, validateOpenAIMessages } from '../providers/openAIMessageProtocol';
+import { prepareAnthropicMessagesForSend } from '../providers/anthropicMessageProtocol';
+import { prepareOpenAIMessagesForSend } from '../providers/openAIMessageProtocol';
 
 // ─── Event types ──────────────────────────────────────────────────────────────
 
@@ -155,21 +155,22 @@ export class ChatExecutor {
       };
 
       if (providerId === 'anthropic') {
-        const repair = normalizeAnthropicMessages(turnRequest.messages as any[], {
+        const repair = prepareAnthropicMessagesForSend(turnRequest.messages as any[], {
+          caller: 'ChatExecutor.runTurn',
           closePendingToolUses: true,
           pendingToolUseReason: 'protocol_repair',
+          onRepair: (issues) => {
+            console.warn(`[ChatExecutor] Anthropic message protocol issues (auto-repaired): ${issues.join(' | ')}`);
+          },
         });
-        const errors = validateAnthropicMessages(repair.messages as any[]);
-        if (errors.length > 0) {
-          console.warn(`[ChatExecutor] Anthropic message protocol issues (auto-repaired): ${errors.join(' | ')}`);
-        }
         turnRequest.messages = repair.messages as ProviderTurnRequest['messages'];
       } else if (providerId === 'openai') {
-        const repair = normalizeOpenAIMessages(turnRequest.messages as any[]);
-        const errors = validateOpenAIMessages(repair.messages as any[]);
-        if (errors.length > 0) {
-          console.warn(`[ChatExecutor] OpenAI message protocol issues (auto-repaired): ${errors.join(' | ')}`);
-        }
+        const repair = prepareOpenAIMessagesForSend(turnRequest.messages as any[], {
+          caller: 'ChatExecutor.runTurn',
+          onRepair: (issues) => {
+            console.warn(`[ChatExecutor] OpenAI message protocol issues (auto-repaired): ${issues.join(' | ')}`);
+          },
+        });
         turnRequest.messages = repair.messages as ProviderTurnRequest['messages'];
       }
 

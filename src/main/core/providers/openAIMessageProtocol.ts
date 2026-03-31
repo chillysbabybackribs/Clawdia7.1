@@ -1,15 +1,19 @@
 type OpenAIProtocolMessage = {
   role?: string;
   content?: unknown;
-  tool_calls?: Array<{ id?: string; [key: string]: unknown }>;
+  tool_calls?: Array<{ id?: string }>;
   tool_call_id?: string;
-  [key: string]: unknown;
 };
 
 export interface OpenAIProtocolRepair {
   messages: OpenAIProtocolMessage[];
   repaired: boolean;
   issues: string[];
+}
+
+export interface OpenAIPreflightOptions {
+  caller?: string;
+  onRepair?: (issues: string[]) => void;
 }
 
 function getAssistantToolCallIds(message: OpenAIProtocolMessage | undefined | null): string[] {
@@ -121,4 +125,23 @@ export function validateOpenAIMessages(messages: OpenAIProtocolMessage[]): strin
   }
 
   return errors;
+}
+
+export function prepareOpenAIMessagesForSend(
+  messages: OpenAIProtocolMessage[],
+  options: OpenAIPreflightOptions = {},
+): OpenAIProtocolRepair {
+  const repair = normalizeOpenAIMessages(messages);
+
+  if (repair.issues.length > 0) {
+    options.onRepair?.(repair.issues);
+  }
+
+  const errors = validateOpenAIMessages(repair.messages);
+  if (errors.length > 0) {
+    const caller = options.caller ? `${options.caller}: ` : '';
+    throw new Error(`${caller}OpenAI message pre-flight failed: ${errors.join(' | ')}`);
+  }
+
+  return repair;
 }
