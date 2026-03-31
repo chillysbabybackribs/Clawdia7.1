@@ -11,6 +11,7 @@ import type {
   BrowserServiceResult,
   BrowserTabState,
   BrowserViewportBounds,
+  PageProfile,
 } from './BrowserService';
 
 interface InternalTab {
@@ -121,7 +122,9 @@ export class ElectronBrowserService implements BrowserService {
     tab.state.isNewTab = false;
     await this.loadUrlReady(tab.view.webContents, url);
     this.history.add(url);
-    return this.currentNavigationResult();
+    const result = this.currentNavigationResult();
+    result.profile = await this.profilePage();
+    return result;
   }
 
   async back(): Promise<void> {
@@ -173,6 +176,8 @@ export class ElectronBrowserService implements BrowserService {
     }
     return { ...tab.state };
   }
+
+
 
   async listTabs(): Promise<BrowserTabState[]> {
     // Ensure at least one tab exists. The promise is shared so concurrent calls
@@ -279,11 +284,24 @@ export class ElectronBrowserService implements BrowserService {
 
   async listSessions(): Promise<string[]> {
     const cookies = await session.fromPartition(PARTITION).cookies.get({});
-    const domains = new Set<string>();
+    // Only include domains that have a real auth session cookie.
+    // Requirements:
+    //   1. Name matches a known session/auth pattern
+    //   2. httpOnly=true — real auth cookies are always httpOnly; tracking/analytics cookies are not
+    //   3. Non-empty value — rules out placeholder/opt-out cookies
+    const SESSION_COOKIE_PATTERN = /^(session|sess|auth|access_token|refresh_token|id_token|jwt|user_session|login|logged_in|_session|PHPSESSID|JSESSIONID|connect\.sid|remember_me|remember_token)$/i;
+    const authDomains = new Set<string>();
     for (const cookie of cookies) {
-      if (cookie.domain) domains.add(cookie.domain.replace(/^\./, ''));
+      if (
+        cookie.domain &&
+        cookie.httpOnly &&
+        cookie.value &&
+        SESSION_COOKIE_PATTERN.test(cookie.name)
+      ) {
+        authDomains.add(cookie.domain.replace(/^\./, ''));
+      }
     }
-    return [...domains].sort();
+    return [...authDomains].sort();
   }
 
   async clearSession(domain: string): Promise<void> {
@@ -311,39 +329,179 @@ export class ElectronBrowserService implements BrowserService {
     const wc = this.getActiveWebContents();
     if (!wc) return { ok: false, error: 'No active browser tab' };
     try {
-      const found = await wc.executeJavaScript(`
+      // Get element centre coords so we can send a real mouse event via Chromium,
+      // not just a synthetic JS click — this works on shadow-DOM, canvas overlays, etc.
+      const rect = await wc.executeJavaScript(`
         (function() {
-          const el = document.querySelector(${JSON.stringify(selector)});
-          if (!el) return false;
+          function deepQuery(root, sel) {
+            let el = root.querySelector(sel);
+            if (el) return el;
+            const all = root.querySelectorAll('*');
+            for (const node of all) {
+              if (node.shadowRoot) {
+                el = deepQuery(node.shadowRoot, sel);
+                if (el) return el;
+              }
+            }
+            return null;
+          }
+          const el = deepQuery(document, ${JSON.stringify(selector)});
+          if (!el) return null;
           el.focus();
-          el.click();
-          return true;
+          const r = el.getBoundingClientRect();
+          return { x: Math.round(r.left + r.width / 2), y: Math.round(r.top + r.height / 2) };
         })()
       `);
-      if (!found) return { ok: false, error: `Element not found: ${selector}` };
+      if (!rect) return { ok: false, error: `Element not found: ${selector}` };
+
+      // Real Chromium-level mouse events hit every event listener including React/Vue synthetic
+      for (const type of ['mouseDown', 'mouseUp'] as const) {
+        wc.sendInputEvent({
+          type,
+          x: rect.x,
+          y: rect.y,
+          button: 'left',
+          clickCount: 1,
+        } as any);
+      }
       return { ok: true };
     } catch (err) {
       return { ok: false, error: (err as Error).message };
     }
   }
 
+  /**
+   * Universal text input — works on ALL of:
+   *   • Native <input> / <textarea>                       → sendInputEvent 'char' per character
+   *   • React / Vue / Angular controlled inputs           → sendInputEvent 'char' per character
+   *   • contenteditable divs (role=textbox)               → execCommand('insertText')
+   *   • Lexical, ProseMirror, Draft.js, Slate, TipTap    → execCommand('insertText')
+   *   • CodeMirror (CM6 uses contenteditable internally)  → execCommand('insertText')
+   *
+   * Two-path strategy based on element kind:
+   *
+   * PATH A — Native inputs (<input>, <textarea>):
+   *   1. Focus via real Chromium mouseDown/mouseUp at element centre coords.
+   *   2. Clear: override via native value setter (React-compatible) + dispatch input event.
+   *   3. Type: wc.sendInputEvent({ type: 'char', keyCode: ch }) per character.
+   *      This is a genuine Chromium-level char event — identical to physical keyboard input —
+   *      so React/Vue synthetic event handlers fire automatically.
+   *
+   * PATH B — contenteditable / rich-text editors:
+   *   1. Focus via real Chromium mouseDown/mouseUp.
+   *   2. Clear: execCommand('selectAll') + execCommand('delete') — triggers the editor's own
+   *      internal selection + delete path, so its document model stays consistent.
+   *   3. Type: execCommand('insertText', false, fullText) — fires a 'beforeinput' InputEvent
+   *      with inputType='insertText', which is the standard contract every rich-text framework
+   *      (Lexical, ProseMirror, Draft.js, Slate, TipTap, CM6) listens to.
+   *      Single execCommand call is atomic — no per-character delay needed.
+   */
   async type(selector: string, text: string, clearFirst = true): Promise<BrowserServiceResult> {
     const wc = this.getActiveWebContents();
     if (!wc) return { ok: false, error: 'No active browser tab' };
     try {
-      const found = await wc.executeJavaScript(`
+      // ── Step 1: locate element, classify it, get centre coords ──────────────
+      const info = await wc.executeJavaScript(`
         (function() {
-          const el = document.querySelector(${JSON.stringify(selector)});
-          if (!el) return false;
-          el.focus();
-          if (${clearFirst}) { el.value = ''; }
-          el.value = ${JSON.stringify(text)};
-          el.dispatchEvent(new Event('input', { bubbles: true }));
-          el.dispatchEvent(new Event('change', { bubbles: true }));
-          return true;
+          function deepQuery(root, sel) {
+            let el = root.querySelector(sel);
+            if (el) return el;
+            const all = root.querySelectorAll('*');
+            for (const node of all) {
+              if (node.shadowRoot) {
+                el = deepQuery(node.shadowRoot, sel);
+                if (el) return el;
+              }
+            }
+            return null;
+          }
+          const el = deepQuery(document, ${JSON.stringify(selector)});
+          if (!el) return null;
+          const tag = el.tagName.toLowerCase();
+          const isNative = tag === 'input' || tag === 'textarea';
+          const isContentEditable = !isNative && (
+            el.isContentEditable ||
+            el.getAttribute('contenteditable') === 'true' ||
+            el.getAttribute('contenteditable') === ''
+          );
+          const r = el.getBoundingClientRect();
+          return {
+            isNative,
+            isContentEditable,
+            x: Math.round(r.left + r.width / 2),
+            y: Math.round(r.top + r.height / 2),
+          };
         })()
       `);
-      if (!found) return { ok: false, error: `Element not found: ${selector}` };
+
+      if (!info) return { ok: false, error: `Element not found: ${selector}` };
+
+      // ── Step 2: focus via real Chromium mouse events ─────────────────────────
+      // Using sendInputEvent mouseDown/mouseUp rather than JS .focus() ensures the
+      // OS-level focus state is set and framework focus handlers (onFocus, FocusEvent) fire.
+      for (const evType of ['mouseDown', 'mouseUp'] as const) {
+        wc.sendInputEvent({ type: evType, x: info.x, y: info.y, button: 'left', clickCount: 1 } as any);
+      }
+      // Allow the editor's focus handler / cursor mount to settle
+      await new Promise(r => setTimeout(r, 60));
+
+      // ── Step 3: clear + type, branched by element kind ───────────────────────
+      if (info.isNative) {
+        // PATH A: native <input> / <textarea>
+        if (clearFirst) {
+          await wc.executeJavaScript(`
+            (function() {
+              function deepQuery(root, sel) {
+                let el = root.querySelector(sel);
+                if (el) return el;
+                const all = root.querySelectorAll('*');
+                for (const node of all) {
+                  if (node.shadowRoot) { el = deepQuery(node.shadowRoot, sel); if (el) return el; }
+                }
+                return null;
+              }
+              const el = deepQuery(document, ${JSON.stringify(selector)});
+              if (!el) return;
+              // Use the native property setter so React's synthetic onChange fires
+              const setter = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(el), 'value')?.set;
+              if (setter) setter.call(el, ''); else el.value = '';
+              el.dispatchEvent(new Event('input', { bubbles: true }));
+            })()
+          `);
+        }
+        // Type each character as a genuine Chromium char event
+        for (const char of text) {
+          wc.sendInputEvent({ type: 'char', keyCode: char } as any);
+          // Small inter-character delay avoids dropped chars in async-event editors
+          await new Promise(r => setTimeout(r, 12));
+        }
+      } else {
+        // PATH B: contenteditable / rich-text editor
+        // execCommand('insertText') fires a beforeinput InputEvent that every framework handles
+        await wc.executeJavaScript(`
+          (function() {
+            function deepQuery(root, sel) {
+              let el = root.querySelector(sel);
+              if (el) return el;
+              const all = root.querySelectorAll('*');
+              for (const node of all) {
+                if (node.shadowRoot) { el = deepQuery(node.shadowRoot, sel); if (el) return el; }
+              }
+              return null;
+            }
+            const el = deepQuery(document, ${JSON.stringify(selector)});
+            if (!el) return;
+            el.focus();
+            if (${clearFirst}) {
+              document.execCommand('selectAll', false);
+              document.execCommand('delete', false);
+            }
+            // Single atomic insert — works with Lexical, ProseMirror, Draft.js, Slate, TipTap, CM6
+            document.execCommand('insertText', false, ${JSON.stringify(text)});
+          })()
+        `);
+      }
+
       return { ok: true };
     } catch (err) {
       return { ok: false, error: (err as Error).message };
@@ -356,9 +514,19 @@ export class ElectronBrowserService implements BrowserService {
     const deadline = Date.now() + timeoutMs;
     while (Date.now() < deadline) {
       try {
-        const found = await wc.executeJavaScript(
-          `!!document.querySelector(${JSON.stringify(selector)})`
-        );
+        const found = await wc.executeJavaScript(`
+          (function() {
+            function deepQuery(root, sel) {
+              let el = root.querySelector(sel);
+              if (el) return el;
+              for (const node of root.querySelectorAll('*')) {
+                if (node.shadowRoot) { el = deepQuery(node.shadowRoot, sel); if (el) return el; }
+              }
+              return null;
+            }
+            return !!deepQuery(document, ${JSON.stringify(selector)});
+          })()
+        `);
         if (found) return { ok: true };
       } catch {
         // page may be mid-navigation — ignore and retry
@@ -386,7 +554,16 @@ export class ElectronBrowserService implements BrowserService {
       if (selector) {
         await wc.executeJavaScript(`
           (function() {
-            const el = document.querySelector(${JSON.stringify(selector)});
+            function deepQuery(root, sel) {
+              let el = root.querySelector(sel);
+              if (el) return el;
+              const all = root.querySelectorAll('*');
+              for (const node of all) {
+                if (node.shadowRoot) { el = deepQuery(node.shadowRoot, sel); if (el) return el; }
+              }
+              return null;
+            }
+            const el = deepQuery(document, ${JSON.stringify(selector)});
             if (el) el.scrollIntoView({ behavior: 'smooth', block: 'center' });
           })()
         `);
@@ -418,8 +595,15 @@ export class ElectronBrowserService implements BrowserService {
     try {
       const elements = await wc.executeJavaScript(`
         (function() {
-          const nodes = Array.from(document.querySelectorAll(${JSON.stringify(selector)})).slice(0, ${limit});
-          return nodes.map(el => ({
+          function deepQueryAll(root, sel, results) {
+            for (const el of root.querySelectorAll(sel)) results.push(el);
+            for (const node of root.querySelectorAll('*')) {
+              if (node.shadowRoot) deepQueryAll(node.shadowRoot, sel, results);
+            }
+          }
+          const nodes = [];
+          deepQueryAll(document, ${JSON.stringify(selector)}, nodes);
+          return nodes.slice(0, ${limit}).map(el => ({
             tag:  el.tagName.toLowerCase(),
             text: el.innerText?.slice(0, 200) ?? '',
             attrs: {
@@ -471,7 +655,16 @@ export class ElectronBrowserService implements BrowserService {
     try {
       const found = await wc.executeJavaScript(`
         (function() {
-          const el = document.querySelector(${JSON.stringify(selector)});
+          function deepQuery(root, sel) {
+            let el = root.querySelector(sel);
+            if (el) return el;
+            const all = root.querySelectorAll('*');
+            for (const node of all) {
+              if (node.shadowRoot) { el = deepQuery(node.shadowRoot, sel); if (el) return el; }
+            }
+            return null;
+          }
+          const el = deepQuery(document, ${JSON.stringify(selector)});
           if (!el) return false;
           el.dispatchEvent(new MouseEvent('mouseover',  { bubbles: true }));
           el.dispatchEvent(new MouseEvent('mouseenter', { bubbles: true }));
@@ -503,7 +696,16 @@ export class ElectronBrowserService implements BrowserService {
     try {
       const text = await wc.executeJavaScript(`
         (function() {
-          const el = document.querySelector(${JSON.stringify(selector)});
+          function deepQuery(root, sel) {
+            let el = root.querySelector(sel);
+            if (el) return el;
+            const all = root.querySelectorAll('*');
+            for (const node of all) {
+              if (node.shadowRoot) { el = deepQuery(node.shadowRoot, sel); if (el) return el; }
+            }
+            return null;
+          }
+          const el = deepQuery(document, ${JSON.stringify(selector)});
           if (!el) return null;
           return el.innerText || el.textContent || '';
         })()
@@ -512,6 +714,136 @@ export class ElectronBrowserService implements BrowserService {
       return { ok: true, data: String(text).trim() };
     } catch (err) {
       return { ok: false, error: (err as Error).message };
+    }
+  }
+
+  async profilePage(): Promise<PageProfile> {
+    const wc = this.getActiveWebContents();
+    if (!wc) {
+      return {
+        hostname: '', frameworks: [], inputs: [], buttons: [], links: [],
+        forms: [], hasShadowInputs: false, contentAreas: [], likelyLoggedIn: false,
+      };
+    }
+    try {
+      const profile = await wc.executeJavaScript(`
+        (function() {
+          // ── Shadow DOM traversal ─────────────────────────────────────────────
+          function deepQuery(root, sel) {
+            let el = root.querySelector(sel);
+            if (el) return el;
+            for (const node of root.querySelectorAll('*')) {
+              if (node.shadowRoot) { el = deepQuery(node.shadowRoot, sel); if (el) return el; }
+            }
+            return null;
+          }
+          function deepQueryAll(root, sel, results, inShadow) {
+            for (const el of root.querySelectorAll(sel)) results.push({ el, inShadow });
+            for (const node of root.querySelectorAll('*')) {
+              if (node.shadowRoot) deepQueryAll(node.shadowRoot, sel, results, true);
+            }
+          }
+
+          // ── Framework detection ──────────────────────────────────────────────
+          const frameworks = [];
+          if (window.__REACT_DEVTOOLS_GLOBAL_HOOK__ || document.querySelector('[data-reactroot],[data-reactid]')) frameworks.push('React');
+          if (window.Vue || document.querySelector('[data-v-]')) frameworks.push('Vue');
+          if (window.angular || document.querySelector('[ng-version]')) frameworks.push('Angular');
+          if (window.Svelte || document.querySelector('[data-svelte]')) frameworks.push('Svelte');
+          if (window.next) frameworks.push('Next.js');
+          if (window.nuxt) frameworks.push('Nuxt');
+          // Rich text editors
+          if (document.querySelector('.ProseMirror')) frameworks.push('ProseMirror');
+          if (document.querySelector('[data-lexical-editor]')) frameworks.push('Lexical');
+          if (document.querySelector('.DraftEditor-root')) frameworks.push('Draft.js');
+          if (document.querySelector('.tiptap')) frameworks.push('TipTap');
+          if (document.querySelector('.cm-editor,.CodeMirror')) frameworks.push('CodeMirror');
+
+          // ── Inputs (including shadow DOM) ────────────────────────────────────
+          const inputResults = [];
+          deepQueryAll(document, 'input:not([type=hidden]),textarea,[contenteditable="true"],[contenteditable=""]', inputResults, false);
+          const inputs = inputResults.slice(0, 30).map(({ el, inShadow }) => {
+            const tag = el.tagName.toLowerCase();
+            const type = el.getAttribute('type') || tag;
+            const placeholder = el.getAttribute('placeholder') || '';
+            // Find associated label
+            let label = '';
+            if (el.id) {
+              const lbl = document.querySelector('label[for="' + el.id + '"]');
+              if (lbl) label = lbl.innerText.trim().slice(0, 60);
+            }
+            if (!label) {
+              const aria = el.getAttribute('aria-label') || el.getAttribute('aria-labelledby') || '';
+              label = aria.slice(0, 60);
+            }
+            // Build a stable selector
+            let selector = tag;
+            if (el.id) selector = '#' + CSS.escape(el.id);
+            else if (el.name) selector = tag + '[name="' + el.name + '"]';
+            else if (el.getAttribute('type')) selector = tag + '[type="' + el.getAttribute('type') + '"]';
+            return { selector, type, placeholder: placeholder.slice(0, 80), label, inShadowDom: inShadow };
+          });
+
+          const hasShadowInputs = inputs.some(i => i.inShadowDom);
+
+          // ── Buttons ──────────────────────────────────────────────────────────
+          const buttonResults = [];
+          deepQueryAll(document, 'button,[role=button],[type=submit]', buttonResults, false);
+          const buttons = buttonResults.slice(0, 20).map(({ el }) => {
+            let selector = el.tagName.toLowerCase();
+            if (el.id) selector = '#' + CSS.escape(el.id);
+            else if (el.getAttribute('type')) selector = el.tagName.toLowerCase() + '[type="' + el.getAttribute('type') + '"]';
+            return { selector, text: (el.innerText || el.textContent || '').trim().slice(0, 60) };
+          });
+
+          // ── Links ────────────────────────────────────────────────────────────
+          const links = Array.from(document.querySelectorAll('a[href]')).slice(0, 30).map(el => ({
+            href: el.getAttribute('href') || '',
+            text: (el.innerText || '').trim().slice(0, 60),
+          }));
+
+          // ── Forms ────────────────────────────────────────────────────────────
+          const forms = Array.from(document.querySelectorAll('form')).slice(0, 10).map(form => {
+            const fields = Array.from(form.querySelectorAll('input:not([type=hidden]),textarea,select')).map(el => {
+              if (el.id) return '#' + CSS.escape(el.id);
+              if (el.name) return el.tagName.toLowerCase() + '[name="' + el.name + '"]';
+              return el.tagName.toLowerCase();
+            });
+            return {
+              action: form.getAttribute('action') || '',
+              method: (form.getAttribute('method') || 'get').toUpperCase(),
+              fields,
+            };
+          });
+
+          // ── Content areas ────────────────────────────────────────────────────
+          const contentSelectors = ['main','article','[role="main"]','[role="feed"]','[role="list"]','#content','#main','.content','.main'];
+          const contentAreas = contentSelectors.filter(s => document.querySelector(s));
+
+          // ── Auth hint ────────────────────────────────────────────────────────
+          const authSelectors = ['[data-username]','[data-user]','[data-testid*="user"]','[data-testid*="avatar"]',
+            '.avatar','#header-user','[class*="username"]','[class*="userAvatar"]','[aria-label*="profile" i]'];
+          const likelyLoggedIn = authSelectors.some(s => document.querySelector(s));
+
+          return {
+            hostname: location.hostname,
+            frameworks,
+            inputs,
+            buttons,
+            links,
+            forms,
+            hasShadowInputs,
+            contentAreas,
+            likelyLoggedIn,
+          };
+        })()
+      `);
+      return profile as PageProfile;
+    } catch {
+      return {
+        hostname: '', frameworks: [], inputs: [], buttons: [], links: [],
+        forms: [], hasShadowInputs: false, contentAreas: [], likelyLoggedIn: false,
+      };
     }
   }
 

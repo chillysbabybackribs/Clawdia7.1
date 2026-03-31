@@ -193,3 +193,35 @@ export function getModelsForProvider(provider: ProviderId): ModelOption[] {
 export function getModelById(modelId: string): ModelOption | undefined {
   return MODEL_REGISTRY.find((model) => model.id === modelId);
 }
+
+/**
+ * Resolve the best model ID for a given task tier and provider.
+ *
+ * - 'fast'     → provider's cheapest/fastest model (Haiku, nano, Flash-Lite)
+ * - 'standard' → provider's balanced model (Sonnet, mini, Flash)
+ * - 'powerful' → the user's explicitly configured model (respect their choice)
+ *
+ * Falls back to the user's configured model if no match is found for the tier.
+ */
+export function resolveModelForTier(
+  tier: 'fast' | 'standard' | 'powerful',
+  provider: ProviderId,
+  configuredModel: string,
+): string {
+  if (tier === 'powerful') return configuredModel;
+
+  const providerModels = getModelsForProvider(provider);
+
+  const apiTier = tier === 'fast' ? 'fast' : 'balanced';
+  const match = providerModels.find((m) => m.tier === apiTier);
+
+  // If the user's configured model is already at or below the desired tier,
+  // use it directly — no point downgrading unnecessarily.
+  const configured = getModelById(configuredModel);
+  if (configured) {
+    const tierRank: Record<ModelOption['tier'], number> = { fast: 0, balanced: 1, deep: 2 };
+    if (tierRank[configured.tier] <= tierRank[apiTier]) return configuredModel;
+  }
+
+  return match?.id ?? configuredModel;
+}

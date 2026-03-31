@@ -13,29 +13,9 @@ import { startRun, trackToolCall, trackToolResult, completeRun, failRun } from '
 import { executeGuiInteract, DESKTOP_TOOL_NAMES, renderCapabilities } from './core/desktop';
 import { checkBudget } from './agent/spending-budget';
 import type { ToolUseBlock, LLMTurn, LoopOptions } from './agent/types';
+import { prepareOpenAIMessagesForSend } from './core/providers/openAIMessageProtocol';
 
 type OpenAIMessage = OpenAI.Chat.ChatCompletionMessageParam;
-
-const PROTOCOL_REPAIR_RESULT = JSON.stringify({
-  status: 'interrupted',
-  reason: 'protocol_repair',
-  message: 'Tool run was interrupted before completion.',
-});
-
-/**
- * If the last assistant message has unanswered tool_calls, inject synthetic
- * tool result messages so the next API call doesn't fail validation.
- */
-function repairOpenAIHistory(messages: OpenAIMessage[]): void {
-  if (messages.length === 0) return;
-  const last = messages[messages.length - 1] as any;
-  if (last.role !== 'assistant' || !Array.isArray(last.tool_calls)) return;
-  const pendingIds = (last.tool_calls as any[]).map((tc: any) => tc.id as string);
-  if (pendingIds.length === 0) return;
-  for (const id of pendingIds) {
-    messages.push({ role: 'tool', tool_call_id: id, content: PROTOCOL_REPAIR_RESULT } as OpenAIMessage);
-  }
-}
 
 
 function buildUserContent(
@@ -122,8 +102,12 @@ export async function streamOpenAIChat({
     const systemPrompt = await Promise.resolve(buildSharedSystemPrompt(unrestrictedMode)) + (caps ? `\n\nOS CONTEXT:\n${caps}` : '');
 
     // Repair stale tool history before appending the new user message
-    const repairedSession = [...sessionMessages];
-    repairOpenAIHistory(repairedSession);
+    const repairedSession = prepareOpenAIMessagesForSend([...sessionMessages] as OpenAIMessage[], {
+      caller: 'streamOpenAIChat.session',
+      onRepair: (issues) => {
+        console.warn(`[openai] pre-flight repaired session history: ${issues.join(' | ')}`);
+      },
+    }).messages as OpenAIMessage[];
     repairedSession.push(userMessage);
 
     sessionMessages.push(userMessage);
@@ -146,10 +130,17 @@ export async function streamOpenAIChat({
     while (turns < MAX_TOOL_TURNS) {
       turns++;
 
+      const safeLoopMessages = prepareOpenAIMessagesForSend(loopMessages as OpenAIMessage[], {
+        caller: 'streamOpenAIChat.turn',
+        onRepair: (issues) => {
+          console.warn(`[openai] pre-flight repaired turn request: ${issues.join(' | ')}`);
+        },
+      }).messages as OpenAIMessage[];
+
       const stream = await client.chat.completions.create(
         {
           model: modelRegistryId,
-          messages: [...loopMessages],
+          messages: safeLoopMessages,
           tools: activeTools,
           tool_choice: 'auto',
           stream: true,
@@ -353,10 +344,17 @@ export async function streamOpenAILLM(
     ...messages,
   ];
 
+  const safeLoopMessages = prepareOpenAIMessagesForSend(loopMessages as OpenAIMessage[], {
+    caller: 'streamOpenAILLM',
+    onRepair: (issues) => {
+      console.warn(`[openai] pre-flight repaired LLM request: ${issues.join(' | ')}`);
+    },
+  }).messages as OpenAIMessage[];
+
   const stream = await client.chat.completions.create(
     {
       model: options.model,
-      messages: loopMessages,
+      messages: safeLoopMessages,
       tools,
       tool_choice: 'auto',
       stream: true,

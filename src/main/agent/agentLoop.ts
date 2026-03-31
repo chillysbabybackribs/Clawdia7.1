@@ -10,6 +10,9 @@ import { streamLLM } from './streamLLM';
 import type { LoopOptions, DispatchContext, ToolUseBlock } from './types';
 import type { MessageAttachment } from '../../shared/types';
 import { buildAppMappingSystemPrompt } from './appMapping';
+import { prepareAnthropicMessagesForSend } from '../core/providers/anthropicMessageProtocol';
+import { prepareOpenAIMessagesForSend } from '../core/providers/openAIMessageProtocol';
+import { buildCacheKey, getCachedResponse, setCachedResponse } from '../db/responseCache';
 
 const MAX_ITERATIONS = 50;
 
@@ -18,36 +21,87 @@ const MAX_ITERATIONS = 50;
 // while remaining within ~10% of real counts for typical prose + JSON content.
 // Drops middle messages (oldest non-first) until the estimate is under budget,
 // always preserving message[0] (original task) and the most recent message.
-const TOKEN_BUDGET = 28_000;   // leave headroom for tool schemas + response
+// Budget for in-loop history trimming.
+// Claude supports 200K tokens; we allow up to 90K for accumulated history,
+// leaving generous headroom for tool schemas, system prompt, and the response.
+// Raising this from the old 28K prevents the loop from stripping recent
+// conversational turns (e.g. "here are your options A/B/C") that the user
+// needs visible when they reply with a short follow-up like "option A".
+const TOKEN_BUDGET = 90_000;
 const CHARS_PER_TOKEN = 4;
+
+// How many of the most-recent non-tool-result messages to always preserve.
+// These are the live dialogue turns the user is actively referring to.
+const PROTECTED_TAIL = 6;
 
 function estimateTokens(messages: any[]): number {
   return Math.ceil(JSON.stringify(messages).length / CHARS_PER_TOKEN);
 }
 
+function isToolPair(messages: any[], idx: number): boolean {
+  // Returns true when messages[idx] is an assistant tool_use immediately
+  // followed by a user tool_result — a pair that must be dropped together.
+  const a = messages[idx];
+  const b = messages[idx + 1];
+  return (
+    a?.role === 'assistant' &&
+    Array.isArray(a?.content) &&
+    a.content.some((bl: any) => bl?.type === 'tool_use') &&
+    b?.role === 'user' &&
+    Array.isArray(b?.content) &&
+    b.content.some((bl: any) => bl?.type === 'tool_result')
+  );
+}
+
 function trimMessageHistory(messages: any[]): void {
   if (estimateTokens(messages) <= TOKEN_BUDGET) return;
 
-  // Drop oldest non-first messages until under budget.
+  // Drop oldest messages until under budget, but never touch the most-recent
+  // PROTECTED_TAIL entries — those are the live dialogue context the user is
+  // actively referencing (e.g. "here are your options A/B/C").
+  //
   // IMPORTANT: Anthropic requires that every tool_use assistant message is
   // immediately followed by its tool_result user message. Dropping one without
   // the other produces an API error. We detect and drop such pairs together.
-  while (messages.length > 2 && estimateTokens(messages) > TOKEN_BUDGET) {
-    const candidate = messages[1];
-    const isPairedToolUse =
-      candidate?.role === 'assistant' &&
-      Array.isArray(candidate?.content) &&
-      candidate.content.some((b: any) => b?.type === 'tool_use') &&
-      messages[2]?.role === 'user' &&
-      Array.isArray(messages[2]?.content) &&
-      messages[2].content.some((b: any) => b?.type === 'tool_result');
+  while (messages.length > PROTECTED_TAIL + 1 && estimateTokens(messages) > TOKEN_BUDGET) {
+    // messages[0] is the initial user message (anchor) — never drop it.
+    // Start trimming from messages[1].
+    if (messages.length <= 2) break;
 
-    if (isPairedToolUse && messages.length > 3) {
+    const candidate = messages[1];
+    const safeToDropPair = isToolPair(messages, 1) && messages.length > PROTECTED_TAIL + 2;
+
+    if (safeToDropPair) {
       // Drop the assistant tool_use AND the following tool_result together.
       messages.splice(1, 2);
     } else {
       messages.splice(1, 1);
     }
+  }
+}
+
+function normalizeHistoryForProvider(messages: any[], provider: LoopOptions['provider'], caller: string): void {
+  if (provider === 'anthropic') {
+    const repair = prepareAnthropicMessagesForSend(messages, {
+      caller,
+      closePendingToolUses: true,
+      pendingToolUseReason: 'protocol_repair',
+      onRepair: (issues) => {
+        console.warn(`[agentLoop] Anthropic protocol repaired in ${caller}: ${issues.join(' | ')}`);
+      },
+    });
+    messages.splice(0, messages.length, ...repair.messages);
+    return;
+  }
+
+  if (provider === 'openai') {
+    const repair = prepareOpenAIMessagesForSend(messages, {
+      caller,
+      onRepair: (issues) => {
+        console.warn(`[agentLoop] OpenAI protocol repaired in ${caller}: ${issues.join(' | ')}`);
+      },
+    });
+    messages.splice(0, messages.length, ...repair.messages);
   }
 }
 
@@ -110,15 +164,49 @@ export async function agentLoop(
   // Push current user message onto session history
   messages.push(buildUserMessage(userMessage, options.attachments, options.provider));
 
+  // Inject browser session context once per run (browser/full profiles only).
+  // Placed here — after user message, before the loop — so it costs tokens once
+  // and does not disturb the cacheable static system prompt.
+  if (options.browserService && (profile.toolGroup === 'browser' || profile.toolGroup === 'full')) {
+    const sessions = await options.browserService.listSessions();
+    if (sessions.length > 0) {
+      messages.push({
+        role: 'user',
+        content: `[Browser session context] You are currently authenticated on: ${sessions.join(', ')}. Use these existing sessions directly — do not attempt to log in again unless a page explicitly shows you are signed out.`,
+      });
+      messages.push({ role: 'assistant', content: 'Understood.' });
+    }
+  }
+
   // Greeting shortcut — no tools needed
   if (profile.isGreeting) {
     options.onThinking?.('Responding…');
+    normalizeHistoryForProvider(messages, options.provider, 'agentLoop.greeting');
     const { text } = await streamLLM(messages, staticPrompt, '', profile, { ...options, signal: control.signal });
     removeLoopControl(runId);
     return text;
   }
 
+  // Response cache: skip for browser/desktop profiles (page state changes constantly)
+  // and for greetings (already handled above). Only cache clean text-only responses.
+  const isCacheable = profile.toolGroup !== 'browser' && profile.toolGroup !== 'desktop' && profile.specialMode == null;
+  const cacheKey = isCacheable
+    ? buildCacheKey(options.provider, options.model, staticPrompt, messages)
+    : null;
+
+  if (cacheKey) {
+    const cached = getCachedResponse(cacheKey);
+    if (cached) {
+      options.onText(cached);
+      removeLoopControl(runId);
+      return cached;
+    }
+  }
+
   let finalText = '';
+  // Tools discovered via search_tools accumulate across iterations so the model
+  // can call them on subsequent turns (OpenAI/Gemini don't support defer_loading).
+  let accumulatedTools: import('@anthropic-ai/sdk').default.Tool[] = [];
 
   try {
     for (let i = 0; i < (options.maxIterations ?? MAX_ITERATIONS); i++) {
@@ -150,10 +238,15 @@ export async function agentLoop(
         },
       };
 
-      // Call LLM
+      // Ensure message history is protocol-valid before sending to API.
+      normalizeHistoryForProvider(messages, options.provider, `agentLoop.preSend.${i + 1}`);
+
+      // Call LLM — pass accumulated discovered tools so OpenAI/Gemini can call
+      // tools that were returned by a previous search_tools invocation.
       const { text, toolBlocks, stopReason, rawContent } = await streamLLM(
         messages, staticPrompt, dynamicPrompt, profile,
         iterOptions,
+        accumulatedTools,
       );
 
       if (text) finalText = text;
@@ -177,9 +270,11 @@ export async function agentLoop(
       }
 
       // Policy checks before execution
-      const violation = checkBrowserBudget(toolBlocks, ctx.browserBudget)
-        ?? checkBrowserScreenshotPolicy(toolBlocks, userMessage, ctx.allToolCalls)
-        ?? checkToolPolicy(toolBlocks);
+      const violation = options.unrestrictedMode
+        ? null
+        : checkBrowserBudget(toolBlocks, ctx.browserBudget)
+          ?? checkBrowserScreenshotPolicy(toolBlocks, userMessage, ctx.allToolCalls)
+          ?? checkToolPolicy(toolBlocks);
 
       if (violation) {
         messages.push({ role: 'assistant', content: text || '(no text)' });
@@ -204,6 +299,14 @@ export async function agentLoop(
       const dispatchResult = await dispatch(toolBlocks, ctx);
       const results = dispatchResult.results;
 
+      // Accumulate any tools discovered via search_tools so they stay in the
+      // tool list for all subsequent iterations (critical for OpenAI/Gemini).
+      for (const tool of dispatchResult.discoveredTools) {
+        if (!accumulatedTools.find(t => t.name === tool.name)) {
+          accumulatedTools.push(tool);
+        }
+      }
+
       // Update browser budget
       updateBrowserBudget(toolBlocks, results, ctx.browserBudget);
 
@@ -220,8 +323,9 @@ export async function agentLoop(
         compactAppMappingHistory(messages, profile, ctx);
       }
 
-      // Trim history to prevent context blowup
+      // Trim history to prevent context blowup, then re-validate protocol
       trimMessageHistory(messages);
+      normalizeHistoryForProvider(messages, options.provider, `agentLoop.postTrim.${i + 1}`);
 
       // Browser completion heuristic: enough page content extracted — synthesize
       // a final answer using the existing session with no tools (toolMode: 'none').
@@ -234,6 +338,7 @@ export async function agentLoop(
           signal: control.signal,
           onText: (delta: string) => { options.onText(delta); },
         };
+        normalizeHistoryForProvider(messages, options.provider, `agentLoop.synthesize.${i + 1}`);
         const { text } = await streamLLM(messages, staticPrompt, '', profile, finalOptions, [], 'none');
         if (text) finalText = text;
         break;
@@ -245,8 +350,21 @@ export async function agentLoop(
     if (issue && !control.signal.aborted) {
       options.onThinking?.('Verifying…');
       messages.push({ role: 'user', content: `Your response said: "${issue.issue}". ${issue.context} Please correct this.` });
+      normalizeHistoryForProvider(messages, options.provider, 'agentLoop.verify');
       const { text } = await streamLLM(messages, staticPrompt, '', profile, { ...options, signal: control.signal });
       if (text) finalText = text;
+    }
+
+    // Cache clean text-only final responses for reuse within TTL.
+    // Only cache if: no tool calls were made (pure conversational response)
+    // and the response is non-empty and the run wasn't aborted.
+    if (
+      cacheKey &&
+      finalText &&
+      !control.signal.aborted &&
+      ctx.allToolCalls.length === 0
+    ) {
+      setCachedResponse(cacheKey, finalText);
     }
 
     return finalText;
@@ -440,3 +558,4 @@ function buildToolResultMessage(toolBlocks: ToolUseBlock[], results: string[], p
 // ── Test exports (tree-shaken in production builds) ───────────────────────────
 export const trimMessageHistoryForTest = trimMessageHistory;
 export const estimateTokensForTest = estimateTokens;
+export const normalizeHistoryForProviderForTest = normalizeHistoryForProvider;

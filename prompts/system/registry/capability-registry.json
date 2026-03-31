@@ -1,0 +1,48 @@
+{
+  "version": "1.0",
+  "description": "Maps tool groups and task types to their domain, task, manifest, and contract files",
+  "capabilities": {
+    "browser-read": {
+      "taskType": "web-research",
+      "domain": "registry/domains/browser.md",
+      "task": "registry/tasks/web-research.md",
+      "manifest": "registry/manifests/browser-read.md",
+      "contract": "registry/contracts/browser-task.md"
+    },
+    "browser-interact": {
+      "taskType": "web-interaction",
+      "domain": "registry/domains/browser.md",
+      "task": "registry/tasks/web-interaction.md",
+      "manifest": "registry/manifests/browser-interact.md",
+      "contract": "registry/contracts/browser-task.md"
+    },
+    "desktop-automation": {
+      "taskType": "desktop-control",
+      "domain": "registry/domains/desktop.md",
+      "task": "registry/tasks/desktop-control.md",
+      "manifest": "registry/manifests/desktop-automation.md",
+      "contract": "registry/contracts/desktop-task.md"
+    },
+    "shell-coding": {
+      "taskType": "coding",
+      "domain": "registry/domains/coding.md",
+      "task": "registry/tasks/coding.md",
+      "manifest": "registry/manifests/shell-coding.md",
+      "contract": "registry/contracts/coding-task.md"
+    },
+    "chat": {
+      "taskType": "chat",
+      "domain": "registry/domains/chat.md",
+      "task": "registry/tasks/chat.md",
+      "manifest": "registry/manifests/chat.md",
+      "contract": "registry/contracts/chat-task.md"
+    }
+  },
+  "toolGroupMapping": {
+    "browser": "browser-read",
+    "desktop": "desktop-automation",
+    "coding": "shell-coding",
+    "core": "shell-coding",
+    "full": "chat"
+  }
+}

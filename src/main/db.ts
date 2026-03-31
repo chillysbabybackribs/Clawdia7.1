@@ -6,6 +6,7 @@ import { initMemory } from './db/memory';
 import { initPolicies } from './db/policies';
 import { initSpending } from './db/spending';
 import { initAgents } from './db/agents';
+import { initResponseCache } from './db/responseCache';
 
 // ── Row Types ───────────────────────────────────────────────────────────────
 // Matching the actual Clawdia 7.0 SQLite schema
@@ -83,6 +84,7 @@ function resolveDbPath(): string {
 }
 
 let db: Database.Database | null = null;
+let lastInitDbError: string | null = null;
 
 function formatInitDbError(err: unknown): string {
   if (!(err instanceof Error)) return 'Unknown database initialization error.';
@@ -94,12 +96,27 @@ function formatInitDbError(err: unknown): string {
 
 /** @internal — exposed for tests only; do not use in production code. */
 export function getDb(): Database.Database {
-  if (!db) throw new Error('db not initialized — call initDb() first');
+  if (!db) {
+    const initialized = initDb();
+    if (!initialized || !db) {
+      throw new Error(lastInitDbError
+        ? `db not initialized — initDb() failed: ${lastInitDbError}`
+        : 'db not initialized — call initDb() first');
+    }
+  }
   return db;
 }
 
 export function initDb(): boolean {
   try {
+    if (db) {
+      try {
+        db.close();
+      } catch {
+        // Best effort: reopen below even if the prior handle is already invalid.
+      }
+      db = null;
+    }
     const dbPath = resolveDbPath();
     db = new Database(dbPath);
     db.pragma('journal_mode = WAL');
@@ -260,9 +277,12 @@ export function initDb(): boolean {
     initPolicies(db);
     initSpending(db);
     initAgents(db);
+    initResponseCache(db);
+    lastInitDbError = null;
     return true;
   } catch (err) {
-    console.error('[db] Failed to initialize database:', formatInitDbError(err));
+    lastInitDbError = formatInitDbError(err);
+    console.error('[db] Failed to initialize database:', lastInitDbError);
     db = null;
     return false;
   }

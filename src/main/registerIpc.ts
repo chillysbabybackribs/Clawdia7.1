@@ -13,7 +13,8 @@ import type { FeedItem, ToolCall } from '../shared/types';
 import type { AgentDefinition, AgentBuilderCompileInput } from '../shared/types';
 import { agentLoop } from './agent/agentLoop';
 import { PipelineOrchestrator } from './core/PipelineOrchestrator';
-import { isAppMappingRequest, isContinuationRequest, extractAppMappingTarget } from './agent/classify';
+import { classify, isAppMappingRequest, isContinuationRequest, extractAppMappingTarget } from './agent/classify';
+import { resolveModelForTier } from '../shared/model-registry';
 import { cancelLoop, pauseLoop, resumeLoop, addContext } from './agent/loopControl';
 import { loadSettings, patchSettings, type AppSettings } from './settingsStore';
 import {
@@ -47,13 +48,28 @@ import { smartFocus } from './core/desktop/smartFocus';
 import { getRemainingBudgets, checkBudget } from './agent/spending-budget';
 import { runClaudeCode } from './claudeCodeClient';
 import { runCodexCli } from './codexCliClient';
+import { attachClawdiaMcpBridge } from './mcpBridge';
 import { registerWorkspaceStateAccessor } from './core/cli/workspaceState';
 import { setUIState } from './core/cli/uiStateAccessor';
 import { TerminalSessionController } from './core/terminal/TerminalSessionController';
 import {
   closePendingAnthropicToolUses,
-  normalizeAnthropicMessages,
+  prepareAnthropicMessagesForSend,
 } from './core/providers/anthropicMessageProtocol';
+
+function repairAnthropicSessionInPlace(sessionMessages: any[], reason: 'user_interrupted' | 'session_recovery', caller: string): void {
+  const repaired = prepareAnthropicMessagesForSend(sessionMessages, {
+    caller,
+    closePendingToolUses: true,
+    pendingToolUseReason: reason,
+    onRepair: (issues) => {
+      console.warn(`[registerIpc] repaired Anthropic session in ${caller}: ${issues.join(' | ')}`);
+    },
+  });
+  if (repaired.repaired) {
+    sessionMessages.splice(0, sessionMessages.length, ...repaired.messages);
+  }
+}
 
 function getMainWindow(): BrowserWindow | undefined {
   return BrowserWindow.getAllWindows()[0];
@@ -282,6 +298,8 @@ export function registerIpc(
   browserService: ElectronBrowserService,
   terminalController?: TerminalSessionController,
 ): void {
+  attachClawdiaMcpBridge(browserService);
+
   const findConversationTerminalSessionId = (conversationId: string): string | null => {
     if (!terminalController) return null;
     const sessionsForConversation = terminalController
@@ -402,7 +420,9 @@ export function registerIpc(
   });
 
   ipcMain.handle(IPC.CHAT_LOAD, (_e, id: string) => {
-    activeConversationId = id;
+    // Do NOT update the global activeConversationId here — multiple tabs can
+    // load different conversations and we must not let one tab's load clobber
+    // another tab's active conversation for send/stop/pause routing.
 
     // Hydrate in-memory session from DB if not already loaded
     if (!sessions.has(id)) {
@@ -468,11 +488,15 @@ export function registerIpc(
   ipcMain.handle(IPC.CHAT_SEND, async (event, payload: { text: string; attachments?: MessageAttachment[]; conversationId?: string | null }) => {
     const { text, attachments, conversationId } = payload || { text: '' };
 
+    // Resolve which conversation this send belongs to. Prefer the explicit
+    // conversationId from the renderer (multi-tab safe). Only fall back to
+    // the legacy global if nothing was passed (single-tab backwards compat).
+    let id: string;
     if (conversationId) {
-      activeConversationId = conversationId;
-      if (!sessions.has(conversationId)) {
+      id = conversationId;
+      if (!sessions.has(id)) {
         // Hydrate from DB so prior history is available to the LLM even if CHAT_LOAD was never called
-        const rows = getMessages(conversationId);
+        const rows = getMessages(id);
         const apiMessages: any[] = rows
           .filter((r) => r.role === 'user' || r.role === 'assistant')
           .map((r) => {
@@ -483,13 +507,12 @@ export function registerIpc(
               return { role: r.role, content: r.content };
             }
           });
-        sessions.set(conversationId, apiMessages);
+        sessions.set(id, apiMessages);
       }
     } else {
       ensureConversation();
+      id = activeConversationId!;
     }
-
-    const id = activeConversationId!;
 
     // Ensure conversation exists in DB (handles legacy in-memory-only convs)
     if (!getConversation(id)) {
@@ -588,7 +611,7 @@ export function registerIpc(
     if (!apiKey) {
       return { response: '', error: `Add a ${settings.provider} API key in Settings.` };
     }
-    const model = settings.models[settings.provider as keyof typeof settings.models] ?? DEFAULT_MODEL_BY_PROVIDER[settings.provider as keyof typeof DEFAULT_MODEL_BY_PROVIDER];
+    const configuredModel = settings.models[settings.provider as keyof typeof settings.models] ?? DEFAULT_MODEL_BY_PROVIDER[settings.provider as keyof typeof DEFAULT_MODEL_BY_PROVIDER];
 
     const settings_provider = settings.provider as 'anthropic' | 'openai' | 'gemini';
 
@@ -600,14 +623,7 @@ export function registerIpc(
       sessionMessages = pruned;
     }
     if (settings_provider === 'anthropic') {
-      const repaired = normalizeAnthropicMessages(sessionMessages, {
-        closePendingToolUses: true,
-        pendingToolUseReason: 'session_recovery',
-      });
-      if (repaired.repaired) {
-        sessions.set(id, repaired.messages);
-        sessionMessages = repaired.messages;
-      }
+      repairAnthropicSessionInPlace(sessionMessages, 'session_recovery', 'registerIpc.sessionRecovery');
       closePendingAnthropicToolUses(sessionMessages, 'session_recovery');
     }
 
@@ -629,6 +645,13 @@ export function registerIpc(
     };
 
     const continuationForcedProfile = buildContinuationForcedProfile(text, sessionMessages);
+
+    // Classify the request to get modelTier, then resolve the best model.
+    // 'fast' tasks (quick/simple/brief) route to the provider's cheapest model.
+    // 'powerful' tasks (browser, desktop, deep research) use the user's config.
+    // 'standard' tasks use the provider's balanced model.
+    const taskProfile = classify(text, continuationForcedProfile ?? undefined);
+    const model = resolveModelForTier(taskProfile.modelTier, settings_provider, configuredModel);
 
     // Check if this goal warrants a multi-agent pipeline
     const usePipeline = !isAppMappingRequest(text) && !(continuationForcedProfile?.specialMode === 'app_mapping') && PipelineOrchestrator.classifyIntent(text);
@@ -744,7 +767,7 @@ export function registerIpc(
         const err = e instanceof Error ? e : new Error(String(e));
         if (err.name === 'AbortError' || err.message === 'AbortError') {
           if (settings_provider === 'anthropic') {
-            closePendingAnthropicToolUses(sessionMessages, 'user_interrupted');
+            repairAnthropicSessionInPlace(sessionMessages, 'user_interrupted', 'registerIpc.agentAbort');
           }
           result = { response: '', error: 'Stopped' };
           send(IPC_EVENTS.CHAT_STREAM_END, { ok: false, cancelled: true, conversationId: id });
@@ -793,7 +816,7 @@ export function registerIpc(
     }
     const sessionMessages = sessions.get(targetId);
     if (sessionMessages) {
-      closePendingAnthropicToolUses(sessionMessages, 'user_interrupted');
+      repairAnthropicSessionInPlace(sessionMessages, 'user_interrupted', 'registerIpc.chatStop');
     }
   });
 
@@ -1080,7 +1103,7 @@ export function registerIpc(
         provider, apiKey, model, runId,
         signal: abort.signal,
         browserService,
-        unrestrictedMode: false, // tests always run restricted
+        unrestrictedMode: settings.unrestrictedMode,
         onText: (delta) => {
           getMainWindow()?.webContents.send(IPC_EVENTS.CHAT_STREAM_TEXT, delta);
         },

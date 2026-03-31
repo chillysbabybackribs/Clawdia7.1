@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   findPendingAnthropicToolUseIds,
   normalizeAnthropicMessages,
+  prepareAnthropicMessagesForSend,
   validateAnthropicMessages,
 } from '../../../../src/main/core/providers/anthropicMessageProtocol';
 
@@ -88,5 +89,33 @@ describe('anthropicMessageProtocol', () => {
     ]);
 
     expect(pending).toEqual(['tu-new']);
+  });
+
+  it('pre-flights a stale pending tool_use into a valid request payload', () => {
+    const repair = prepareAnthropicMessagesForSend([
+      { role: 'user', content: [{ type: 'text', text: 'first' }] },
+      { role: 'assistant', content: [{ type: 'tool_use', id: 'toolu_012LKovRsy5y74u3qFwLtWgw', name: 'shell_exec', input: {} }] },
+    ], {
+      caller: 'test',
+      closePendingToolUses: true,
+      pendingToolUseReason: 'protocol_repair',
+    });
+
+    expect(repair.messages).toEqual([
+      { role: 'user', content: [{ type: 'text', text: 'first' }] },
+      { role: 'assistant', content: [{ type: 'tool_use', id: 'toolu_012LKovRsy5y74u3qFwLtWgw', name: 'shell_exec', input: {} }] },
+      {
+        role: 'user',
+        content: [{
+          type: 'tool_result',
+          tool_use_id: 'toolu_012LKovRsy5y74u3qFwLtWgw',
+          content: JSON.stringify({
+            status: 'interrupted',
+            reason: 'protocol_repair',
+            message: 'Tool run was interrupted before completion.',
+          }),
+        }],
+      },
+    ]);
   });
 });

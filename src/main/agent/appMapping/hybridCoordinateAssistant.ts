@@ -6,6 +6,7 @@ import Anthropic from '@anthropic-ai/sdk';
 import { GoogleGenAI, Type } from '@google/genai';
 import type { ProviderId } from '../../../shared/model-registry';
 import { DEFAULT_MODEL_BY_PROVIDER, DEFAULT_PROVIDER } from '../../../shared/model-registry';
+import { prepareAnthropicRequestBodyForSend } from '../../core/providers/anthropicMessageProtocol';
 
 export interface HybridAssistantConfig {
   provider: ProviderId;
@@ -167,7 +168,7 @@ async function callOpenAI<T>(config: HybridAssistantConfig, prompt: string, scre
 async function callAnthropic<T>(config: HybridAssistantConfig, prompt: string, screenshotPath: string): Promise<T> {
   const client = new Anthropic({ apiKey: config.apiKey });
   const { mimeType, base64 } = encodeScreenshot(screenshotPath);
-  const response = await client.messages.create({
+  const response = await client.messages.create(prepareAnthropicRequestBodyForSend({
     model: config.model,
     max_tokens: 800,
     temperature: 0,
@@ -188,7 +189,14 @@ async function callAnthropic<T>(config: HybridAssistantConfig, prompt: string, s
         ],
       },
     ],
-  });
+  }, {
+    caller: 'hybridCoordinateAssistant.callAnthropic',
+    closePendingToolUses: true,
+    pendingToolUseReason: 'protocol_repair',
+    onRepair: (issues) => {
+      console.warn(`[hybridCoordinateAssistant] repaired Anthropic request: ${issues.join(' | ')}`);
+    },
+  }));
   const text = response.content
     .filter((block): block is Anthropic.TextBlock => block.type === 'text')
     .map((block) => block.text)

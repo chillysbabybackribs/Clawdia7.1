@@ -119,6 +119,7 @@ function getAnthropicTools(
 function buildOpenAITools(
   profile: AgentProfile,
   currentIteration = 0,
+  accumulated: Anthropic.Tool[] = [],
 ): ReturnType<typeof toOpenAITool>[] {
   if (profile.specialMode === 'app_mapping') {
     return searchTools({
@@ -142,19 +143,38 @@ function buildOpenAITools(
   if (isBrowserProfile) {
     tools.push(...(isFirstBrowserTurn ? FIRST_TURN_BROWSER_TOOLS : BROWSER_TOOLS).map(toOpenAITool));
   }
+
+  // Merge in tools discovered via search_tools in prior iterations
+  const existingNames = new Set(tools.map(t => (t as any).function?.name ?? ''));
+  for (const tool of accumulated) {
+    if (!existingNames.has(tool.name)) {
+      tools.push(toOpenAITool(tool));
+      existingNames.add(tool.name);
+    }
+  }
+
   return tools;
 }
 
-function getOpenAITools(profile: AgentProfile, currentIteration = 0): ReturnType<typeof toOpenAITool>[] {
-  const iterationBucket = profile.toolGroup === 'browser' && currentIteration <= 1 ? 'first' : 'default';
-  const key = `${profile.specialMode ?? ''}:${profile.toolGroup}:${iterationBucket}`;
-  if (!_openAIToolCache.has(key)) {
-    _openAIToolCache.set(key, buildOpenAITools(profile, currentIteration));
+function getOpenAITools(
+  profile: AgentProfile,
+  currentIteration = 0,
+  accumulated: Anthropic.Tool[] = [],
+): ReturnType<typeof toOpenAITool>[] {
+  // Only use the static cache when there are no accumulated tools — once
+  // search_tools has run, each iteration may have a different tool set.
+  if (accumulated.length === 0) {
+    const iterationBucket = profile.toolGroup === 'browser' && currentIteration <= 1 ? 'first' : 'default';
+    const key = `${profile.specialMode ?? ''}:${profile.toolGroup}:${iterationBucket}`;
+    if (!_openAIToolCache.has(key)) {
+      _openAIToolCache.set(key, buildOpenAITools(profile, currentIteration));
+    }
+    return _openAIToolCache.get(key)!;
   }
-  return _openAIToolCache.get(key)!;
+  return buildOpenAITools(profile, currentIteration, accumulated);
 }
 
-function buildGeminiTools(profile: AgentProfile, currentIteration = 0): any[] {
+function buildGeminiTools(profile: AgentProfile, currentIteration = 0, accumulated: Anthropic.Tool[] = []): any[] {
   if (profile.specialMode === 'app_mapping') {
     return [{
       functionDeclarations: searchTools({
@@ -177,16 +197,29 @@ function buildGeminiTools(profile: AgentProfile, currentIteration = 0): any[] {
   if (isBrowserProfile) {
     decls.push(...(isFirstBrowserTurn ? FIRST_TURN_BROWSER_TOOLS : BROWSER_TOOLS).map(toGeminiDeclaration));
   }
+
+  // Merge in tools discovered via search_tools in prior iterations
+  const existingNames = new Set(decls.map((d: any) => d.name ?? ''));
+  for (const tool of accumulated) {
+    if (!existingNames.has(tool.name)) {
+      decls.push(toGeminiDeclaration(tool));
+      existingNames.add(tool.name);
+    }
+  }
+
   return [{ functionDeclarations: decls }];
 }
 
-function getGeminiTools(profile: AgentProfile, currentIteration = 0): any[] {
-  const iterationBucket = profile.toolGroup === 'browser' && currentIteration <= 1 ? 'first' : 'default';
-  const key = `${profile.specialMode ?? ''}:${profile.toolGroup}:${iterationBucket}`;
-  if (!_geminiToolCache.has(key)) {
-    _geminiToolCache.set(key, buildGeminiTools(profile, currentIteration));
+function getGeminiTools(profile: AgentProfile, currentIteration = 0, accumulated: Anthropic.Tool[] = []): any[] {
+  if (accumulated.length === 0) {
+    const iterationBucket = profile.toolGroup === 'browser' && currentIteration <= 1 ? 'first' : 'default';
+    const key = `${profile.specialMode ?? ''}:${profile.toolGroup}:${iterationBucket}`;
+    if (!_geminiToolCache.has(key)) {
+      _geminiToolCache.set(key, buildGeminiTools(profile, currentIteration));
+    }
+    return _geminiToolCache.get(key)!;
   }
-  return _geminiToolCache.get(key)!;
+  return buildGeminiTools(profile, currentIteration, accumulated);
 }
 
 function serializeContent(content: any): string {
@@ -335,13 +368,13 @@ export async function streamLLM(
       }
     case 'openai':
       {
-        const openaiTools = toolMode === 'none' ? [] : getOpenAITools(profile, options.currentIteration ?? 0);
+        const openaiTools = toolMode === 'none' ? [] : getOpenAITools(profile, options.currentIteration ?? 0, accumulatedTools);
         emitPromptDebug(messagesWithDynamic, systemPrompt, getOpenAIToolNames(openaiTools), options);
         return streamOpenAILLM(messagesWithDynamic, systemPrompt, openaiTools, options);
       }
     case 'gemini':
       {
-        const geminiTools = toolMode === 'none' ? [] : getGeminiTools(profile, options.currentIteration ?? 0);
+        const geminiTools = toolMode === 'none' ? [] : getGeminiTools(profile, options.currentIteration ?? 0, accumulatedTools);
         const geminiToolNames = (geminiTools[0]?.functionDeclarations ?? []).map((d: any) => d.name as string);
         emitPromptDebug(messagesWithDynamic, systemPrompt, geminiToolNames, options);
         return streamGeminiLLM(messagesWithDynamic, systemPrompt, geminiTools, options);
@@ -357,3 +390,5 @@ export const getAnthropicToolsForTest = getAnthropicTools;
 export const applyAnthropicToolCompatibilityForTest = applyAnthropicToolCompatibility;
 export const getOpenAIToolsForTest = getOpenAITools;
 export const getGeminiToolsForTest = getGeminiTools;
+export const buildOpenAIToolsForTest = buildOpenAITools;
+export const buildGeminiToolsForTest = buildGeminiTools;

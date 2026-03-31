@@ -5,7 +5,7 @@ import type { BrowserService } from '../browser/BrowserService';
 export const BROWSER_TOOLS: Anthropic.Tool[] = [
   {
     name: 'browser_navigate',
-    description: 'Navigate the browser to a URL. Returns the final URL, page title, loading state, and a short text excerpt so you can usually confirm navigation without a separate page-state call.',
+    description: 'Navigate the browser to a URL. Returns the final URL, page title, and a page profile collected deterministically (no LLM) immediately after load. The profile includes: detected JS frameworks, all interactable inputs with selectors and whether they are inside shadow DOM, buttons, forms, content landmark areas, and an auth state hint. Use this profile to choose correct selectors before calling browser_type, browser_click, or browser_find_elements — especially check hasShadowInputs and the inputs array before typing.',
     input_schema: {
       type: 'object' as const,
       properties: {
@@ -27,7 +27,7 @@ export const BROWSER_TOOLS: Anthropic.Tool[] = [
   },
   {
     name: 'browser_type',
-    description: 'Type text into an element identified by a CSS selector. Clears the field first by default.',
+    description: 'Type text into any focusable element identified by a CSS selector. Works universally across native inputs, textareas, contenteditable divs, and all JS-framework editors (React controlled inputs, Lexical, ProseMirror, Draft.js, Slate, TipTap, CodeMirror, etc.) by sending real Chromium-level keyboard char events rather than synthetic JS events. Clears the field first by default.',
     input_schema: {
       type: 'object' as const,
       properties: {

@@ -5,19 +5,28 @@ type ProtocolBlock = {
   id?: string;
   tool_use_id?: string;
   content?: unknown;
-  [key: string]: unknown;
 };
 
 type ProtocolMessage = {
   role?: string;
   content?: unknown;
-  [key: string]: unknown;
 };
 
 export interface AnthropicProtocolRepair {
   messages: ProtocolMessage[];
   repaired: boolean;
   issues: string[];
+}
+
+export interface AnthropicPreflightOptions {
+  caller?: string;
+  closePendingToolUses?: boolean;
+  pendingToolUseReason?: ToolRepairReason;
+  onRepair?: (issues: string[]) => void;
+}
+
+export interface AnthropicRequestWithMessages<TMessage = ProtocolMessage> {
+  messages: TMessage[];
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -181,6 +190,20 @@ export function normalizeAnthropicMessages(
   }
 
   flushPendingToolUses('the end of the message list');
+
+  // Strip trailing assistant messages that contain only text (no tool_use blocks).
+  // These are assistant-prefill stubs (e.g. 'Understood.') that models without
+  // prefill support will reject with a 400 error.
+  while (normalized.length > 0) {
+    const last = normalized[normalized.length - 1];
+    if (last?.role !== 'assistant') break;
+    const blocks = getContentBlocks(last);
+    const hasToolUse = blocks ? blocks.some((b) => b?.type === 'tool_use') : false;
+    if (hasToolUse) break;
+    normalized.pop();
+    issues.push('Stripped trailing assistant text message (prefill not supported).');
+  }
+
   return { messages: normalized, repaired: issues.length > 0, issues };
 }
 
@@ -221,6 +244,39 @@ export function validateAnthropicMessages(messages: ProtocolMessage[]): string[]
   }
 
   return errors;
+}
+
+export function prepareAnthropicMessagesForSend(
+  messages: ProtocolMessage[],
+  options: AnthropicPreflightOptions = {},
+): AnthropicProtocolRepair {
+  const repair = normalizeAnthropicMessages(messages, {
+    closePendingToolUses: options.closePendingToolUses,
+    pendingToolUseReason: options.pendingToolUseReason,
+  });
+
+  if (repair.issues.length > 0) {
+    options.onRepair?.(repair.issues);
+  }
+
+  const errors = validateAnthropicMessages(repair.messages);
+  if (errors.length > 0) {
+    const caller = options.caller ? `${options.caller}: ` : '';
+    throw new Error(`${caller}Anthropic message pre-flight failed: ${errors.join(' | ')}`);
+  }
+
+  return repair;
+}
+
+export function prepareAnthropicRequestBodyForSend<TBody extends AnthropicRequestWithMessages>(
+  body: TBody,
+  options: AnthropicPreflightOptions = {},
+): TBody {
+  const repair = prepareAnthropicMessagesForSend(body.messages as ProtocolMessage[], options);
+  return {
+    ...body,
+    messages: repair.messages as TBody['messages'],
+  };
 }
 
 export function closePendingAnthropicToolUses(
