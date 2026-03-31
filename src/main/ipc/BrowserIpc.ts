@@ -4,6 +4,7 @@ import { IPC, IPC_EVENTS } from '../ipc-channels';
 import { a11yListApps } from '../core/desktop/a11y';
 import { smartFocus } from '../core/desktop/smartFocus';
 import { setUIState } from '../core/cli/uiStateAccessor';
+import { openFileInBrowser, type BrowserOpenMode } from '../core/browser/fileOpen';
 import type { ElectronBrowserService } from '../core/browser/ElectronBrowserService';
 
 const VPN_IFACE = 'proton-denver';
@@ -43,6 +44,12 @@ export function registerBrowserIpc(browserService: ElectronBrowserService): void
   ipcMain.handle(IPC.BROWSER_CLEAR_SESSION, (_e, domain: string) => browserService.clearSession(domain));
   ipcMain.handle(IPC.BROWSER_FOCUS_CONVERSATION, (_e, conversationId: string) =>
     browserService.focusConversation(conversationId));
+
+  ipcMain.handle(IPC.BROWSER_OPEN_FILE, (
+    _e,
+    filePath: string,
+    opts?: { mode?: BrowserOpenMode; conversationId?: string },
+  ) => openFileInBrowser(filePath, opts ?? {}, browserService));
 
   // ── Browser events ──────────────────────────────────────────────────────────
   browserService.on('urlChanged', (url) => sendToRenderer(IPC_EVENTS.BROWSER_URL_CHANGED, url));

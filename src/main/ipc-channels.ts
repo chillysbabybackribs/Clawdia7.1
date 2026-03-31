@@ -100,6 +100,8 @@ export const IPC = {
   BROWSER_CLEAR_SESSION: 'browser:clear-session',
   // Switch the visible browser panel to the tab owned by this conversation.
   BROWSER_FOCUS_CONVERSATION: 'browser:focus-conversation',
+  // Open a local file in the browser with review / preview / publish mode
+  BROWSER_OPEN_FILE: 'browser:open-file',
   // Browser extensions
   BROWSER_EXT_LIST: 'browser:ext:list',
   BROWSER_EXT_INSTALL: 'browser:ext:install',

@@ -1,6 +1,7 @@
 // src/main/core/cli/browserTools.ts
 import type Anthropic from '@anthropic-ai/sdk';
 import type { BrowserService } from '../browser/BrowserService';
+import { openFileInBrowser, resolveOpenMode, type BrowserOpenMode } from '../browser/fileOpen';
 
 export const BROWSER_TOOLS: Anthropic.Tool[] = [
   {
@@ -203,6 +204,31 @@ export const BROWSER_TOOLS: Anthropic.Tool[] = [
     description: 'Navigate forward in browser history.',
     input_schema: { type: 'object' as const, properties: {} },
   },
+  {
+    name: 'browser_open_file',
+    description: `Open a local file in the browser. Supports three modes:
+- review (default for most files): raw file content in a clean read-only surface with line numbers and a copy button. Use for .txt, .md, .json, .log, .csv, .yaml, source code, etc.
+- preview: rendered presentation. Markdown is rendered, CSV becomes a table, JSON is pretty-printed, HTML/SVG opens directly. Explicitly requested with words like "preview", "render", "show rendered".
+- publish: navigate directly to a pre-built polished HTML artifact page. Use only when the file is already a finished presentable HTML artifact.
+
+Mode resolution: explicit mode > extension default > review fallback.
+Default to review unless the user says preview/render/publish/polished/presentable.`,
+    input_schema: {
+      type: 'object' as const,
+      properties: {
+        filePath: {
+          type: 'string',
+          description: 'Absolute path to the local file to open',
+        },
+        mode: {
+          type: 'string',
+          enum: ['review', 'preview', 'publish'],
+          description: 'Open mode. Omit to use the extension-based default (review for most files, preview for html/svg/pdf).',
+        },
+      },
+      required: ['filePath'],
+    },
+  },
 ];
 
 export type BrowserToolInput = Record<string, unknown>;
@@ -230,7 +256,8 @@ export async function executeBrowserTool(
   // ── Conversation-scoped routing ───────────────────────────────────────────────
   if (conversationId && browser instanceof ElectronBrowserService) {
     const tabId = await browser.getOrAssignTab(conversationId);
-    return executeOnTab(name, input, browser, tabId);
+    // Pass conversationId through for tools like browser_open_file that need it for tab scoping
+    return executeOnTab(name, { ...input, _conversationId: conversationId }, browser, tabId);
   }
   // ── Legacy global-active-tab path (single-session or unscoped callers) ────────
   return executeOnActiveTab(name, input, browser);
@@ -305,6 +332,14 @@ async function executeOnTab(
     case 'browser_forward':
       await browser.forwardOnTab(tabId);
       return { ok: true };
+    case 'browser_open_file': {
+      const conversationId = (input._conversationId as string | undefined);
+      return openFileInBrowser(
+        input.filePath as string,
+        { mode: input.mode as BrowserOpenMode | undefined, conversationId },
+        browser,
+      );
+    }
     default:
       return { ok: false, error: `Unknown browser tool: ${name}` };
   }
@@ -377,6 +412,12 @@ async function executeOnActiveTab(
     case 'browser_forward':
       await browser.forward();
       return { ok: true };
+    case 'browser_open_file':
+      return openFileInBrowser(
+        input.filePath as string,
+        { mode: input.mode as BrowserOpenMode | undefined },
+        browser,
+      );
     default:
       return { ok: false, error: `Unknown browser tool: ${name}` };
   }
