@@ -52,77 +52,24 @@ import { attachClawdiaMcpBridge } from './mcpBridge';
 import { registerWorkspaceStateAccessor } from './core/cli/workspaceState';
 import { setUIState } from './core/cli/uiStateAccessor';
 import { TerminalSessionController } from './core/terminal/TerminalSessionController';
-import {
-  closePendingAnthropicToolUses,
-  prepareAnthropicMessagesForSend,
-} from './core/providers/anthropicMessageProtocol';
+import { SessionManager } from './SessionManager';
+
+const sessionManager = new SessionManager();
 
 function repairAnthropicSessionInPlace(sessionMessages: any[], reason: 'user_interrupted' | 'session_recovery', caller: string): void {
-  const repaired = prepareAnthropicMessagesForSend(sessionMessages, {
-    caller,
-    closePendingToolUses: true,
-    pendingToolUseReason: reason,
-    onRepair: (issues) => {
-      console.warn(`[registerIpc] repaired Anthropic session in ${caller}: ${issues.join(' | ')}`);
-    },
-  });
-  if (repaired.repaired) {
-    sessionMessages.splice(0, sessionMessages.length, ...repaired.messages);
-  }
+  sessionManager.repairAnthropicSessionInPlace(sessionMessages, reason, caller);
 }
 
 function getMainWindow(): BrowserWindow | undefined {
   return BrowserWindow.getAllWindows()[0];
 }
 
-const sessions = new Map<string, any[]>();
-let activeConversationId: string | null = null;
-
-// Per-conversation agent controllers — allows multiple tabs to run agents in parallel.
-interface ConvAgent {
-  abort: AbortController;
-  runId: string | null;
-}
-const convAgents = new Map<string, ConvAgent>();
-
 // Expose live state to the workspace awareness tools without circular imports.
 registerWorkspaceStateAccessor({
-  getActiveConversationIds: () => [...sessions.keys()],
-  isConversationRunning: (id) => convAgents.has(id),
-  getSessionMessages: (id) => sessions.get(id) ?? [],
+  getActiveConversationIds: () => sessionManager.getActiveConversationIds(),
+  isConversationRunning: (id) => sessionManager.isConversationRunning(id),
+  getSessionMessages: (id) => sessionManager.getSession(id) ?? [],
 });
-
-function getOrCreateConvAgent(conversationId: string): ConvAgent {
-  let agent = convAgents.get(conversationId);
-  if (!agent) {
-    agent = { abort: new AbortController(), runId: null };
-    convAgents.set(conversationId, agent);
-  }
-  return agent;
-}
-
-const MAX_SESSION_TURNS = 20; // max user+assistant turn PAIRS to keep
-const MAX_MAPPING_SESSION_TURNS = 6;
-
-/**
- * Prune a session to the last MAX_SESSION_TURNS pairs.
- * Always cuts at a user-role boundary to avoid orphaned tool_result blocks.
- */
-function pruneSession(messages: any[], maxTurns = MAX_SESSION_TURNS): any[] {
-  const maxMessages = maxTurns * 2;
-  if (messages.length <= maxMessages) return messages;
-  let start = messages.length - maxMessages;
-  // Walk forward until we land on a user message
-  while (start < messages.length && messages[start].role !== 'user') {
-    start++;
-  }
-  return messages.slice(start);
-}
-
-function getOrCreateSession(id: string): any[] {
-  if (!sessions.has(id)) sessions.set(id, []);
-  return sessions.get(id)!;
-}
 
 function formatPromptBlock(title: string, lines: string[]): string {
   return [
@@ -158,11 +105,12 @@ function formatExternalPromptForTerminal(label: string, prompt: string): string 
 }
 
 function ensureConversation(): string {
-  if (!activeConversationId) {
-    activeConversationId = `conv-${Date.now()}`;
-    sessions.set(activeConversationId, []);
+  if (!sessionManager.activeConversationId) {
+    const id = `conv-${Date.now()}`;
+    sessionManager.activeConversationId = id;
+    sessionManager.setSession(id, []);
   }
-  return activeConversationId;
+  return sessionManager.activeConversationId!;
 }
 
 function findLastUserText(messages: any[]): string | null {
@@ -385,18 +333,14 @@ export function registerIpc(
   // CHAT_NEW: aborts only the currently active conversation's agent (the one in the same tab),
   // then resets that tab to a new conversation. Does NOT abort agents in other tabs.
   ipcMain.handle(IPC.CHAT_NEW, () => {
-    if (activeConversationId) {
-      const agent = convAgents.get(activeConversationId);
-      if (agent) {
-        agent.abort.abort();
-        convAgents.delete(activeConversationId);
-      }
+    if (sessionManager.activeConversationId) {
+      sessionManager.abortAgent(sessionManager.activeConversationId);
     }
     const now = new Date().toISOString();
     const id = `conv-${Date.now()}`;
     createConversation({ id, title: 'New conversation', mode: 'chat', created_at: now, updated_at: now });
-    activeConversationId = id;
-    sessions.set(id, []);
+    sessionManager.activeConversationId = id;
+    sessionManager.setSession(id, []);
     return { id };
   });
 
@@ -406,7 +350,7 @@ export function registerIpc(
     const now = new Date().toISOString();
     const id = `conv-${Date.now()}`;
     createConversation({ id, title: 'New conversation', mode: 'chat', created_at: now, updated_at: now });
-    sessions.set(id, []);
+    sessionManager.setSession(id, []);
     return { id };
   });
 
@@ -425,20 +369,7 @@ export function registerIpc(
     // another tab's active conversation for send/stop/pause routing.
 
     // Hydrate in-memory session from DB if not already loaded
-    if (!sessions.has(id)) {
-      const rows = getMessages(id);
-      const apiMessages: any[] = rows
-        .filter((r) => r.role === 'user' || r.role === 'assistant')
-        .map((r) => {
-          try {
-            const parsed = JSON.parse(r.content);
-            return { role: r.role, content: parsed.content ?? r.content };
-          } catch {
-            return { role: r.role, content: r.content };
-          }
-        });
-      sessions.set(id, apiMessages);
-    }
+    sessionManager.hydrateFromDb(id);
 
     const rows = getMessages(id);
     const messages: Message[] = rows.map((r) => {
@@ -460,7 +391,7 @@ export function registerIpc(
       mode: conv?.mode ?? ('chat' as const),
       claudeTerminalStatus: 'idle' as const,
       title: conv?.title ?? null,
-      isRunning: convAgents.has(id),
+      isRunning: sessionManager.isConversationRunning(id),
     };
   });
 
@@ -494,24 +425,11 @@ export function registerIpc(
     let id: string;
     if (conversationId) {
       id = conversationId;
-      if (!sessions.has(id)) {
-        // Hydrate from DB so prior history is available to the LLM even if CHAT_LOAD was never called
-        const rows = getMessages(id);
-        const apiMessages: any[] = rows
-          .filter((r) => r.role === 'user' || r.role === 'assistant')
-          .map((r) => {
-            try {
-              const parsed = JSON.parse(r.content);
-              return { role: r.role, content: parsed.content ?? r.content };
-            } catch {
-              return { role: r.role, content: r.content };
-            }
-          });
-        sessions.set(id, apiMessages);
-      }
+      // Hydrate from DB so prior history is available to the LLM even if CHAT_LOAD was never called
+      sessionManager.hydrateFromDb(id);
     } else {
       ensureConversation();
-      id = activeConversationId!;
+      id = sessionManager.activeConversationId!;
     }
 
     // Ensure conversation exists in DB (handles legacy in-memory-only convs)
@@ -615,27 +533,18 @@ export function registerIpc(
 
     const settings_provider = settings.provider as 'anthropic' | 'openai' | 'gemini';
 
-    let sessionMessages = getOrCreateSession(id);
-    const maxTurns = isAppMappingRequest(text) ? MAX_MAPPING_SESSION_TURNS : MAX_SESSION_TURNS;
-    const pruned = pruneSession(sessionMessages, maxTurns);
-    if (pruned.length < sessionMessages.length) {
-      sessions.set(id, pruned);
-      sessionMessages = pruned;
-    }
+    const maxTurns = isAppMappingRequest(text) ? sessionManager.maxMappingSessionTurns : sessionManager.maxSessionTurns;
+    let sessionMessages = sessionManager.pruneSessionInPlace(id, maxTurns);
     if (settings_provider === 'anthropic') {
       repairAnthropicSessionInPlace(sessionMessages, 'session_recovery', 'registerIpc.sessionRecovery');
-      closePendingAnthropicToolUses(sessionMessages, 'session_recovery');
+      sessionManager.closePendingToolUses(id, 'session_recovery');
     }
 
     // Abort any existing agent for THIS conversation only (re-send in same tab).
     // Agents running in other conversations (other tabs) are unaffected.
-    const existingAgent = convAgents.get(id);
-    if (existingAgent) {
-      existingAgent.abort.abort();
-      convAgents.delete(id);
-    }
-    const convAgent = getOrCreateConvAgent(id);
-    activeConversationId = id;
+    sessionManager.abortAgent(id);
+    const convAgent = sessionManager.getOrCreateAgent(id);
+    sessionManager.activeConversationId = id;
 
     // Broadcast stream events tagged with conversationId so each ChatPanel
     // can filter to its own conversation, even when multiple tabs are running.
@@ -691,17 +600,16 @@ export function registerIpc(
           addMessage({ id: assistantMsgId, conversation_id: id, role: 'assistant', content: JSON.stringify(assistantMsg), created_at: nowStr });
           updateConversation(id, { updated_at: nowStr, title: text.slice(0, 60) || 'New conversation' });
 
-          const session = sessions.get(id) ?? [];
+          const session = sessionManager.sessionManager.getOrCreateSession(id);
           session.push({ role: 'user', content: text });
           session.push({ role: 'assistant', content: response });
-          sessions.set(id, session);
         }
       } catch (e: unknown) {
         const err = e instanceof Error ? e : new Error(String(e));
         result = { response: '', error: err.message };
         send(IPC_EVENTS.CHAT_STREAM_END, { ok: false, error: err.message, conversationId: id });
       } finally {
-        convAgents.delete(id);
+        sessionManager.deleteAgent(id);
       }
     } else {
       // ── Single agent path ─────────────────────────────────────────────────
@@ -777,7 +685,7 @@ export function registerIpc(
         }
       } finally {
         if (streamingFlushTimer) { clearTimeout(streamingFlushTimer); streamingFlushTimer = null; }
-        convAgents.delete(id);
+        sessionManager.deleteAgent(id);
       }
 
       // Persist assistant message and clear streaming checkpoint
@@ -806,36 +714,36 @@ export function registerIpc(
   // CHAT_STOP: accepts an optional conversationId. If provided, stops only that
   // conversation's agent. If omitted (legacy), stops the most recently active one.
   ipcMain.handle(IPC.CHAT_STOP, (_e, conversationId?: string) => {
-    const targetId = conversationId ?? activeConversationId;
+    const targetId = conversationId ?? sessionManager.activeConversationId;
     if (!targetId) return;
-    const agent = convAgents.get(targetId);
+    const agent = sessionManager.getAgent(targetId);
     if (agent) {
       agent.abort.abort();
       if (agent.runId) cancelLoop(agent.runId);
-      convAgents.delete(targetId);
+      sessionManager.deleteAgent(targetId);
     }
-    const sessionMessages = sessions.get(targetId);
+    const sessionMessages = sessionManager.getSession(targetId);
     if (sessionMessages) {
       repairAnthropicSessionInPlace(sessionMessages, 'user_interrupted', 'registerIpc.chatStop');
     }
   });
 
   ipcMain.handle(IPC.CHAT_PAUSE, (_e, conversationId?: string) => {
-    const targetId = conversationId ?? activeConversationId;
+    const targetId = conversationId ?? sessionManager.activeConversationId;
     if (!targetId) return;
-    const agent = convAgents.get(targetId);
+    const agent = sessionManager.getAgent(targetId);
     if (agent?.runId) pauseLoop(agent.runId);
   });
   ipcMain.handle(IPC.CHAT_RESUME, (_e, conversationId?: string) => {
-    const targetId = conversationId ?? activeConversationId;
+    const targetId = conversationId ?? sessionManager.activeConversationId;
     if (!targetId) return;
-    const agent = convAgents.get(targetId);
+    const agent = sessionManager.getAgent(targetId);
     if (agent?.runId) resumeLoop(agent.runId);
   });
   ipcMain.handle(IPC.CHAT_ADD_CONTEXT, (_e, text: string, conversationId?: string) => {
-    const targetId = conversationId ?? activeConversationId;
+    const targetId = conversationId ?? sessionManager.activeConversationId;
     if (!targetId) return;
-    const agent = convAgents.get(targetId);
+    const agent = sessionManager.getAgent(targetId);
     if (agent?.runId) addContext(agent.runId, text);
   });
   ipcMain.handle(IPC.CHAT_RATE_TOOL, () => { });
@@ -849,8 +757,8 @@ export function registerIpc(
   });
   ipcMain.handle(IPC.CHAT_DELETE, (_e, id: string) => {
     deleteConversation(id);
-    sessions.delete(id);
-    if (activeConversationId === id) activeConversationId = null;
+    sessionManager.deleteSession(id);
+    if (sessionManager.activeConversationId === id) sessionManager.activeConversationId = null;
   });
   // (CHAT_OPEN_ATTACHMENT and TASKS_SUMMARY are registered at the end of this function)
 
@@ -1013,7 +921,7 @@ export function registerIpc(
     const goal = `${agentDef.goal}\n\nContext: Run this agent on the currently open browser page.\nPage URL: ${pageUrl}\nPage Title: ${pageTitle}`;
 
     try {
-      const sessionMessages = getOrCreateSession(convId);
+      const sessionMessages = sessionManager.getOrCreateSession(convId);
       await agentLoop(goal, sessionMessages, {
         provider, apiKey, model, runId,
         signal: abort.signal,
@@ -1056,7 +964,7 @@ export function registerIpc(
     const goal = `${agentDef.goal}\n\nProcess the following URLs:\n${urlList}`;
 
     try {
-      const sessionMessages = getOrCreateSession(convId);
+      const sessionMessages = sessionManager.getOrCreateSession(convId);
       await agentLoop(goal, sessionMessages, {
         provider, apiKey, model, runId,
         signal: abort.signal,
@@ -1098,7 +1006,7 @@ export function registerIpc(
     const testGoal = `[DRY RUN / TEST MODE] You are testing the following agent definition. Validate that each step is achievable, the tools are accessible, and the scope is correct. Do NOT make any real modifications — only read and verify.\n\nAgent: ${agentDef.name}\nGoal: ${agentDef.goal}\n${agentDef.blueprint ? `Steps:\n${agentDef.blueprint.steps.map((s, i) => `${i + 1}. ${s}`).join('\n')}` : ''}\n\nReport: Is this agent ready to run? List any issues found.`;
 
     try {
-      const sessionMessages = getOrCreateSession(convId);
+      const sessionMessages = sessionManager.getOrCreateSession(convId);
       const result = await agentLoop(testGoal, sessionMessages, {
         provider, apiKey, model, runId,
         signal: abort.signal,
