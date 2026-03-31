@@ -1,7 +1,7 @@
 {
   "name": "clawdia7",
-  "version": "7.0.0",
-  "description": "AI desktop workspace — UI shell (Clawdia 7.0).",
+  "version": "7.1.0",
+  "description": "AI-powered desktop workspace with multi-provider chat, embedded browser, terminal, and OS-level tool access.",
   "author": "Daniel Parker",
   "license": "MIT",
   "main": "dist/main/main.js",

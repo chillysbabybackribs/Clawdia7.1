@@ -4,3 +4,20 @@ dist-packaged/
 *.log
 .DS_Store
 logs/
+
+# Environment and secrets
+.env
+.env.*
+
+# Python venv artifacts
+path/
+*.pyc
+__pycache__/
+
+# Local dev state
+.claude/
+.superpowers/
+*.pid
+
+# OS files
+Thumbs.db
