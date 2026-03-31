@@ -230,11 +230,14 @@ export function registerRunIpc(terminalController?: TerminalSessionController): 
   // ── Filesystem ───────────────────────────────────────────────────────────────
   ipcMain.handle(IPC.FS_READ_DIR, async (_e, dirPath: string) => {
     try {
-      const entries = await fs.promises.readdir(dirPath, { withFileTypes: true });
+      const resolved = dirPath.startsWith('~')
+        ? require('os').homedir() + dirPath.slice(1)
+        : dirPath;
+      const entries = await fs.promises.readdir(resolved, { withFileTypes: true });
       return entries.map((e) => ({
         name: e.name,
-        type: e.isDirectory() ? 'directory' : 'file',
-        path: path.join(dirPath, e.name),
+        type: e.isDirectory() ? 'dir' : 'file',
+        path: path.join(resolved, e.name),
       }));
     } catch { return []; }
   });

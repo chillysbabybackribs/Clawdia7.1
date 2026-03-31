@@ -64,7 +64,7 @@ function TabIconFallback() {
   );
 }
 
-export default function BrowserPanel() {
+export default function BrowserPanel({ reservedRight = 0 }: { reservedRight?: number }) {
   const [tabs, setTabs] = useState<TabInfo[]>([]);
   const [urlInput, setUrlInput] = useState('');
   const [ghostText, setGhostText] = useState('');
@@ -87,7 +87,8 @@ export default function BrowserPanel() {
       const rect = el.getBoundingClientRect();
       (window as any).clawdia?.browser.setBounds({
         x: Math.round(rect.x), y: Math.round(rect.y),
-        width: Math.round(rect.width), height: Math.round(rect.height),
+        width: Math.max(0, Math.round(rect.width) - reservedRight),
+        height: Math.round(rect.height),
       });
     };
     updateBounds();
@@ -95,7 +96,7 @@ export default function BrowserPanel() {
     observer.observe(el);
     window.addEventListener('resize', updateBounds);
     return () => { observer.disconnect(); window.removeEventListener('resize', updateBounds); };
-  }, []);
+  }, [reservedRight]);
 
   useEffect(() => {
     const api = (window as any).clawdia?.browser;

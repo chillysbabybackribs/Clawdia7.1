@@ -5,9 +5,11 @@ interface AppChromeProps {
   historyOpen?: boolean;
   terminalOpen?: boolean;
   settingsOpen?: boolean;
+  filesOpen?: boolean;
   onToggleHistory?: () => void;
   onToggleTerminal?: () => void;
   onOpenSettings?: () => void;
+  onToggleFiles?: () => void;
 }
 
 function useClock() {
@@ -62,9 +64,11 @@ export default function AppChrome({
   historyOpen = false,
   terminalOpen = false,
   settingsOpen = false,
+  filesOpen = false,
   onToggleHistory,
   onToggleTerminal,
   onOpenSettings,
+  onToggleFiles,
 }: AppChromeProps) {
   const api = (window as any).clawdia;
   const clock = useClock();
@@ -131,6 +135,18 @@ export default function AppChrome({
             }`}
           >
             VPN
+          </button>
+          <div className="h-4 w-px bg-white/[0.10]" aria-hidden />
+          <button
+            onClick={onToggleFiles}
+            title={filesOpen ? 'Close files' : 'Open files'}
+            className={`flex items-center justify-center px-3 h-7 rounded-lg text-[11px] font-medium uppercase tracking-[0.12em] transition-all cursor-pointer ${
+              filesOpen
+                ? 'bg-white/[0.08] text-text-primary'
+                : 'text-text-secondary hover:text-text-primary hover:bg-white/[0.06]'
+            }`}
+          >
+            Files
           </button>
         </div>
       )}

@@ -10,6 +10,7 @@ import EditorPanel from './components/EditorPanel';
 import TerminalPanel from './components/TerminalPanel';
 import CreateAgentPanel from './components/agents/CreateAgentPanel';
 import AgentDetailPanel from './components/agents/AgentDetailPanel';
+import RightFilesDrawer from './components/RightFilesDrawer';
 import { makeTab, addTab, closeTab, switchTab, type ConversationTab } from './tabLogic';
 
 export type View = 'chat' | 'conversations' | 'settings' | 'processes' | 'agent-create' | 'agent-detail';
@@ -47,6 +48,7 @@ export default function App() {
   const [activeTabId, setActiveTabId] = useState<string>(() => tabs[0].id);
   // Set of conversationIds that currently have a running agent — used for tab indicators.
   const [runningConvIds, setRunningConvIds] = useState<Set<string>>(new Set());
+  const [filesDrawerOpen, setFilesDrawerOpen] = useState(false);
   const browserVisible = rightPaneMode === 'browser';
   const editorOpen = rightPaneMode === 'editor';
   const terminalOpen = rightPaneMode === 'terminal';
@@ -646,6 +648,7 @@ export default function App() {
   };
 
   return (
+    <>
     <div
       className="flex h-screen w-screen flex-col overflow-hidden rounded-[10px] border-[2px] border-white/[0.10]"
       style={{ boxShadow: '0 8px 40px rgba(0,0,0,0.8), 0 2px 8px rgba(0,0,0,0.6), inset 0 1px 0 rgba(255,255,255,0.05)' }}
@@ -655,6 +658,7 @@ export default function App() {
         historyOpen={historyMode}
         terminalOpen={terminalOpen}
         settingsOpen={activeView === 'settings'}
+        filesOpen={filesDrawerOpen}
         onToggleHistory={() => {
           setActiveView('chat');
           setHistoryMode((current) => !current);
@@ -664,6 +668,7 @@ export default function App() {
           handleToggleTerminal();
         }}
         onOpenSettings={() => setActiveView((current) => current === 'settings' ? 'chat' : 'settings')}
+        onToggleFiles={() => setFilesDrawerOpen((v) => !v)}
       />
       <div className="flex min-h-0 flex-1">
         <div
@@ -722,10 +727,16 @@ export default function App() {
             className="flex h-full min-w-0 flex-col border-l-[2px] border-white/[0.06] shadow-[inset_2px_0_8px_rgba(0,0,0,0.3),-2px_0_12px_rgba(0,0,0,0.4)]"
             style={{ flex: '65 0 0' }}
           >
-            <BrowserPanel />
+            <BrowserPanel reservedRight={filesDrawerOpen ? 280 : 0} />
           </div>
         )}
       </div>
     </div>
+      <RightFilesDrawer
+        open={filesDrawerOpen}
+        onClose={() => setFilesDrawerOpen(false)}
+        conversationId={tabs.find((t) => t.id === activeTabId)?.conversationId ?? null}
+      />
+    </>
   );
 }
