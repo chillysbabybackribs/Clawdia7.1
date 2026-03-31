@@ -1,6 +1,6 @@
 // src/main/agent/memoryExecutors.ts
 // Executor functions for the three memory tools.
-// Called from anthropicChat.ts executeTools() when the agent uses a memory tool.
+// Called from agentLoop.ts dispatch when the agent uses a memory tool.
 
 import { remember, forget, searchMemory } from '../db/memory';
 import type { MemoryEntry } from '../db/memory';

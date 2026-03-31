@@ -676,18 +676,43 @@ const AssistantMessage = React.memo(function AssistantMessage({
     );
     if (!hasContent && !message.isStreaming) return null;
 
+    // Group the feed into runs: consecutive tool items are batched together so
+    // ToolActivityComponent can manage visibility (live: last 3, finalized: summary).
+    // Text items between tool groups stay in their original position.
+    type FeedGroup =
+      | { kind: 'text'; key: number; text: string; streaming: boolean }
+      | { kind: 'tools'; key: number; tools: ToolCall[]; lastToolId: string };
+
+    const groups: FeedGroup[] = [];
+    for (let i = 0; i < (message.feed ?? []).length; i++) {
+      const item = (message.feed ?? [])[i];
+      if (item.kind === 'text') {
+        if (item.text.trim()) groups.push({ kind: 'text', key: i, text: item.text, streaming: item.isStreaming === true });
+      } else if (item.kind === 'tool') {
+        const last = groups[groups.length - 1];
+        if (last?.kind === 'tools') {
+          last.tools.push(item.tool);
+          last.lastToolId = item.tool.id;
+        } else {
+          groups.push({ kind: 'tools', key: i, tools: [item.tool], lastToolId: item.tool.id });
+        }
+      }
+    }
+
     return (
       <div className={`flex justify-start animate-slide-up group ${fillAvailableSpace ? 'flex-1' : ''}`} style={{ minHeight: fillAvailableSpace ? '12rem' : '0', transition: 'min-height 0.25s ease-out' }}>
         <div className="w-full px-1 py-2 text-text-primary flex flex-col gap-3">
-          {(message.feed ?? []).map((item, idx) => {
-            if (item.kind === 'text') {
-              if (!item.text.trim()) return null;
-              return <MarkdownRenderer key={idx} content={item.text} isStreaming={item.isStreaming === true} />;
+          {groups.map(group => {
+            if (group.kind === 'text') {
+              return <MarkdownRenderer key={group.key} content={group.text} isStreaming={group.streaming} />;
             }
-            if (item.kind === 'tool') {
-              return <ToolActivityComponent key={item.tool.id} tools={[item.tool]} />;
-            }
-            return null;
+            return (
+              <ToolActivityComponent
+                key={group.lastToolId}
+                tools={group.tools}
+                isStreaming={!!message.isStreaming}
+              />
+            );
           })}
           {!!message.fileRefs?.length && <FileRefList fileRefs={message.fileRefs} />}
           {!!message.linkPreviews?.length && <LinkPreviewList linkPreviews={message.linkPreviews} />}
@@ -711,12 +736,12 @@ const AssistantMessage = React.memo(function AssistantMessage({
   return (
     <div className={`flex justify-start animate-slide-up group ${fillAvailableSpace ? 'flex-1 min-h-[12rem]' : ''}`}>
       <div className="w-full px-1 py-2 text-text-primary">
+        {hasContent && <MarkdownRenderer content={message.content} isStreaming={false} />}
         {!!message.toolCalls?.length && (
-          <div className="mb-3">
-            <ToolActivityComponent tools={message.toolCalls} />
+          <div className="mt-3">
+            <ToolActivityComponent tools={message.toolCalls} isStreaming={false} />
           </div>
         )}
-        {hasContent && <MarkdownRenderer content={message.content} isStreaming={false} />}
         {!!message.fileRefs?.length && <FileRefList fileRefs={message.fileRefs} />}
         {!!message.linkPreviews?.length && <LinkPreviewList linkPreviews={message.linkPreviews} />}
         {copyText && (
@@ -1113,7 +1138,7 @@ function InlineShimmer({ text, visible }: { text: string; visible: boolean }) {
 export default function ChatPanel({
   tabId,
   historyMode,
-  onToggleHistory: _onToggleHistory,
+  onToggleHistory,
   browserVisible,
   onToggleBrowser,
   onHideBrowser,
@@ -1173,6 +1198,10 @@ export default function ChatPanel({
     if (scrollRef.current) scrollRef.current.scrollTo({ top: scrollRef.current.scrollHeight, behavior });
   }, []);
 
+  const scrollToTop = useCallback((behavior: 'auto' | 'smooth' = 'smooth') => {
+    if (scrollRef.current) scrollRef.current.scrollTo({ top: 0, behavior });
+  }, []);
+
   const scrollMessageToTop = useCallback((messageId: string, behavior: 'auto' | 'smooth' = 'auto') => {
     const container = scrollRef.current;
     const node = container?.querySelector<HTMLElement>(`[data-message-id="${messageId}"]`);
@@ -1181,10 +1210,18 @@ export default function ChatPanel({
     container.scrollTo({ top: Math.max(0, nextTop), behavior });
   }, []);
 
+  const [showScrollToBottom, setShowScrollToBottom] = useState(false);
+  const [showScrollToTop, setShowScrollToTop] = useState(false);
+
   const handleScroll = useCallback(() => {
     if (!scrollRef.current) return;
     const { scrollTop, scrollHeight, clientHeight } = scrollRef.current;
-    isUserScrolledUpRef.current = (scrollHeight - scrollTop - clientHeight) > 100;
+    const distFromBottom = scrollHeight - scrollTop - clientHeight;
+    const scrolledUp = distFromBottom > 100;
+    isUserScrolledUpRef.current = scrolledUp;
+    setShowScrollToBottom(scrolledUp && distFromBottom > 200);
+    // Only show the top button when the user has manually scrolled up
+    setShowScrollToTop(scrolledUp && scrollTop > 200);
   }, []);
 
   const autoScroll = useCallback(() => {
@@ -1745,7 +1782,10 @@ export default function ChatPanel({
       setMessages(prev => [...prev, {
         id: assistantId,
         role: 'assistant',
-        type: conversationMode === 'chat' ? 'chat' : 'terminal_transcript',
+        // Use 'chat' type so the feed-based renderer (tool activity) is active
+        // during and after streaming. 'terminal_transcript' is only for legacy
+        // DB-loaded messages that have no feed.
+        type: 'chat',
         content: '',
         timestamp: new Date().toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' }),
         isStreaming: true,
@@ -1770,7 +1810,6 @@ export default function ChatPanel({
           m.id === assistantId
             ? {
                 ...m,
-                type: conversationMode === 'chat' ? m.type : 'terminal_transcript',
                 content: `⚠️ ${result.error}`,
                 isStreaming: false,
                 feed: [],
@@ -1783,7 +1822,6 @@ export default function ChatPanel({
           m.id === assistantId
             ? {
                 ...m,
-                type: conversationMode === 'chat' ? m.type : 'terminal_transcript',
                 content: finalContent,
                 toolCalls: finalTools,
                 feed: finalFeed,
@@ -1952,11 +1990,32 @@ export default function ChatPanel({
           <HistoryBrowser
             currentTabs={tabs}
             onSelectConversation={onOpenConversation}
-            onClose={() => setHistoryMode(false)}
+            onClose={() => onToggleHistory()}
           />
         </div>
       ) : (
-        <div ref={scrollRef} onScroll={handleScroll} className="flex-1 overflow-y-auto overflow-x-hidden scroll-smooth">
+        <div className="relative flex-1 min-h-0">
+        {/* Scroll to top */}
+        {showScrollToTop && (
+          <button
+            onClick={() => scrollToTop('smooth')}
+            title="Scroll to top"
+            className="absolute top-3 right-4 z-20 flex items-center justify-center w-7 h-7 rounded-full bg-surface-2 border border-white/[0.10] text-text-muted hover:text-text-primary hover:border-white/[0.20] shadow-lg transition-all cursor-pointer"
+          >
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><polyline points="18 15 12 9 6 15"/></svg>
+          </button>
+        )}
+        {/* Scroll to bottom */}
+        {showScrollToBottom && (
+          <button
+            onClick={() => { isUserScrolledUpRef.current = false; scrollToBottom('smooth'); }}
+            title="Scroll to bottom"
+            className="absolute bottom-3 right-4 z-20 flex items-center justify-center w-7 h-7 rounded-full bg-surface-2 border border-white/[0.10] text-text-muted hover:text-text-primary hover:border-white/[0.20] shadow-lg transition-all cursor-pointer"
+          >
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><polyline points="6 9 12 15 18 9"/></svg>
+          </button>
+        )}
+        <div ref={scrollRef} onScroll={handleScroll} className="h-full overflow-y-auto overflow-x-hidden scroll-smooth">
           <div
             className="flex min-h-full flex-col px-5 pt-5 pb-8"
             style={{ zoom: chatZoom / 100 }}
@@ -2026,6 +2085,7 @@ export default function ChatPanel({
             )}
             <div className="h-2" />
           </div>
+        </div>
         </div>
       )}
 

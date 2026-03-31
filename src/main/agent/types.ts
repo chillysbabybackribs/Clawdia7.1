@@ -23,6 +23,7 @@ export interface LoopOptions {
   apiKey: string;
   model: string;           // resolved model ID (e.g. 'claude-sonnet-4-6')
   runId: string;
+  conversationId?: string;  // used to scope browser tool calls to a per-conversation tab
   currentIteration?: number;
   maxIterations?: number;  // default 50
   signal?: AbortSignal;

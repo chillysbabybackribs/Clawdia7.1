@@ -13,6 +13,8 @@ import { buildAppMappingSystemPrompt } from './appMapping';
 import { prepareAnthropicMessagesForSend } from '../core/providers/anthropicMessageProtocol';
 import { prepareOpenAIMessagesForSend } from '../core/providers/openAIMessageProtocol';
 import { buildCacheKey, getCachedResponse, setCachedResponse } from '../db/responseCache';
+import { getMemoryContext } from '../db/memory';
+import { checkBudget } from './spending-budget';
 
 const MAX_ITERATIONS = 50;
 // Maximum wall-clock time for a single agent run (5 minutes).
@@ -169,6 +171,15 @@ export async function agentLoop(
   // Push current user message onto session history
   messages.push(buildUserMessage(userMessage, options.attachments, options.provider));
 
+  // Memory recall: inject relevant facts/past-conversation snippets once per run,
+  // before the first LLM call. Injected as a user/assistant prefill pair so the
+  // static system prompt stays identical across iterations (Anthropic cache hits).
+  const memoryContext = getMemoryContext(userMessage);
+  if (memoryContext) {
+    messages.push({ role: 'user', content: `[Memory context]\n${memoryContext}` });
+    messages.push({ role: 'assistant', content: 'Understood.' });
+  }
+
   // Inject browser session context once per run (browser/full profiles only).
   // Placed here — after user message, before the loop — so it costs tokens once
   // and does not disturb the cacheable static system prompt.
@@ -221,6 +232,13 @@ export async function agentLoop(
       if (Date.now() > loopDeadline) {
         console.warn(`[agentLoop] Run ${runId} exceeded ${MAX_RUN_MS / 1000}s wall-clock limit — aborting`);
         break;
+      }
+
+      // Budget enforcement: checked before every LLM call so all providers
+      // (Anthropic, OpenAI, Gemini) are covered by a single guard.
+      const budgetCheck = checkBudget(1);
+      if (!budgetCheck.allowed) {
+        throw new Error(`Budget exceeded: ${budgetCheck.periodLimit} cents limit reached for ${budgetCheck.blockedBy} period.`);
       }
 
       // Inject queued user context

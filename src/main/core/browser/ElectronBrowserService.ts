@@ -51,6 +51,11 @@ export class ElectronBrowserService implements BrowserService {
   // instances mounting at the same time never both create a tab.
   private defaultTabPromise: Promise<void> | null = null;
 
+  // ── Conversation-scoped tab ownership ────────────────────────────────────────
+  // Maps conversationId → tabId. Each agent conversation gets its own dedicated
+  // browser tab so concurrent runs cannot corrupt each other's page state.
+  private readonly convTabMap = new Map<string, string>();
+
   constructor(
     private readonly window: BrowserWindow,
     private readonly userDataPath: string,
@@ -725,10 +730,479 @@ export class ElectronBrowserService implements BrowserService {
         forms: [], hasShadowInputs: false, contentAreas: [], likelyLoggedIn: false,
       };
     }
+    return this.profilePageOn(wc);
+  }
+
+  // ── Conversation-scoped tab API ───────────────────────────────────────────────
+
+  async getOrAssignTab(conversationId: string): Promise<string> {
+    const existing = this.convTabMap.get(conversationId);
+    if (existing && this.tabs.has(existing)) return existing;
+    // Create a dedicated tab for this conversation (not activated into the UI view).
+    const id = `tab-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    const view = new BrowserView({
+      webPreferences: { partition: PARTITION, sandbox: false },
+    });
+    const tab: InternalTab = {
+      id,
+      view,
+      state: { id, title: 'Agent Tab', url: '', active: false, isLoading: false, isNewTab: true },
+    };
+    this.tabs.set(id, tab);
+    this.bindTabEvents(tab);
+    this.convTabMap.set(conversationId, id);
+    void this.listTabs().then((tabs) => this.emit('tabsChanged', tabs));
+    return id;
+  }
+
+  async releaseTab(conversationId: string): Promise<void> {
+    const tabId = this.convTabMap.get(conversationId);
+    if (!tabId) return;
+    this.convTabMap.delete(conversationId);
+    const tab = this.tabs.get(tabId);
+    if (!tab) return;
+    // If this tab is currently shown in the window, detach it first.
+    if (this.window.getBrowserView() === tab.view) this.window.setBrowserView(null);
+    tab.view.webContents.close();
+    this.tabs.delete(tabId);
+    if (this.activeTabId === tabId) {
+      this.activeTabId = null;
+      const next = [...this.tabs.values()][0];
+      if (next) await this.activateTab(next);
+    } else {
+      void this.listTabs().then((tabs) => this.emit('tabsChanged', tabs));
+    }
+  }
+
+  /**
+   * Activate the browser panel to show the tab owned by this conversation.
+   * Creates the tab lazily if the conversation has never used the browser.
+   * This is a pure UI operation — execution routing is unaffected.
+   */
+  async focusConversation(conversationId: string): Promise<void> {
+    const tabId = await this.getOrAssignTab(conversationId);
+    const tab = this.tabs.get(tabId);
+    if (!tab) return;
+    console.log(`[BrowserService] Switched browser to conversation ${conversationId} → tab ${tabId}`);
+    await this.activateTab(tab);
+  }
+
+  /**
+   * Execute a browser operation on a specific tab identified by tabId, without
+   * changing activeTabId. This is the core isolation primitive: agent tool calls
+   * resolve their conversation's tab via getOrAssignTab(), then pass the webContents
+   * directly to the operation. The UI panel's activeTabId is never disturbed.
+   */
+  private getTabWebContents(tabId: string): Electron.WebContents | null {
+    return this.tabs.get(tabId)?.view?.webContents ?? null;
+  }
+
+  /**
+   * Navigate a specific tab by ID without touching activeTabId.
+   * Used by agent browser tools to operate on their conversation-owned tab.
+   */
+  async navigateTab(tabId: string, url: string): Promise<BrowserNavigationResult> {
+    const tab = this.tabs.get(tabId);
+    if (!tab) throw new Error(`Tab ${tabId} not found`);
+    tab.state.isNewTab = false;
+    await this.loadUrlReady(tab.view.webContents, url);
+    this.history.add(url);
+    const result: BrowserNavigationResult = {
+      tabId: tab.id,
+      url: tab.view.webContents.getURL(),
+      title: tab.view.webContents.getTitle(),
+    };
+    result.profile = await this.profilePageOn(tab.view.webContents);
+    return result;
+  }
+
+  /** Run a JS expression on a specific tab's webContents. */
+  async evaluateJsOnTab(tabId: string, expression: string): Promise<BrowserServiceResult> {
+    const wc = this.getTabWebContents(tabId);
+    if (!wc) return { ok: false, error: `Tab ${tabId} not found` };
+    try {
+      const result = await wc.executeJavaScript(expression);
+      return { ok: true, data: result };
+    } catch (err) {
+      return { ok: false, error: (err as Error).message };
+    }
+  }
+
+  /** Get page state from a specific tab. */
+  async getPageStateOnTab(tabId: string): Promise<BrowserPageState> {
+    const tab = this.tabs.get(tabId);
+    if (!tab) throw new Error(`Tab ${tabId} not found`);
+    const wc = tab.view.webContents;
+    const textSample = await wc.executeJavaScript(
+      `(() => (document.body?.innerText || '').replace(/\\s+/g, ' ').trim().slice(0, 1200))()`,
+    );
+    return {
+      url: wc.getURL(),
+      title: wc.getTitle(),
+      isLoading: wc.isLoading(),
+      canGoBack: this.canGoBack(wc),
+      canGoForward: this.canGoForward(wc),
+      textSample: String(textSample || ''),
+    };
+  }
+
+  /** Extract text from a specific tab. */
+  async extractTextOnTab(tabId: string): Promise<{ url: string; title: string; text: string; truncated: boolean }> {
+    const tab = this.tabs.get(tabId);
+    if (!tab) throw new Error(`Tab ${tabId} not found`);
+    const wc = tab.view.webContents;
+    const MAX_CHARS = 5500;
+    const text = await wc.executeJavaScript(
+      `(() => (document.body?.innerText || '').replace(/\\s+/g, ' ').trim().slice(0, ${MAX_CHARS + 1}))()`,
+    );
+    const raw = String(text || '');
+    const truncated = raw.length > MAX_CHARS;
+    return {
+      url: wc.getURL(),
+      title: wc.getTitle(),
+      text: truncated ? raw.slice(0, MAX_CHARS) : raw,
+      truncated,
+    };
+  }
+
+  /** Screenshot a specific tab. */
+  async screenshotTab(tabId: string): Promise<BrowserScreenshotResult> {
+    const tab = this.tabs.get(tabId);
+    if (!tab) throw new Error(`Tab ${tabId} not found`);
+    const image = await tab.view.webContents.capturePage();
+    const png = image.toPNG();
+    const dir = path.join(this.userDataPath, 'browser-screenshots');
+    await fs.mkdir(dir, { recursive: true });
+    const filePath = path.join(dir, `browser-${Date.now()}.png`);
+    await fs.writeFile(filePath, png);
+    const size = image.getSize();
+    return { path: filePath, mimeType: 'image/png', width: size.width, height: size.height };
+  }
+
+  /** Click on a specific tab. */
+  async clickOnTab(tabId: string, selector: string): Promise<BrowserServiceResult> {
+    const wc = this.getTabWebContents(tabId);
+    if (!wc) return { ok: false, error: `Tab ${tabId} not found` };
+    try {
+      const rect = await wc.executeJavaScript(`
+        (function() {
+          function deepQuery(root, sel) {
+            let el = root.querySelector(sel);
+            if (el) return el;
+            for (const node of root.querySelectorAll('*')) {
+              if (node.shadowRoot) { el = deepQuery(node.shadowRoot, sel); if (el) return el; }
+            }
+            return null;
+          }
+          const el = deepQuery(document, ${JSON.stringify(selector)});
+          if (!el) return null;
+          el.focus();
+          const r = el.getBoundingClientRect();
+          return { x: Math.round(r.left + r.width / 2), y: Math.round(r.top + r.height / 2) };
+        })()
+      `);
+      if (!rect) return { ok: false, error: `Element not found: ${selector}` };
+      for (const type of ['mouseDown', 'mouseUp'] as const) {
+        wc.sendInputEvent({ type, x: rect.x, y: rect.y, button: 'left', clickCount: 1 } as any);
+      }
+      return { ok: true };
+    } catch (err) {
+      return { ok: false, error: (err as Error).message };
+    }
+  }
+
+  /** Type into a specific tab. */
+  async typeOnTab(tabId: string, selector: string, text: string, clearFirst = true): Promise<BrowserServiceResult> {
+    const wc = this.getTabWebContents(tabId);
+    if (!wc) return { ok: false, error: `Tab ${tabId} not found` };
+    try {
+      const info = await wc.executeJavaScript(`
+        (function() {
+          function deepQuery(root, sel) {
+            let el = root.querySelector(sel);
+            if (el) return el;
+            for (const node of root.querySelectorAll('*')) {
+              if (node.shadowRoot) { el = deepQuery(node.shadowRoot, sel); if (el) return el; }
+            }
+            return null;
+          }
+          const el = deepQuery(document, ${JSON.stringify(selector)});
+          if (!el) return null;
+          const tag = el.tagName.toLowerCase();
+          const isNative = tag === 'input' || tag === 'textarea';
+          const isContentEditable = !isNative && (
+            el.isContentEditable || el.getAttribute('contenteditable') === 'true' || el.getAttribute('contenteditable') === ''
+          );
+          const r = el.getBoundingClientRect();
+          return { isNative, isContentEditable, x: Math.round(r.left + r.width / 2), y: Math.round(r.top + r.height / 2) };
+        })()
+      `);
+      if (!info) return { ok: false, error: `Element not found: ${selector}` };
+      for (const evType of ['mouseDown', 'mouseUp'] as const) {
+        wc.sendInputEvent({ type: evType, x: info.x, y: info.y, button: 'left', clickCount: 1 } as any);
+      }
+      await new Promise(r => setTimeout(r, 60));
+      if (info.isNative) {
+        if (clearFirst) {
+          await wc.executeJavaScript(`
+            (function() {
+              function deepQuery(root, sel) {
+                let el = root.querySelector(sel);
+                if (el) return el;
+                for (const node of root.querySelectorAll('*')) {
+                  if (node.shadowRoot) { el = deepQuery(node.shadowRoot, sel); if (el) return el; }
+                }
+                return null;
+              }
+              const el = deepQuery(document, ${JSON.stringify(selector)});
+              if (!el) return;
+              const setter = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(el), 'value')?.set;
+              if (setter) setter.call(el, ''); else el.value = '';
+              el.dispatchEvent(new Event('input', { bubbles: true }));
+            })()
+          `);
+        }
+        for (const char of text) {
+          wc.sendInputEvent({ type: 'char', keyCode: char } as any);
+          await new Promise(r => setTimeout(r, 12));
+        }
+      } else {
+        await wc.executeJavaScript(`
+          (function() {
+            function deepQuery(root, sel) {
+              let el = root.querySelector(sel);
+              if (el) return el;
+              for (const node of root.querySelectorAll('*')) {
+                if (node.shadowRoot) { el = deepQuery(node.shadowRoot, sel); if (el) return el; }
+              }
+              return null;
+            }
+            const el = deepQuery(document, ${JSON.stringify(selector)});
+            if (!el) return;
+            el.focus();
+            if (${clearFirst}) {
+              document.execCommand('selectAll', false);
+              document.execCommand('delete', false);
+            }
+            document.execCommand('insertText', false, ${JSON.stringify(text)});
+          })()
+        `);
+      }
+      return { ok: true };
+    } catch (err) {
+      return { ok: false, error: (err as Error).message };
+    }
+  }
+
+  /** Scroll on a specific tab. */
+  async scrollOnTab(tabId: string, selector: string | null, deltaY = 500): Promise<BrowserServiceResult> {
+    const wc = this.getTabWebContents(tabId);
+    if (!wc) return { ok: false, error: `Tab ${tabId} not found` };
+    try {
+      if (selector) {
+        await wc.executeJavaScript(`
+          (function() {
+            function deepQuery(root, sel) {
+              let el = root.querySelector(sel);
+              if (el) return el;
+              for (const node of root.querySelectorAll('*')) {
+                if (node.shadowRoot) { el = deepQuery(node.shadowRoot, sel); if (el) return el; }
+              }
+              return null;
+            }
+            const el = deepQuery(document, ${JSON.stringify(selector)});
+            if (el) el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+          })()
+        `);
+      } else {
+        await wc.executeJavaScript(`window.scrollBy(0, ${deltaY})`);
+      }
+      return { ok: true };
+    } catch (err) {
+      return { ok: false, error: (err as Error).message };
+    }
+  }
+
+  /** Wait for selector on a specific tab. */
+  async waitForOnTab(tabId: string, selector: string, timeoutMs = 10000): Promise<BrowserServiceResult> {
+    const wc = this.getTabWebContents(tabId);
+    if (!wc) return { ok: false, error: `Tab ${tabId} not found` };
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      try {
+        const found = await wc.executeJavaScript(`
+          (function() {
+            function deepQuery(root, sel) {
+              let el = root.querySelector(sel);
+              if (el) return el;
+              for (const node of root.querySelectorAll('*')) {
+                if (node.shadowRoot) { el = deepQuery(node.shadowRoot, sel); if (el) return el; }
+              }
+              return null;
+            }
+            return !!deepQuery(document, ${JSON.stringify(selector)});
+          })()
+        `);
+        if (found) return { ok: true };
+      } catch { /* page may be mid-navigation */ }
+      await new Promise(r => setTimeout(r, 200));
+    }
+    return { ok: false, error: `Timeout (${timeoutMs}ms) waiting for selector: ${selector}` };
+  }
+
+  /** Find elements on a specific tab. */
+  async findElementsOnTab(tabId: string, selector: string, limit = 20): Promise<BrowserServiceResult> {
+    const wc = this.getTabWebContents(tabId);
+    if (!wc) return { ok: false, error: `Tab ${tabId} not found` };
+    try {
+      const elements = await wc.executeJavaScript(`
+        (function() {
+          function deepQueryAll(root, sel, results) {
+            for (const el of root.querySelectorAll(sel)) results.push(el);
+            for (const node of root.querySelectorAll('*')) {
+              if (node.shadowRoot) deepQueryAll(node.shadowRoot, sel, results);
+            }
+          }
+          const nodes = [];
+          deepQueryAll(document, ${JSON.stringify(selector)}, nodes);
+          return nodes.slice(0, ${limit}).map(el => ({
+            tag: el.tagName.toLowerCase(),
+            text: el.innerText?.slice(0, 200) ?? '',
+            attrs: {
+              id: el.id || undefined,
+              class: el.className || undefined,
+              href: el.getAttribute('href') || undefined,
+              type: el.getAttribute('type') || undefined,
+              placeholder: el.getAttribute('placeholder') || undefined,
+              name: el.getAttribute('name') || undefined,
+            }
+          }));
+        })()
+      `);
+      return { ok: true, data: elements };
+    } catch (err) {
+      return { ok: false, error: (err as Error).message };
+    }
+  }
+
+  /** Select on a specific tab. */
+  async selectOnTab(tabId: string, selector: string, value: string): Promise<BrowserServiceResult> {
+    const wc = this.getTabWebContents(tabId);
+    if (!wc) return { ok: false, error: `Tab ${tabId} not found` };
+    try {
+      const found = await wc.executeJavaScript(`
+        (function() {
+          const el = document.querySelector(${JSON.stringify(selector)});
+          if (!el || el.tagName.toLowerCase() !== 'select') return false;
+          const optByValue = Array.from(el.options).find(o => o.value === ${JSON.stringify(value)});
+          const optByText  = Array.from(el.options).find(o => o.text.trim() === ${JSON.stringify(value)});
+          const opt = optByValue || optByText;
+          if (!opt) return false;
+          el.value = opt.value;
+          el.dispatchEvent(new Event('change', { bubbles: true }));
+          el.dispatchEvent(new Event('input',  { bubbles: true }));
+          return true;
+        })()
+      `);
+      if (!found) return { ok: false, error: `Select element or option not found: ${selector} / ${value}` };
+      return { ok: true };
+    } catch (err) {
+      return { ok: false, error: (err as Error).message };
+    }
+  }
+
+  /** Hover on a specific tab. */
+  async hoverOnTab(tabId: string, selector: string): Promise<BrowserServiceResult> {
+    const wc = this.getTabWebContents(tabId);
+    if (!wc) return { ok: false, error: `Tab ${tabId} not found` };
+    try {
+      const found = await wc.executeJavaScript(`
+        (function() {
+          function deepQuery(root, sel) {
+            let el = root.querySelector(sel);
+            if (el) return el;
+            for (const node of root.querySelectorAll('*')) {
+              if (node.shadowRoot) { el = deepQuery(node.shadowRoot, sel); if (el) return el; }
+            }
+            return null;
+          }
+          const el = deepQuery(document, ${JSON.stringify(selector)});
+          if (!el) return false;
+          el.dispatchEvent(new MouseEvent('mouseover',  { bubbles: true }));
+          el.dispatchEvent(new MouseEvent('mouseenter', { bubbles: true }));
+          return true;
+        })()
+      `);
+      if (!found) return { ok: false, error: `Element not found: ${selector}` };
+      return { ok: true };
+    } catch (err) {
+      return { ok: false, error: (err as Error).message };
+    }
+  }
+
+  /** Key press on a specific tab. */
+  async keyPressOnTab(tabId: string, key: string): Promise<BrowserServiceResult> {
+    const wc = this.getTabWebContents(tabId);
+    if (!wc) return { ok: false, error: `Tab ${tabId} not found` };
+    try {
+      wc.sendInputEvent({ type: 'keyDown', keyCode: key } as any);
+      wc.sendInputEvent({ type: 'keyUp',   keyCode: key } as any);
+      return { ok: true };
+    } catch (err) {
+      return { ok: false, error: (err as Error).message };
+    }
+  }
+
+  /** Get element text on a specific tab. */
+  async getElementTextOnTab(tabId: string, selector: string): Promise<BrowserServiceResult> {
+    const wc = this.getTabWebContents(tabId);
+    if (!wc) return { ok: false, error: `Tab ${tabId} not found` };
+    try {
+      const text = await wc.executeJavaScript(`
+        (function() {
+          function deepQuery(root, sel) {
+            let el = root.querySelector(sel);
+            if (el) return el;
+            for (const node of root.querySelectorAll('*')) {
+              if (node.shadowRoot) { el = deepQuery(node.shadowRoot, sel); if (el) return el; }
+            }
+            return null;
+          }
+          const el = deepQuery(document, ${JSON.stringify(selector)});
+          if (!el) return null;
+          return el.innerText || el.textContent || '';
+        })()
+      `);
+      if (text === null) return { ok: false, error: `Element not found: ${selector}` };
+      return { ok: true, data: String(text).trim() };
+    } catch (err) {
+      return { ok: false, error: (err as Error).message };
+    }
+  }
+
+  /** Navigate back on a specific tab. */
+  async backOnTab(tabId: string): Promise<void> {
+    const tab = this.tabs.get(tabId);
+    if (tab && this.canGoBack(tab.view.webContents)) {
+      tab.state.isNewTab = false;
+      this.goBack(tab.view.webContents);
+    }
+  }
+
+  /** Navigate forward on a specific tab. */
+  async forwardOnTab(tabId: string): Promise<void> {
+    const tab = this.tabs.get(tabId);
+    if (tab && this.canGoForward(tab.view.webContents)) {
+      tab.state.isNewTab = false;
+      this.goForward(tab.view.webContents);
+    }
+  }
+
+  /** Profile page on a specific tab's webContents. */
+  private async profilePageOn(wc: Electron.WebContents): Promise<PageProfile> {
     try {
       const profile = await wc.executeJavaScript(`
         (function() {
-          // ── Shadow DOM traversal ─────────────────────────────────────────────
           function deepQuery(root, sel) {
             let el = root.querySelector(sel);
             if (el) return el;
@@ -743,8 +1217,6 @@ export class ElectronBrowserService implements BrowserService {
               if (node.shadowRoot) deepQueryAll(node.shadowRoot, sel, results, true);
             }
           }
-
-          // ── Framework detection ──────────────────────────────────────────────
           const frameworks = [];
           if (window.__REACT_DEVTOOLS_GLOBAL_HOOK__ || document.querySelector('[data-reactroot],[data-reactid]')) frameworks.push('React');
           if (window.Vue || document.querySelector('[data-v-]')) frameworks.push('Vue');
@@ -752,41 +1224,27 @@ export class ElectronBrowserService implements BrowserService {
           if (window.Svelte || document.querySelector('[data-svelte]')) frameworks.push('Svelte');
           if (window.next) frameworks.push('Next.js');
           if (window.nuxt) frameworks.push('Nuxt');
-          // Rich text editors
           if (document.querySelector('.ProseMirror')) frameworks.push('ProseMirror');
           if (document.querySelector('[data-lexical-editor]')) frameworks.push('Lexical');
           if (document.querySelector('.DraftEditor-root')) frameworks.push('Draft.js');
           if (document.querySelector('.tiptap')) frameworks.push('TipTap');
           if (document.querySelector('.cm-editor,.CodeMirror')) frameworks.push('CodeMirror');
-
-          // ── Inputs (including shadow DOM) ────────────────────────────────────
           const inputResults = [];
           deepQueryAll(document, 'input:not([type=hidden]),textarea,[contenteditable="true"],[contenteditable=""]', inputResults, false);
           const inputs = inputResults.slice(0, 30).map(({ el, inShadow }) => {
             const tag = el.tagName.toLowerCase();
             const type = el.getAttribute('type') || tag;
             const placeholder = el.getAttribute('placeholder') || '';
-            // Find associated label
             let label = '';
-            if (el.id) {
-              const lbl = document.querySelector('label[for="' + el.id + '"]');
-              if (lbl) label = lbl.innerText.trim().slice(0, 60);
-            }
-            if (!label) {
-              const aria = el.getAttribute('aria-label') || el.getAttribute('aria-labelledby') || '';
-              label = aria.slice(0, 60);
-            }
-            // Build a stable selector
+            if (el.id) { const lbl = document.querySelector('label[for="' + el.id + '"]'); if (lbl) label = lbl.innerText.trim().slice(0, 60); }
+            if (!label) { const aria = el.getAttribute('aria-label') || el.getAttribute('aria-labelledby') || ''; label = aria.slice(0, 60); }
             let selector = tag;
             if (el.id) selector = '#' + CSS.escape(el.id);
             else if (el.name) selector = tag + '[name="' + el.name + '"]';
             else if (el.getAttribute('type')) selector = tag + '[type="' + el.getAttribute('type') + '"]';
             return { selector, type, placeholder: placeholder.slice(0, 80), label, inShadowDom: inShadow };
           });
-
           const hasShadowInputs = inputs.some(i => i.inShadowDom);
-
-          // ── Buttons ──────────────────────────────────────────────────────────
           const buttonResults = [];
           deepQueryAll(document, 'button,[role=button],[type=submit]', buttonResults, false);
           const buttons = buttonResults.slice(0, 20).map(({ el }) => {
@@ -795,55 +1253,29 @@ export class ElectronBrowserService implements BrowserService {
             else if (el.getAttribute('type')) selector = el.tagName.toLowerCase() + '[type="' + el.getAttribute('type') + '"]';
             return { selector, text: (el.innerText || el.textContent || '').trim().slice(0, 60) };
           });
-
-          // ── Links ────────────────────────────────────────────────────────────
           const links = Array.from(document.querySelectorAll('a[href]')).slice(0, 30).map(el => ({
             href: el.getAttribute('href') || '',
             text: (el.innerText || '').trim().slice(0, 60),
           }));
-
-          // ── Forms ────────────────────────────────────────────────────────────
           const forms = Array.from(document.querySelectorAll('form')).slice(0, 10).map(form => {
             const fields = Array.from(form.querySelectorAll('input:not([type=hidden]),textarea,select')).map(el => {
               if (el.id) return '#' + CSS.escape(el.id);
               if (el.name) return el.tagName.toLowerCase() + '[name="' + el.name + '"]';
               return el.tagName.toLowerCase();
             });
-            return {
-              action: form.getAttribute('action') || '',
-              method: (form.getAttribute('method') || 'get').toUpperCase(),
-              fields,
-            };
+            return { action: form.getAttribute('action') || '', method: (form.getAttribute('method') || 'get').toUpperCase(), fields };
           });
-
-          // ── Content areas ────────────────────────────────────────────────────
           const contentSelectors = ['main','article','[role="main"]','[role="feed"]','[role="list"]','#content','#main','.content','.main'];
           const contentAreas = contentSelectors.filter(s => document.querySelector(s));
-
-          // ── Auth hint ────────────────────────────────────────────────────────
           const authSelectors = ['[data-username]','[data-user]','[data-testid*="user"]','[data-testid*="avatar"]',
             '.avatar','#header-user','[class*="username"]','[class*="userAvatar"]','[aria-label*="profile" i]'];
           const likelyLoggedIn = authSelectors.some(s => document.querySelector(s));
-
-          return {
-            hostname: location.hostname,
-            frameworks,
-            inputs,
-            buttons,
-            links,
-            forms,
-            hasShadowInputs,
-            contentAreas,
-            likelyLoggedIn,
-          };
+          return { hostname: location.hostname, frameworks, inputs, buttons, links, forms, hasShadowInputs, contentAreas, likelyLoggedIn };
         })()
       `);
       return profile as PageProfile;
     } catch {
-      return {
-        hostname: '', frameworks: [], inputs: [], buttons: [], links: [],
-        forms: [], hasShadowInputs: false, contentAreas: [], likelyLoggedIn: false,
-      };
+      return { hostname: '', frameworks: [], inputs: [], buttons: [], links: [], forms: [], hasShadowInputs: false, contentAreas: [], likelyLoggedIn: false };
     }
   }
 

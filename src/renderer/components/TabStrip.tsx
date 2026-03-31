@@ -173,7 +173,7 @@ export default function TabStrip({ tabs, activeTabId, runningConvIds, onSwitch, 
               }}
             >
               {isRunning && (
-                <span className="w-[6px] h-[6px] rounded-full bg-accent/80 animate-pulse flex-shrink-0" title="Agent running" />
+                <span className="w-[6px] h-[6px] rounded-full bg-white/40 animate-pulse flex-shrink-0" title="Agent running" />
               )}
               <span className="truncate min-w-0 flex-1">{title}</span>
               {!isOnly && (

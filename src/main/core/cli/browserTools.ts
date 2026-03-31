@@ -207,7 +207,110 @@ export const BROWSER_TOOLS: Anthropic.Tool[] = [
 
 export type BrowserToolInput = Record<string, unknown>;
 
+// Import the concrete class only for the scoped-tab methods — the BrowserService
+// interface does not expose them since they are an agent-internal detail.
+import { ElectronBrowserService } from '../browser/ElectronBrowserService';
+
+/**
+ * Execute a browser tool call.
+ *
+ * When `conversationId` is provided and `browser` is an `ElectronBrowserService`,
+ * all operations are routed through a dedicated per-conversation tab so that
+ * concurrent agent runs cannot corrupt each other's page state.
+ *
+ * When `conversationId` is absent (e.g. legacy AgentIpc calls that have not yet
+ * been updated), the call falls through to the original global-activeTab path.
+ */
 export async function executeBrowserTool(
+  name: string,
+  input: BrowserToolInput,
+  browser: BrowserService,
+  conversationId?: string,
+): Promise<unknown> {
+  // ── Conversation-scoped routing ───────────────────────────────────────────────
+  if (conversationId && browser instanceof ElectronBrowserService) {
+    const tabId = await browser.getOrAssignTab(conversationId);
+    return executeOnTab(name, input, browser, tabId);
+  }
+  // ── Legacy global-active-tab path (single-session or unscoped callers) ────────
+  return executeOnActiveTab(name, input, browser);
+}
+
+async function executeOnTab(
+  name: string,
+  input: BrowserToolInput,
+  browser: ElectronBrowserService,
+  tabId: string,
+): Promise<unknown> {
+  switch (name) {
+    case 'browser_navigate': {
+      const result = await browser.navigateTab(tabId, input.url as string);
+      const state = await browser.getPageStateOnTab(tabId);
+      return {
+        tabId: result.tabId,
+        url: state.url || result.url,
+        title: state.title || result.title,
+        isLoading: state.isLoading,
+        textSample: state.textSample,
+        canGoBack: state.canGoBack,
+        canGoForward: state.canGoForward,
+      };
+    }
+    case 'browser_click':
+      return browser.clickOnTab(tabId, input.selector as string);
+    case 'browser_type':
+      return browser.typeOnTab(tabId, input.selector as string, input.text as string, input.clearFirst !== false);
+    case 'browser_scroll':
+      return browser.scrollOnTab(tabId, (input.selector as string | undefined) ?? null, input.deltaY as number | undefined);
+    case 'browser_wait_for':
+      return browser.waitForOnTab(tabId, input.selector as string, input.timeoutMs as number | undefined);
+    case 'browser_evaluate_js':
+      return browser.evaluateJsOnTab(tabId, input.expression as string);
+    case 'browser_find_elements':
+      return browser.findElementsOnTab(tabId, input.selector as string, input.limit as number | undefined);
+    case 'browser_get_page_state':
+      return browser.getPageStateOnTab(tabId);
+    case 'browser_screenshot': {
+      const shot = await browser.screenshotTab(tabId);
+      const { readFileSync } = await import('fs');
+      const b64 = readFileSync(shot.path).toString('base64');
+      return { type: 'base64', mimeType: shot.mimeType, data: b64, width: shot.width, height: shot.height };
+    }
+    case 'browser_extract_text':
+      return browser.extractTextOnTab(tabId);
+    case 'browser_new_tab': {
+      // New tabs created by an agent are owned by the UI tab strip, not scoped.
+      const tab = await browser.newTab(input.url as string | undefined);
+      return { id: tab.id, url: tab.url, title: tab.title };
+    }
+    case 'browser_switch_tab':
+      await browser.switchTab(input.id as string);
+      return { ok: true };
+    case 'browser_list_tabs':
+      return browser.listTabs();
+    case 'browser_select':
+      return browser.selectOnTab(tabId, input.selector as string, input.value as string);
+    case 'browser_hover':
+      return browser.hoverOnTab(tabId, input.selector as string);
+    case 'browser_key_press':
+      return browser.keyPressOnTab(tabId, input.key as string);
+    case 'browser_close_tab':
+      await browser.closeTab(input.id as string);
+      return { ok: true };
+    case 'browser_get_element_text':
+      return browser.getElementTextOnTab(tabId, input.selector as string);
+    case 'browser_back':
+      await browser.backOnTab(tabId);
+      return { ok: true };
+    case 'browser_forward':
+      await browser.forwardOnTab(tabId);
+      return { ok: true };
+    default:
+      return { ok: false, error: `Unknown browser tool: ${name}` };
+  }
+}
+
+async function executeOnActiveTab(
   name: string,
   input: BrowserToolInput,
   browser: BrowserService,
@@ -229,42 +332,22 @@ export async function executeBrowserTool(
     case 'browser_click':
       return browser.click(input.selector as string);
     case 'browser_type':
-      return browser.type(
-        input.selector as string,
-        input.text as string,
-        input.clearFirst !== false,
-      );
+      return browser.type(input.selector as string, input.text as string, input.clearFirst !== false);
     case 'browser_scroll':
-      return browser.scroll(
-        (input.selector as string | undefined) ?? null,
-        input.deltaY as number | undefined,
-      );
+      return browser.scroll((input.selector as string | undefined) ?? null, input.deltaY as number | undefined);
     case 'browser_wait_for':
-      return browser.waitFor(
-        input.selector as string,
-        input.timeoutMs as number | undefined,
-      );
+      return browser.waitFor(input.selector as string, input.timeoutMs as number | undefined);
     case 'browser_evaluate_js':
       return browser.evaluateJs(input.expression as string);
     case 'browser_find_elements':
-      return browser.findElements(
-        input.selector as string,
-        input.limit as number | undefined,
-      );
+      return browser.findElements(input.selector as string, input.limit as number | undefined);
     case 'browser_get_page_state':
       return browser.getPageState();
     case 'browser_screenshot': {
       const shot = await browser.screenshot();
-      // Read the PNG back as base64 so multimodal models can see it
       const { readFileSync } = await import('fs');
       const b64 = readFileSync(shot.path).toString('base64');
-      return {
-        type: 'base64',
-        mimeType: shot.mimeType,
-        data: b64,
-        width: shot.width,
-        height: shot.height,
-      };
+      return { type: 'base64', mimeType: shot.mimeType, data: b64, width: shot.width, height: shot.height };
     }
     case 'browser_extract_text':
       return browser.extractText();

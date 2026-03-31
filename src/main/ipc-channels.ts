@@ -98,6 +98,8 @@ export const IPC = {
   // Browser sessions
   BROWSER_LIST_SESSIONS: 'browser:list-sessions',
   BROWSER_CLEAR_SESSION: 'browser:clear-session',
+  // Switch the visible browser panel to the tab owned by this conversation.
+  BROWSER_FOCUS_CONVERSATION: 'browser:focus-conversation',
   // Browser extensions
   BROWSER_EXT_LIST: 'browser:ext:list',
   BROWSER_EXT_INSTALL: 'browser:ext:install',

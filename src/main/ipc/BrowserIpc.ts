@@ -41,6 +41,8 @@ export function registerBrowserIpc(browserService: ElectronBrowserService): void
   ipcMain.handle(IPC.BROWSER_SHOW, () => browserService.show());
   ipcMain.handle(IPC.BROWSER_LIST_SESSIONS, () => browserService.listSessions());
   ipcMain.handle(IPC.BROWSER_CLEAR_SESSION, (_e, domain: string) => browserService.clearSession(domain));
+  ipcMain.handle(IPC.BROWSER_FOCUS_CONVERSATION, (_e, conversationId: string) =>
+    browserService.focusConversation(conversationId));
 
   // ── Browser events ──────────────────────────────────────────────────────────
   browserService.on('urlChanged', (url) => sendToRenderer(IPC_EVENTS.BROWSER_URL_CHANGED, url));

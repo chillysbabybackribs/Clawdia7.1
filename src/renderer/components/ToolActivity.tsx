@@ -10,6 +10,7 @@ interface ToolActivityProps {
   streamMap?: ToolStreamMap;
   messageId?: string;
   onRateTool?: (toolId: string, rating: 'up' | 'down' | null, note?: string) => void;
+  isStreaming?: boolean;
 }
 
 const TOOL_DISPLAY_NAMES: Record<string, string> = {
@@ -265,17 +266,16 @@ function ExpandableRow({
 }
 
 function ToolBlock({ tool }: { tool: ToolCall }) {
-  const [collapsed, setCollapsed] = useState(true);
+  const [open, setOpen] = useState(false);
 
   const displayName = getDisplayName(tool.name);
   const hasCard = !!(tool.input || tool.output);
   const isRunning = tool.status === 'running';
+  const isError = tool.status === 'error';
 
-  const statusColor = isRunning
-    ? 'bg-amber-400'
-    : tool.status === 'error'
-      ? 'bg-red-400'
-      : 'bg-emerald-400';
+  // Descriptive label: prefer detail (e.g. "Reading: /path/to/file.ts"),
+  // fall back to the human-readable display name.
+  const label = tool.detail?.trim() || displayName;
 
   const outputLines = tool.output?.split('\n') ?? [];
   const outputValue = outputLines.length > OUTPUT_LINE_LIMIT
@@ -283,29 +283,49 @@ function ToolBlock({ tool }: { tool: ToolCall }) {
     : tool.output;
 
   return (
-    <div className="flex flex-col gap-1.5">
-      {/* Header */}
+    <div className="flex flex-col">
       <button
-        onClick={() => hasCard && setCollapsed(c => !c)}
-        className={`flex items-center gap-2 text-left ${hasCard ? 'cursor-pointer' : 'cursor-default'}`}
+        onClick={() => hasCard && setOpen(o => !o)}
+        className={`group flex items-center gap-2 py-[3px] text-left w-full ${hasCard ? 'cursor-pointer' : 'cursor-default'}`}
       >
-        <span className={`w-2 h-2 rounded-full flex-shrink-0 ${statusColor} ${isRunning ? 'animate-pulse' : ''}`} />
-        <span className="text-[13px] font-semibold text-text-primary">{displayName}</span>
-        {hasCard && (
-          <span className="flex-shrink-0 text-[10px] text-text-muted">
-            {collapsed ? '▸' : '▾'}
+        {/* Status icon */}
+        {isRunning ? (
+          <span className="w-3.5 h-3.5 flex-shrink-0 flex items-center justify-center">
+            <span className="w-2 h-2 rounded-full bg-amber-400/70 animate-pulse" />
+          </span>
+        ) : isError ? (
+          <span className="w-3.5 h-3.5 flex-shrink-0 flex items-center justify-center text-red-400/70">
+            <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+          </span>
+        ) : (
+          <span className="w-3.5 h-3.5 flex-shrink-0 flex items-center justify-center text-emerald-400/60">
+            <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
           </span>
         )}
+
+        {/* Descriptive label */}
+        <span className={`flex-1 min-w-0 text-[12.5px] truncate ${isError ? 'text-red-400/80' : isRunning ? 'text-text-secondary' : 'text-text-tertiary'}`}>
+          {label}
+        </span>
+
+        {/* Duration */}
         {tool.durationMs != null && tool.durationMs > 0 && (
-          <span className="text-[11px] text-text-muted ml-auto flex-shrink-0">
+          <span className="flex-shrink-0 text-[11px] text-text-muted/60 mr-1">
             {tool.durationMs < 1000 ? `${tool.durationMs}ms` : `${(tool.durationMs / 1000).toFixed(1)}s`}
+          </span>
+        )}
+
+        {/* Expand chevron — only visible when there's a card */}
+        {hasCard && (
+          <span className="flex-shrink-0 text-[10px] text-text-muted/50 group-hover:text-text-muted transition-colors">
+            {open ? '▾' : '▸'}
           </span>
         )}
       </button>
 
-      {/* Expandable IN/OUT Card */}
-      {hasCard && !collapsed && (
-        <div className="ml-4 rounded-lg border border-white/[0.06] bg-white/[0.02] overflow-hidden">
+      {/* Expandable IN/OUT card */}
+      {hasCard && open && (
+        <div className="ml-5 mt-1 mb-1 rounded-lg border border-white/[0.06] bg-white/[0.02] overflow-hidden">
           {tool.input && (
             <ExpandableRow label="IN" tool={tool} value={tool.input} />
           )}
@@ -321,12 +341,66 @@ function ToolBlock({ tool }: { tool: ToolCall }) {
   );
 }
 
-export default function ToolActivity({ tools }: ToolActivityProps) {
-  if (tools.length === 0) return null;
+// How many of the most-recent tool rows to show during streaming.
+const VISIBLE_TAIL = 5;
+
+// ── Finalized summary: shown after streaming ends ────────────────────────────
+
+function ToolSummary({ tools }: { tools: ToolCall[] }) {
+  const [open, setOpen] = useState(false);
+  const errorCount = tools.filter(t => t.status === 'error').length;
+  const label = `${tools.length} tool call${tools.length === 1 ? '' : 's'}`;
 
   return (
-    <div className="flex flex-col gap-3">
-      {tools.map(tool => (
+    <div className="flex flex-col">
+      <button
+        onClick={() => setOpen(o => !o)}
+        className="group flex items-center gap-2 py-[3px] text-left w-full cursor-pointer"
+      >
+        {/* Icon */}
+        {errorCount > 0 ? (
+          <span className="w-3.5 h-3.5 flex-shrink-0 flex items-center justify-center text-red-400/60">
+            <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+          </span>
+        ) : (
+          <span className="w-3.5 h-3.5 flex-shrink-0 flex items-center justify-center text-emerald-400/50">
+            <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
+          </span>
+        )}
+        <span className="flex-1 text-[12px] text-text-muted/70">
+          {label}{errorCount > 0 ? ` · ${errorCount} error${errorCount === 1 ? '' : 's'}` : ''}
+        </span>
+        <span className="flex-shrink-0 text-[10px] text-text-muted/40 group-hover:text-text-muted/70 transition-colors">
+          {open ? '▾' : '▸'}
+        </span>
+      </button>
+
+      {open && (
+        <div className="ml-5 mt-1 mb-1 rounded-lg border border-white/[0.06] bg-white/[0.02] overflow-hidden py-1 px-2 flex flex-col">
+          {tools.map(tool => (
+            <ToolBlock key={tool.id} tool={tool} />
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ── Main export ──────────────────────────────────────────────────────────────
+
+export default function ToolActivity({ tools, isStreaming }: ToolActivityProps) {
+  if (tools.length === 0) return null;
+
+  // After streaming ends: collapse everything into a single summary row.
+  if (!isStreaming) {
+    return <ToolSummary tools={tools} />;
+  }
+
+  // During streaming: show only the most recent VISIBLE_TAIL tool calls, scrollable.
+  const visibleTools = tools.slice(-VISIBLE_TAIL);
+  return (
+    <div className="overflow-y-auto max-h-[140px] flex flex-col gap-0.5 pr-1" style={{ scrollbarWidth: 'thin', scrollbarColor: 'rgba(255,255,255,0.12) transparent' }}>
+      {visibleTools.map(tool => (
         <ToolBlock key={tool.id} tool={tool} />
       ))}
     </div>

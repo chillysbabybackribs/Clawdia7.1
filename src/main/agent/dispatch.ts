@@ -195,11 +195,11 @@ async function routeToolExecution(
   }
 
   if (BROWSER_TOOL_NAMES.has(block.name)) {
-    const { browserService } = ctx.options;
+    const { browserService, conversationId } = ctx.options;
     if (!browserService) {
       return JSON.stringify({ ok: false, error: 'Browser not available' });
     }
-    const output = await executeBrowserTool(block.name, block.input, browserService);
+    const output = await executeBrowserTool(block.name, block.input, browserService, conversationId);
     return truncateBrowserResult(JSON.stringify(output));
   }
 

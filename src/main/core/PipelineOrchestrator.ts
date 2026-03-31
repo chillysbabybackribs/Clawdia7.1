@@ -359,6 +359,7 @@ export class PipelineOrchestrator {
       provider: opts.provider,
       apiKey: opts.apiKey,
       model: opts.model,
+      conversationId: opts.conversationId,
       signal: opts.signal,
       unrestrictedMode: opts.unrestrictedMode,
       browserService: opts.browserService,

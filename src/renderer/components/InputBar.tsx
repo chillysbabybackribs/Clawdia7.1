@@ -27,6 +27,9 @@ interface InputBarProps {
   onChatZoomReset?: () => void;
 }
 
+const LARGE_PASTE_CHAR_THRESHOLD = 2000;
+const LARGE_PASTE_LINE_THRESHOLD = 50;
+
 export default function InputBar({
   onSend,
   isStreaming,
@@ -207,6 +210,54 @@ export default function InputBar({
     fileInputRef.current?.click();
   }, []);
 
+  const handlePaste = useCallback(async (e: React.ClipboardEvent<HTMLElement>) => {
+    const items = Array.from(e.clipboardData.items);
+    const imageItems = items.filter(item => item.type.startsWith('image/'));
+
+    // Handle image pastes as before
+    if (imageItems.length > 0) {
+      e.preventDefault();
+      const nextAttachments = await Promise.all(imageItems.map(async (item) => {
+        const file = item.getAsFile();
+        if (!file) return null;
+        const dataUrl = await readFileAsDataUrl(file);
+        const ext = item.type.replace('image/', '') || 'png';
+        const attachment: MessageAttachment = {
+          id: `paste-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+          kind: 'image',
+          name: `pasted-image.${ext}`,
+          size: file.size,
+          mimeType: item.type,
+          dataUrl,
+        };
+        return attachment;
+      }));
+      const valid = nextAttachments.filter((a): a is MessageAttachment => a !== null);
+      if (valid.length > 0) setAttachments(prev => [...prev, ...valid]);
+      return;
+    }
+
+    // Check for large plain-text paste
+    const pastedText = e.clipboardData.getData('text/plain');
+    if (!pastedText) return;
+
+    const lineCount = pastedText.split('\n').length;
+    const isLarge = pastedText.length > LARGE_PASTE_CHAR_THRESHOLD || lineCount > LARGE_PASTE_LINE_THRESHOLD;
+
+    if (isLarge) {
+      e.preventDefault();
+      const attachment: MessageAttachment = {
+        id: `paste-txt-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+        kind: 'file',
+        name: 'Pasted text.txt',
+        size: new Blob([pastedText]).size,
+        mimeType: 'text/plain',
+        textContent: pastedText,
+      };
+      setAttachments(prev => [...prev, attachment]);
+    }
+  }, [readFileAsDataUrl]);
+
   const handleScreenshotCapture = useCallback((dataUrl: string) => {
     setScreenshotActive(false);
     const attachment: MessageAttachment = {
@@ -318,6 +369,7 @@ export default function InputBar({
         borderTop: '2px solid rgba(255,255,255,0.07)',
         boxShadow: 'inset 0 2px 8px rgba(0,0,0,0.3)',
       }}
+      onPaste={handlePaste}
     >
       {!isStreaming && (
         <div className="no-drag flex items-center pb-2 px-1 relative">

@@ -126,6 +126,7 @@ export function registerAgentIpc(
       const sessionMessages = sessionManager.getOrCreateSession(convId);
       await agentLoop(goal, sessionMessages, {
         provider, apiKey, model, runId,
+        conversationId: convId,
         signal: abort.signal,
         browserService,
         unrestrictedMode: settings.unrestrictedMode,
@@ -160,6 +161,7 @@ export function registerAgentIpc(
       const sessionMessages = sessionManager.getOrCreateSession(convId);
       await agentLoop(goal, sessionMessages, {
         provider, apiKey, model, runId,
+        conversationId: convId,
         signal: abort.signal,
         browserService,
         unrestrictedMode: settings.unrestrictedMode,
@@ -192,6 +194,7 @@ export function registerAgentIpc(
       const sessionMessages = sessionManager.getOrCreateSession(convId);
       const result = await agentLoop(testGoal, sessionMessages, {
         provider, apiKey, model, runId,
+        conversationId: convId,
         signal: abort.signal,
         browserService,
         unrestrictedMode: settings.unrestrictedMode,

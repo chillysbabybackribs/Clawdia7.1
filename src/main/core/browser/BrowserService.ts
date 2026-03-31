@@ -132,4 +132,21 @@ export interface BrowserService {
   listSessions(): Promise<string[]>;
   clearSession(domain: string): Promise<void>;
   on<K extends keyof BrowserServiceEvents>(event: K, listener: BrowserServiceEvents[K]): () => void;
+
+  // ── Conversation-scoped tab ownership ────────────────────────────────────────
+  // Each conversation that uses browser tools gets its own dedicated tab.
+  // Agent tool calls must go through getConvTab(conversationId) to retrieve
+  // the tab ID, then use switchTab + the operation, or use the scoped helpers
+  // that handle routing automatically via withConvId.
+  //
+  // getOrAssignTab: idempotently creates and returns a tab ID for the given
+  //   conversation. Subsequent calls return the same tab ID until it is released.
+  // releaseTab: removes the conversation→tab mapping and closes the tab.
+  //   Called on conversation deletion or on explicit cleanup.
+  // focusConversation: activates the conversation's owned tab as the visible
+  //   browser panel. Creates the tab lazily if it has never been used. This is
+  //   a UI-only operation — it does not affect execution routing.
+  getOrAssignTab(conversationId: string): Promise<string>;
+  releaseTab(conversationId: string): Promise<void>;
+  focusConversation(conversationId: string): Promise<void>;
 }

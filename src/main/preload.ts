@@ -79,6 +79,7 @@ try {
     show: () => ipcRenderer.invoke(IPC.BROWSER_SHOW),
     listSessions: () => ipcRenderer.invoke(IPC.BROWSER_LIST_SESSIONS),
     clearSession: (domain: string) => ipcRenderer.invoke(IPC.BROWSER_CLEAR_SESSION, domain),
+    focusConversation: (conversationId: string) => ipcRenderer.invoke(IPC.BROWSER_FOCUS_CONVERSATION, conversationId),
     extensions: {
       list: () => ipcRenderer.invoke(IPC.BROWSER_EXT_LIST),
       install: (dirPath?: string) => ipcRenderer.invoke(IPC.BROWSER_EXT_INSTALL, dirPath),

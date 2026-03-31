@@ -304,6 +304,8 @@ export function registerChatIpc(
     deleteConversation(id);
     sessionManager.deleteSession(id);
     if (sessionManager.activeConversationId === id) sessionManager.activeConversationId = null;
+    // Release the conversation-scoped browser tab so it doesn't persist after deletion.
+    browserService.releaseTab(id).catch(() => {});
   });
 
   ipcMain.handle(IPC.CHAT_OPEN_ATTACHMENT, (_e, filePath: string) => {
@@ -349,14 +351,27 @@ export function registerChatIpc(
     if (conv?.mode === 'claude_terminal') {
       sendEvent(IPC_EVENTS.CHAT_THINKING, { thought: 'Claude Code is thinking…', conversationId: id });
       appendPromptTail(id, formatExternalPromptForTerminal('Claude Code', text));
+
+      // Load persisted session id so resume survives app restarts.
+      const persistedSessionId = conv.claude_code_session_id ?? null;
+
       try {
-        const { finalText } = await runClaudeCode({
+        const { finalText, sessionId: newSessionId } = await runClaudeCode({
           conversationId: id,
           prompt: text,
+          attachments,
           skipPermissions: loadSettings().unrestrictedMode,
+          persistedSessionId,
           onText: (delta) => sendEvent(IPC_EVENTS.CHAT_STREAM_TEXT, { delta, conversationId: id }),
+          onToolActivity: (activity) => sendEvent(IPC_EVENTS.CHAT_TOOL_ACTIVITY, { ...activity, conversationId: id }),
         });
         sendEvent(IPC_EVENTS.CHAT_STREAM_END, { ok: true, conversationId: id });
+
+        // Persist the session id durably so the next run (even after restart) can resume.
+        if (newSessionId && newSessionId !== persistedSessionId) {
+          updateConversation(id, { claude_code_session_id: newSessionId });
+        }
+
         if (finalText) {
           const assistantMsgId = `msg-a-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
           const assistantMsgTs = new Date().toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
@@ -368,6 +383,14 @@ export function registerChatIpc(
         return { response: finalText, conversationId: id };
       } catch (e: unknown) {
         const err = e instanceof Error ? e : new Error(String(e));
+
+        // If we had a persisted session id and the run failed, the session may
+        // be stale/invalid.  Clear it so the next run starts fresh rather than
+        // repeatedly failing on the same bad id.
+        if (persistedSessionId) {
+          updateConversation(id, { claude_code_session_id: null });
+        }
+
         sendEvent(IPC_EVENTS.CHAT_STREAM_END, { ok: false, error: err.message, conversationId: id });
         return { response: '', error: err.message, conversationId: id };
       }
@@ -438,7 +461,7 @@ export function registerChatIpc(
           provider: settings_provider,
           apiKey,
           model,
-          conversationId: id,
+          conversationId: id,   // already present — also routed to worker loops below
           signal: convAgent.abort.signal,
           browserService,
           unrestrictedMode: settings.unrestrictedMode,
@@ -488,6 +511,7 @@ export function registerChatIpc(
           apiKey,
           model,
           runId,
+          conversationId: id,
           signal: convAgent.abort.signal,
           forcedProfile: continuationForcedProfile,
           unrestrictedMode: settings.unrestrictedMode,

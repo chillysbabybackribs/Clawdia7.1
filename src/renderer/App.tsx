@@ -252,6 +252,17 @@ export default function App() {
     }
   }, [rightPaneMode]);
 
+  // When the active conversation tab changes, switch the browser panel to that
+  // conversation's owned browser tab. This is a UI-only switch — it does not
+  // affect execution routing for any background conversations.
+  useEffect(() => {
+    if (rightPaneMode !== 'browser') return;
+    const activeTab = tabs.find(t => t.id === activeTabId);
+    const convId = activeTab?.conversationId ?? null;
+    if (!convId) return;
+    (window as any).clawdia?.browser?.focusConversation?.(convId);
+  }, [activeTabId, tabs, rightPaneMode]);
+
   // Track which conversations have a running agent so TabStrip can show indicators.
   useEffect(() => {
     const api = (window as any).clawdia;
