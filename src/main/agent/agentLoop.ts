@@ -1,5 +1,6 @@
 // src/main/agent/agentLoop.ts
 import * as fs from 'fs';
+import Anthropic from '@anthropic-ai/sdk';
 import { classify } from './classify';
 import { buildStaticPrompt, buildDynamicPrompt } from './promptBuilder';
 import { createLoopControl, removeLoopControl } from './loopControl';
@@ -18,6 +19,7 @@ import { getMemoryContext } from '../db/memory';
 import { checkBudget } from './spending-budget';
 import { buildPromptComposition } from '../skills/promptComposition';
 import { buildRecoveryGuidanceMessage, detectRecoveryFromTurn, detectStall as detectRecoveryStall } from './recoveryGuidance';
+import { loadSettings } from '../settingsStore';
 
 const MAX_ITERATIONS = 50;
 // Maximum wall-clock time for a single agent run (5 minutes).
@@ -87,6 +89,103 @@ function trimMessageHistory(messages: any[]): void {
       messages.splice(1, 1);
     }
   }
+}
+
+// ── Context pressure + LLM-based compression ─────────────────────────────────
+// Threshold at which we recommend compression (75%) and force it (90%).
+const COMPRESS_WARN_PCT = 0.75;
+const COMPRESS_FORCE_PCT = 0.90;
+
+// Collapse tool result messages down to a 1-line outcome summary.
+// This is a zero-cost structural pre-pass that reduces input tokens to the
+// Haiku summarizer by ~60-70% before we ever make an LLM call.
+function collapseToolResults(messages: any[]): any[] {
+  return messages.map((msg) => {
+    if (
+      msg?.role === 'user' &&
+      Array.isArray(msg.content) &&
+      msg.content.some((b: any) => b?.type === 'tool_result')
+    ) {
+      return {
+        ...msg,
+        content: msg.content.map((b: any) => {
+          if (b?.type !== 'tool_result') return b;
+          const raw: string = typeof b.content === 'string' ? b.content : JSON.stringify(b.content ?? '');
+          const firstLine = raw.replace(/\s+/g, ' ').trim().slice(0, 160);
+          return { ...b, content: firstLine || '[no result]' };
+        }),
+      };
+    }
+    return msg;
+  });
+}
+
+// Summarize old messages using Haiku. Returns a summary string or null on failure.
+async function summarizeWithHaiku(apiKey: string, messagesToSummarize: any[]): Promise<string | null> {
+  try {
+    const client = new Anthropic({ apiKey });
+    const summaryPrompt = messagesToSummarize
+      .map((m) => {
+        const role = m.role === 'assistant' ? 'Assistant' : 'User';
+        const content = typeof m.content === 'string'
+          ? m.content
+          : Array.isArray(m.content)
+            ? m.content.map((b: any) => b?.text ?? b?.content ?? '').join(' ')
+            : '';
+        return `${role}: ${content.slice(0, 400)}`;
+      })
+      .join('\n\n');
+
+    const response = await client.messages.create({
+      model: 'claude-haiku-4-5-20251001',
+      max_tokens: 600,
+      system: 'You are a conversation compressor. Produce a concise factual summary of the conversation history provided, preserving key decisions, findings, errors encountered, and the current state of progress. Be specific — include tool names, URLs, file paths, or values that were discovered. Omit filler and meta-commentary.',
+      messages: [{ role: 'user', content: `Summarize this conversation history:\n\n${summaryPrompt}` }],
+    });
+    const text = (response.content.find((b) => b.type === 'text') as any)?.text ?? null;
+    return text;
+  } catch (err) {
+    console.warn('[agentLoop] Haiku summarization failed:', err);
+    return null;
+  }
+}
+
+// Full compression: structural pre-pass then Haiku summary of old messages.
+// Replaces the dropped portion with a [Context Summary] assistant message.
+// Always preserves messages[0] (original task) and the PROTECTED_TAIL recent messages.
+export async function compressConversationHistory(
+  messages: any[],
+  apiKey: string,
+): Promise<{ compressed: boolean; savedTokens: number; reason?: string }> {
+  const before = estimateTokens(messages);
+
+  // Need at least: anchor (1) + something to summarize (1+) + protected tail (6)
+  if (messages.length <= PROTECTED_TAIL + 1) {
+    return { compressed: false, savedTokens: 0, reason: 'not_enough_messages' };
+  }
+
+  // Separate into: anchor + old middle + protected tail
+  const anchor = messages[0];
+  const tail = messages.slice(-PROTECTED_TAIL);
+  const middle = messages.slice(1, messages.length - PROTECTED_TAIL);
+
+  if (middle.length === 0) return { compressed: false, savedTokens: 0, reason: 'not_enough_messages' };
+
+  // Structural pre-pass: collapse tool results in the middle section
+  const collapsed = collapseToolResults(middle);
+
+  // Haiku summary of the (now smaller) middle
+  const summary = await summarizeWithHaiku(apiKey, collapsed);
+  if (!summary) return { compressed: false, savedTokens: 0 };
+
+  const summaryMsg = {
+    role: 'assistant' as const,
+    content: `[Context Summary — compressed ${middle.length} messages]\n${summary}`,
+  };
+
+  messages.splice(0, messages.length, anchor, summaryMsg, ...tail);
+  const after = estimateTokens(messages);
+  return { compressed: true, savedTokens: Math.max(0, before - after) };
 }
 
 function normalizeHistoryForProvider(messages: any[], provider: LoopOptions['provider'], caller: string): void {
@@ -166,7 +265,8 @@ export async function agentLoop(
   });
 
   // 2. Build static prompt (once per run)
-  const baseStaticPrompt = buildStaticPrompt(profile, options.unrestrictedMode ?? false, promptComposition.promptBlock);
+  const baseStaticPrompt = buildStaticPrompt(profile, options.unrestrictedMode ?? false, promptComposition.promptBlock, userMessage);
+  console.log(`[pipeline:direct] agentLoop starting — toolGroup=${profile.toolGroup} model=${options.model} runId=${runId}`);
   const staticPrompt = profile.specialMode === 'app_mapping'
     ? await buildAppMappingSystemPrompt(baseStaticPrompt, {
         appName: profile.mappingTarget || 'target app',
@@ -374,7 +474,20 @@ export async function agentLoop(
 
       // Execute tools in parallel
       const dispatchResult = await dispatch(toolBlocks, ctx);
-      const results = dispatchResult.results;
+      // Annotate each tool result with measured elapsed_ms so the model can
+      // report real numeric values without fabricating or using placeholders.
+      const results = dispatchResult.results.map((raw, idx) => {
+        const ms = dispatchResult.elapsedMs[idx];
+        if (typeof ms !== 'number') return raw;
+        try {
+          const parsed = JSON.parse(raw);
+          parsed.elapsed_ms = ms;
+          return JSON.stringify(parsed);
+        } catch {
+          // Non-JSON result (e.g. plain text from file_edit) — wrap it
+          return JSON.stringify({ result: raw, elapsed_ms: ms });
+        }
+      });
       const recoveryKey = detectRecoveryFromTurn(toolBlocks, results) ?? detectRecoveryStall(ctx.allToolCalls);
 
       // Accumulate any tools discovered via search_tools so they stay in the
@@ -414,6 +527,24 @@ export async function agentLoop(
 
       // Trim history to prevent context blowup, then re-validate protocol
       trimMessageHistory(messages);
+
+      // Emit context pressure signal to UI so the user can see how full the
+      // context window is and optionally trigger manual compression.
+      const usedTokens = estimateTokens(messages);
+      const pressurePct = usedTokens / TOKEN_BUDGET;
+      options.onContextPressure?.({ used: usedTokens, budget: TOKEN_BUDGET, pct: pressurePct });
+
+      // Auto-compress at 90% budget using Haiku summarization.
+      // Always uses the Anthropic key (Haiku is Anthropic-only) regardless of
+      // which provider the active run is using.
+      if (pressurePct >= COMPRESS_FORCE_PCT) {
+        const anthropicKey = loadSettings().providerKeys['anthropic']?.trim();
+        if (anthropicKey) {
+          options.onThinking?.('Compressing context…');
+          await compressConversationHistory(messages, anthropicKey);
+        }
+      }
+
       normalizeHistoryForProvider(messages, options.provider, `agentLoop.postTrim.${i + 1}`);
 
       // Browser completion heuristic: enough page content extracted — synthesize
@@ -436,12 +567,23 @@ export async function agentLoop(
 
     // Post-loop verification
     const issue = verifyOutcomes(finalText, ctx.allToolCalls);
+    if (issue) {
+      console.log(`[pipeline:verify] Outcome mismatch detected — ${issue.issue}`);
+    }
     if (issue && !control.signal.aborted) {
       options.onThinking?.('Verifying…');
       messages.push({ role: 'user', content: `Your response said: "${issue.issue}". ${issue.context} Please correct this.` });
       normalizeHistoryForProvider(messages, options.provider, 'agentLoop.verify');
       const { text } = await streamLLM(messages, staticPrompt, '', profile, { ...options, signal: control.signal });
       if (text) finalText = text;
+    }
+
+    // Push the final assistant response into the shared session array so the
+    // next send sees a complete, valid conversation history. Without this the
+    // session ends on a trailing user/tool_result message and the Anthropic
+    // protocol repair strips the dangling turn, breaking multi-turn context.
+    if (finalText && !control.signal.aborted) {
+      messages.push({ role: 'assistant', content: finalText });
     }
 
     // Cache clean text-only final responses for reuse within TTL.
@@ -524,10 +666,14 @@ function buildUserMessage(
   attachments: MessageAttachment[] | undefined,
   provider: string,
 ): any {
+  // Anthropic rejects messages with empty string content. Use a zero-width
+  // space as a minimal placeholder so the message passes protocol validation.
+  const safeText = text || '\u200b';
+
   if (!attachments?.length) {
     return provider === 'gemini'
-      ? { role: 'user', parts: [{ text }] }
-      : { role: 'user', content: text };
+      ? { role: 'user', parts: [{ text: safeText }] }
+      : { role: 'user', content: safeText };
   }
 
   if (provider === 'anthropic') {
@@ -549,7 +695,10 @@ function buildUserMessage(
         blocks.push({ type: 'text', text: `[Attachment: ${a.name}]\n${a.textContent}` });
       }
     }
-    blocks.push({ type: 'text', text });
+    if (text) blocks.push({ type: 'text', text });
+    // Anthropic requires at least one content block. If no attachment produced a block
+    // and the user sent no text, fall back to the safe placeholder.
+    if (blocks.length === 0) blocks.push({ type: 'text', text: safeText });
     return { role: 'user', content: blocks };
   }
 
@@ -569,12 +718,12 @@ function buildUserMessage(
         parts.push({ type: 'text', text: `[Attachment: ${a.name}]\n${a.textContent}` });
       }
     }
-    parts.push({ type: 'text', text });
+    if (text) parts.push({ type: 'text', text });
     return { role: 'user', content: parts };
   }
 
   // Gemini: streamGeminiLLM reads sessionMessages[last].parts
-  const parts: any[] = [{ text }];
+  const parts: any[] = [{ text: safeText }];
   for (const a of attachments) {
     if (a.kind === 'image' && (a.dataUrl || a.path)) {
       let base64 = '';

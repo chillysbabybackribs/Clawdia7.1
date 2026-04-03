@@ -15,9 +15,7 @@ import InputBar from './InputBar';
 import ToolActivityComponent from './ToolActivity';
 import { type ToolStreamMap } from './ToolActivity';
 import MarkdownRenderer from './MarkdownRenderer';
-import SwarmPanel from './SwarmPanel';
 import TabStrip from './TabStrip';
-import PipelineBlock from './PipelineBlock';
 import HistoryBrowser from './HistoryBrowser';
 import CapabilityHelperBlock from './capability-helper/CapabilityHelperBlock';
 import { useCapabilityHelper } from '../helpers/capabilityHelper/useCapabilityHelper';
@@ -25,8 +23,6 @@ import TaskHistoryPanel from './TaskHistoryPanel';
 
 type StreamEndPayload = {
   ok?: boolean;
-  isPipelineStart?: boolean;
-  pipelineMessageId?: string;
   error?: string;
   cancelled?: boolean;
 };
@@ -42,7 +38,13 @@ interface ChatPanelProps {
   onShowBrowser: () => void;
   terminalOpen: boolean;
   onToggleTerminal: () => void;
+  docsOpen: boolean;
+  onToggleDocs: () => void;
   onOpenSettings: () => void;
+  filesOpen: boolean;
+  onToggleFiles: () => void;
+  extensionsOpen: boolean;
+  onToggleExtensions: () => void;
   onOpenPendingApproval?: (processId: string) => void;
   loadConversationId?: string | null;
   replayBuffer?: Array<{ type: string; data: any }> | null;
@@ -82,7 +84,7 @@ function ApprovalBanner({
             {approval.actionType} · {approval.target}
           </div>
           {isWorkflowPlan && planText && (
-            <div className="mt-3 rounded-xl border border-white/[0.04] bg-[#0f0f13] px-4 py-3">
+            <div className="mt-3 rounded-xl border border-white/[0.04] bg-[#0a0a0a] px-4 py-3">
               <MarkdownRenderer content={planText} />
             </div>
           )}
@@ -532,7 +534,7 @@ function renderTranscriptTokens(line: string, keyPrefix: string) {
     }
     if (token.kind === 'path') {
       return (
-        <span key={`${keyPrefix}-path-${idx}`} className="font-mono text-[0.95em] text-[#9fd3ff]">
+        <span key={`${keyPrefix}-path-${idx}`} className="font-mono text-[0.95em] text-[#b0b0b0]">
           {token.text}
         </span>
       );
@@ -765,29 +767,37 @@ const AssistantMessage = React.memo(function AssistantMessage({
     }
 
     return (
-      <div className={`flex justify-start animate-slide-up group ${fillAvailableSpace ? 'flex-1' : ''}`} style={{ minHeight: fillAvailableSpace ? '12rem' : '0', transition: 'min-height 0.25s ease-out' }}>
-        <div className="w-full px-1 py-2 text-text-primary flex flex-col gap-3">
-          {groups.map(group => {
-            if (group.kind === 'text') {
+      <div className="flex justify-start group">
+        <div className={`w-full py-2 text-text-primary flex flex-col stream-response-container ${message.isStreaming ? 'is-streaming' : 'is-complete'}`}>
+          {/* Structured feed content */}
+          <div className="flex flex-col gap-3 px-1">
+            {groups.map(group => {
+              if (group.kind === 'text') {
+                return (
+                  <SourceFeedBlock key={group.key} source={group.source}>
+                    <MarkdownRenderer content={group.text} isStreaming={group.streaming} />
+                  </SourceFeedBlock>
+                );
+              }
+              const groupIdx = groups.indexOf(group);
+              const hasTextAfter = groups.slice(groupIdx + 1).some(g => g.kind === 'text');
               return (
-                <SourceFeedBlock key={group.key} source={group.source}>
-                  <MarkdownRenderer content={group.text} isStreaming={group.streaming} />
+                <SourceFeedBlock key={group.lastToolId} source={group.source}>
+                  <ToolActivityComponent
+                    tools={group.tools}
+                    isStreaming={!!message.isStreaming}
+                    hasTextAfter={hasTextAfter}
+                  />
                 </SourceFeedBlock>
               );
-            }
-            return (
-              <SourceFeedBlock key={group.lastToolId} source={group.source}>
-                <ToolActivityComponent
-                  tools={group.tools}
-                  isStreaming={!!message.isStreaming}
-                />
-              </SourceFeedBlock>
-            );
-          })}
-          {!!message.fileRefs?.length && <FileRefList fileRefs={message.fileRefs} />}
-          {!!message.linkPreviews?.length && <LinkPreviewList linkPreviews={message.linkPreviews} />}
+            })}
+          </div>
+          {!!message.fileRefs?.length && <div className="px-1"><FileRefList fileRefs={message.fileRefs} /></div>}
+          {!!message.linkPreviews?.length && <div className="px-1"><LinkPreviewList linkPreviews={message.linkPreviews} /></div>}
+          {/* Scroll anchor — always present at end of streaming content */}
+          <div className="stream-scroll-anchor h-0" aria-hidden />
           {!message.isStreaming && copyText && (
-            <div className="mt-1 flex items-center justify-end gap-1">
+            <div className="mt-1 px-1 flex items-center justify-end gap-1">
               <CopyButton text={copyText} />
               <span className="text-[11px] text-text-secondary/70">{message.timestamp}</span>
             </div>
@@ -804,7 +814,7 @@ const AssistantMessage = React.memo(function AssistantMessage({
     return <TerminalTranscriptCard message={message} showStreamingStatus={false} onOpenTerminal={onOpenTerminal} />;
   }
   return (
-    <div className={`flex justify-start animate-slide-up group ${fillAvailableSpace ? 'flex-1 min-h-[12rem]' : ''}`}>
+    <div className="flex justify-start group">
       <div className="w-full px-1 py-2 text-text-primary">
         {hasContent && <MarkdownRenderer content={message.content} isStreaming={false} />}
         {!!message.toolCalls?.length && (
@@ -842,23 +852,29 @@ const UserMessage = React.memo(function UserMessage({
   retryDisabled?: boolean;
 }) {
   return (
-    <div className="flex flex-col gap-1 animate-slide-up">
-      <div className="w-full rounded-xl px-4 py-3 bg-white/[0.04] border border-white/[0.06] text-white">
-        {message.attachments && message.attachments.length > 0 && (
-          <div className={message.content.trim() ? 'mb-3' : ''}>
-            <AttachmentGallery attachments={message.attachments} />
-          </div>
-        )}
-        {message.content.trim() && <div className="text-[1rem] leading-relaxed whitespace-pre-wrap">{message.content}</div>}
-      </div>
-      <div className="flex items-center justify-end gap-1">
-        {message.content.trim() && (
-          <>
-            <CopyButton text={message.content} alwaysVisible />
-            <RetryButton messageContent={message.content} disabled={retryDisabled} alwaysVisible />
-          </>
-        )}
-        <span className="text-[11px] text-text-secondary/70">{message.timestamp}</span>
+    <div className="flex flex-col gap-1 animate-slide-up group">
+      {message.attachments && message.attachments.length > 0 && (
+        <div className="px-1 pb-1">
+          <AttachmentGallery attachments={message.attachments} />
+        </div>
+      )}
+      {message.content.trim() && (
+        <div
+          className="w-full rounded-xl border px-4 py-3 text-[1rem] leading-relaxed whitespace-pre-wrap text-white/90"
+          style={{
+            background: 'rgba(255,255,255,0.05)',
+            borderColor: 'rgba(255,255,255,0.14)',
+          }}
+        >
+          {message.content}
+        </div>
+      )}
+      <div className="flex items-center justify-between px-1 pt-0.5">
+        <div className="flex items-center gap-1">
+          <CopyButton text={message.content} />
+          <RetryButton messageContent={message.content} disabled={retryDisabled} />
+        </div>
+        <span className="text-[11px] text-text-secondary/40">{message.timestamp}</span>
       </div>
     </div>
   );
@@ -1159,33 +1175,102 @@ function extractHostname(detail: string): string | null {
   return match ? match[1].replace(/^www\./, '') : null;
 }
 
+// Cycling phrases for each tool — rotate through these to show continuous activity
+const SHIMMER_CYCLES: Record<string, string[]> = {
+  browser_navigate:      ['Navigating…', 'Loading page…', 'Following link…'],
+  browser_click:         ['Clicking…', 'Interacting…', 'Selecting element…'],
+  browser_extract:       ['Extracting content…', 'Parsing page…', 'Reading DOM…'],
+  browser_read:          ['Reading page…', 'Scanning content…', 'Processing page…'],
+  browser_read_page:     ['Reading page…', 'Scanning content…', 'Processing page…'],
+  browser_type:          ['Typing…', 'Entering text…', 'Filling field…'],
+  browser_batch:         ['Running browser sequence…', 'Automating steps…', 'Executing actions…'],
+  browser_scroll:        ['Scrolling…', 'Moving down page…', 'Browsing…'],
+  browser_screenshot:    ['Capturing screen…', 'Taking screenshot…', 'Snapping view…'],
+  browser_search:        ['Searching web…', 'Looking it up…', 'Querying…'],
+  shell_exec:            ['Running command…', 'Executing…', 'Processing output…'],
+  bash:                  ['Running command…', 'Executing…', 'Processing output…'],
+  file_read:             ['Reading file…', 'Loading content…', 'Parsing file…'],
+  file_write:            ['Writing file…', 'Saving changes…', 'Persisting data…'],
+  file_edit:             ['Editing file…', 'Applying changes…', 'Updating content…'],
+  file_search:           ['Searching files…', 'Scanning codebase…', 'Looking through files…'],
+  file_list_directory:   ['Listing directory…', 'Scanning folder…', 'Checking files…'],
+  directory_tree:        ['Scanning directory…', 'Mapping structure…', 'Exploring folder…'],
+  fs_quote_lookup:       ['Searching files…', 'Scanning codebase…', 'Looking through files…'],
+  fs_folder_summary:     ['Summarising folder…', 'Analysing directory…', 'Mapping files…'],
+  agent_spawn:           ['Spawning agent…', 'Starting subprocess…', 'Delegating task…'],
+  memory_read:           ['Recalling memory…', 'Checking notes…', 'Looking up context…'],
+  memory_store:          ['Saving to memory…', 'Storing context…', 'Updating notes…'],
+  memory_write:          ['Saving to memory…', 'Storing context…', 'Updating notes…'],
+  memory_search:         ['Searching memory…', 'Looking up context…', 'Recalling notes…'],
+  memory_forget:         ['Clearing memory…', 'Removing note…'],
+  gui_interact:          ['Interacting with UI…', 'Clicking element…', 'Driving interface…'],
+  dbus_control:          ['Sending signal…', 'Controlling app…', 'Communicating…'],
+  search_tools:          ['Searching tools…', 'Finding capability…', 'Looking up tool…'],
+};
+
+const WORKING_CYCLE = [
+  'Working…', 'Thinking it through…', 'Processing…',
+  'Analysing…', 'On it…', 'Figuring it out…',
+];
+
 function toolToShimmerLabel(name: string, detail?: string): string {
   if (name === 'browser_navigate') {
     const host = extractHostname(detail ?? '');
     return host ? `Navigating to ${host}…` : 'Navigating…';
   }
-  const labels: Record<string, string> = {
-    browser_click:     'Clicking…',
-    browser_extract:   'Extracting page content…',
-    browser_read:      'Reading page…',
-    browser_type:      'Typing…',
-    browser_batch:     'Running browser sequence…',
-    browser_scroll:    'Scrolling…',
-    shell_exec:        'Running command…',
-    file_read:         'Reading file…',
-    file_write:        'Writing file…',
-    file_edit:         'Editing file…',
-    directory_tree:    'Scanning directory…',
-    fs_quote_lookup:   'Searching files…',
-    fs_folder_summary: 'Summarising folder…',
-    agent_spawn:       'Spawning agent…',
-    memory_read:       'Recalling memory…',
-    memory_write:      'Saving to memory…',
-  };
-  return labels[name] ?? 'Working…';
+  const cycles = SHIMMER_CYCLES[name];
+  if (cycles && cycles.length > 0) return cycles[0];
+  return WORKING_CYCLE[0];
 }
 
 function InlineShimmer({ text, visible }: { text: string; visible: boolean }) {
+  const [displayText, setDisplayText] = useState(text);
+  const [fade, setFade] = useState(true);
+  const cycleIdxRef = useRef(0);
+  const textRef = useRef(text);
+
+  // When the base text changes (new tool started), reset cycling
+  useEffect(() => {
+    if (text !== textRef.current) {
+      textRef.current = text;
+      cycleIdxRef.current = 0;
+      setFade(true);
+      setDisplayText(text);
+    }
+  }, [text]);
+
+  // Cycle through related phrases every 2.5s while visible
+  useEffect(() => {
+    if (!visible || !text) return;
+
+    // Find the cycle group for this text
+    const getCycles = (): string[] => {
+      for (const cycles of Object.values(SHIMMER_CYCLES)) {
+        if (cycles.includes(text) || cycles[0] === text) return cycles;
+      }
+      // Check if it's a "Navigating to X…" variant
+      if (text.startsWith('Navigating to ')) return [text];
+      // fallback to working cycle
+      if (WORKING_CYCLE.includes(text)) return WORKING_CYCLE;
+      return [text];
+    };
+
+    const cycles = getCycles();
+    if (cycles.length <= 1) return;
+
+    const interval = setInterval(() => {
+      // Fade out, swap text, fade in
+      setFade(false);
+      setTimeout(() => {
+        cycleIdxRef.current = (cycleIdxRef.current + 1) % cycles.length;
+        setDisplayText(cycles[cycleIdxRef.current]);
+        setFade(true);
+      }, 200);
+    }, 2500);
+
+    return () => clearInterval(interval);
+  }, [visible, text]);
+
   return (
     <div
       className="flex items-center gap-2 px-5 py-2"
@@ -1200,7 +1285,12 @@ function InlineShimmer({ text, visible }: { text: string; visible: boolean }) {
       }}
     >
       <span className="text-text-secondary text-[14px] flex-shrink-0" aria-hidden>✱</span>
-      <span className="inline-shimmer text-[13px] leading-relaxed line-clamp-1 overflow-hidden text-ellipsis">{text}</span>
+      <span
+        className="inline-shimmer text-[13px] leading-relaxed line-clamp-1 overflow-hidden text-ellipsis"
+        style={{ transition: 'opacity 0.2s ease-in-out', opacity: fade ? 1 : 0 }}
+      >
+        {displayText}
+      </span>
     </div>
   );
 }
@@ -1215,7 +1305,13 @@ export default function ChatPanel({
   onShowBrowser,
   terminalOpen,
   onToggleTerminal,
+  docsOpen,
+  onToggleDocs,
   onOpenSettings,
+  filesOpen,
+  onToggleFiles,
+  extensionsOpen,
+  onToggleExtensions,
   onOpenPendingApproval,
   loadConversationId,
   replayBuffer,
@@ -1235,6 +1331,7 @@ export default function ChatPanel({
   const [messages, setMessages] = useState<Message[]>([]);
   const [isStreaming, setIsStreaming] = useState(false);
   const [isPaused, setIsPaused] = useState(false);
+  const [contextPressure, setContextPressure] = useState<{ used: number; budget: number; pct: number } | null>(null);
   const [shimmerText, setShimmerText] = useState('');
   const [streamMap, setStreamMap] = useState<ToolStreamMap>({});
   const [pendingApprovalRunId, setPendingApprovalRunId] = useState<string | null>(null);
@@ -1248,6 +1345,7 @@ export default function ChatPanel({
   const [isWorkflowPlanStreaming, setIsWorkflowPlanStreaming] = useState(false);
   const [loadedConversationId, setLoadedConversationId] = useState<string | null>(null);
   const [activeStreamMode, setActiveStreamMode] = useState<'chat' | 'claude_terminal' | 'codex_terminal' | 'concurrent'>('chat');
+  const [concurrentPhase, setConcurrentPhase] = useState<'idle' | 'planning' | 'executing' | 'synthesizing' | 'done'>('idle');
   const [chatZoom, setChatZoom] = useState(DEFAULT_CHAT_ZOOM);
   const activeStreamModeRef = useRef<'chat' | 'claude_terminal' | 'codex_terminal' | 'concurrent'>('chat');
   const chatRootRef = useRef<HTMLDivElement>(null);
@@ -1258,6 +1356,7 @@ export default function ChatPanel({
   const rafRef = useRef<number | null>(null);
   const pendingUpdateRef = useRef(false);
   const isUserScrolledUpRef = useRef(false);
+  const isProgrammaticScrollRef = useRef(false);
   const replayedBufferRef = useRef<string | null>(null);
   const thinkingQueueRef = useRef<Array<{ text: string; at: number }>>([]);
   const thinkingBatchRef = useRef<Array<{ text: string; at: number }>>([]);
@@ -1265,11 +1364,18 @@ export default function ChatPanel({
   const thinkingAdvanceTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const scrollToBottom = useCallback((behavior: 'auto' | 'smooth' = 'auto') => {
-    if (scrollRef.current) scrollRef.current.scrollTo({ top: scrollRef.current.scrollHeight, behavior });
+    if (!scrollRef.current) return;
+    isProgrammaticScrollRef.current = true;
+    scrollRef.current.scrollTo({ top: scrollRef.current.scrollHeight, behavior });
+    // Clear the flag after the scroll event fires (next microtask is too early for smooth scroll)
+    setTimeout(() => { isProgrammaticScrollRef.current = false; }, 50);
   }, []);
 
   const scrollToTop = useCallback((behavior: 'auto' | 'smooth' = 'smooth') => {
-    if (scrollRef.current) scrollRef.current.scrollTo({ top: 0, behavior });
+    if (!scrollRef.current) return;
+    isProgrammaticScrollRef.current = true;
+    scrollRef.current.scrollTo({ top: 0, behavior });
+    setTimeout(() => { isProgrammaticScrollRef.current = false; }, 50);
   }, []);
 
   const scrollMessageToTop = useCallback((messageId: string, behavior: 'auto' | 'smooth' = 'auto') => {
@@ -1277,7 +1383,9 @@ export default function ChatPanel({
     const node = container?.querySelector<HTMLElement>(`[data-message-id="${messageId}"]`);
     if (!container || !node) return;
     const nextTop = node.offsetTop - 12;
+    isProgrammaticScrollRef.current = true;
     container.scrollTo({ top: Math.max(0, nextTop), behavior });
+    setTimeout(() => { isProgrammaticScrollRef.current = false; }, 50);
   }, []);
 
   const [showScrollToBottom, setShowScrollToBottom] = useState(false);
@@ -1287,18 +1395,53 @@ export default function ChatPanel({
     if (!scrollRef.current) return;
     const { scrollTop, scrollHeight, clientHeight } = scrollRef.current;
     const distFromBottom = scrollHeight - scrollTop - clientHeight;
-    const scrolledUp = distFromBottom > 100;
-    isUserScrolledUpRef.current = scrolledUp;
-    setShowScrollToBottom(scrolledUp && distFromBottom > 200);
+    // Hysteresis: engage scroll-lock when >120px from bottom, release when ≤40px
+    // This prevents bounce from content height changes during streaming.
+    // Programmatic scrolls (scrollToBottom, etc.) must not re-engage the lock.
+    if (isUserScrolledUpRef.current) {
+      if (distFromBottom <= 40) isUserScrolledUpRef.current = false;
+    } else if (!isProgrammaticScrollRef.current) {
+      if (distFromBottom > 120) isUserScrolledUpRef.current = true;
+    }
+    setShowScrollToBottom(isUserScrolledUpRef.current && distFromBottom > 200);
     // Only show the top button when the user has manually scrolled up
-    setShowScrollToTop(scrolledUp && scrollTop > 200);
+    setShowScrollToTop(isUserScrolledUpRef.current && scrollTop > 200);
   }, []);
 
   const autoScroll = useCallback(() => {
     const container = scrollRef.current;
     if (!container || isUserScrolledUpRef.current) return;
-    scrollToBottom('auto');
-  }, [scrollToBottom]);
+    // Double-rAF: first frame lets React commit DOM changes,
+    // second frame scrolls after the browser has reflowed layout.
+    // This prevents the scroll from using stale scrollHeight.
+    requestAnimationFrame(() => {
+      requestAnimationFrame(() => {
+        if (!scrollRef.current || isUserScrolledUpRef.current) return;
+        isProgrammaticScrollRef.current = true;
+        scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
+        setTimeout(() => { isProgrammaticScrollRef.current = false; }, 50);
+      });
+    });
+  }, []);
+
+  // ResizeObserver: scroll to bottom whenever the scroll container's content
+  // grows in height — covers typewriter ticks, tool expansions, and any content
+  // growth that doesn't go through autoScroll() explicitly.
+  useEffect(() => {
+    const container = scrollRef.current;
+    if (!container) return;
+    // Observe the inner flex div (direct child). Fall back to the container itself
+    // if the inner div isn't mounted yet (empty conversation on first render).
+    const target = (container.firstElementChild as HTMLElement | null) ?? container;
+    const ro = new ResizeObserver(() => {
+      if (isUserScrolledUpRef.current) return;
+      isProgrammaticScrollRef.current = true;
+      container.scrollTop = container.scrollHeight;
+      setTimeout(() => { isProgrammaticScrollRef.current = false; }, 50);
+    });
+    ro.observe(target);
+    return () => ro.disconnect();
+  }, []);
 
   const clearThinkingAdvanceTimer = useCallback(() => {
     if (thinkingAdvanceTimeoutRef.current) {
@@ -1350,7 +1493,8 @@ export default function ChatPanel({
       return updated;
     });
     pendingUpdateRef.current = false;
-    requestAnimationFrame(() => autoScroll());
+    // autoScroll already uses double-rAF internally for reliable post-layout scroll
+    autoScroll();
   }, [autoScroll]);
 
   const scheduleStreamUpdate = useCallback(() => {
@@ -1541,17 +1685,6 @@ export default function ChatPanel({
   }, []);
 
   const handleStreamEndEvent = useCallback((data?: StreamEndPayload) => {
-    if (data?.isPipelineStart && data?.pipelineMessageId) {
-      const pipelineMsg: Message = {
-        id: data.pipelineMessageId,
-        role: 'assistant',
-        type: 'pipeline',
-        content: '',
-        timestamp: new Date().toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' }),
-      };
-      setMessages(prev => [...prev, pipelineMsg]);
-      return;
-    }
     if (rafRef.current) { cancelAnimationFrame(rafRef.current); rafRef.current = null; }
     flushStreamUpdate();
     if (assistantMsgIdRef.current) {
@@ -1577,9 +1710,7 @@ export default function ChatPanel({
     clearThinkingAdvanceTimer();
     assistantMsgIdRef.current = null;
     setActiveStreamMode('chat');
-    // Scroll after layout transitions settle (double rAF avoids reflow-before-paint jump)
-    requestAnimationFrame(() => requestAnimationFrame(() => scrollToBottom('smooth')));
-  }, [clearThinkingAdvanceTimer, flushStreamUpdate, scrollToBottom]);
+  }, [clearThinkingAdvanceTimer, flushStreamUpdate]);
 
   useEffect(() => {
     if (!loadConversationId) return;
@@ -1637,9 +1768,13 @@ export default function ChatPanel({
       // If an agent is still running for this conversation, re-enter streaming
       // mode so incoming events render correctly after a tab switch.
       setIsStreaming(!!result.isRunning);
-      requestAnimationFrame(() => {
-        if (scrollRef.current) scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
-      });
+      isUserScrolledUpRef.current = false;
+      requestAnimationFrame(() => requestAnimationFrame(() => {
+        if (!scrollRef.current) return;
+        isProgrammaticScrollRef.current = true;
+        scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
+        setTimeout(() => { isProgrammaticScrollRef.current = false; }, 50);
+      }));
     }).catch(() => {});
   }, [loadConversationId, replayBuffer, tabId, onConversationMetaResolved]);
 
@@ -1737,61 +1872,111 @@ export default function ChatPanel({
     return cleanup;
   }, [isWorkflowPlanStreaming]);
 
+  // Stable refs so the IPC listener effect never needs to re-register when
+  // handler identity changes mid-stream (which would drop in-flight events).
+  const handleStreamTextChunkRef = useRef(handleStreamTextChunk);
+  const handleThinkingEventRef = useRef(handleThinkingEvent);
+  const handleWorkflowPlanTextEventRef = useRef(handleWorkflowPlanTextEvent);
+  const handleWorkflowPlanResetEventRef = useRef(handleWorkflowPlanResetEvent);
+  const handleWorkflowPlanEndEventRef = useRef(handleWorkflowPlanEndEvent);
+  const handleToolActivityEventRef = useRef(handleToolActivityEvent);
+  const handleToolStreamEventRef = useRef(handleToolStreamEvent);
+  const handleStreamEndEventRef = useRef(handleStreamEndEvent);
+  useEffect(() => { handleStreamTextChunkRef.current = handleStreamTextChunk; });
+  useEffect(() => { handleThinkingEventRef.current = handleThinkingEvent; });
+  useEffect(() => { handleWorkflowPlanTextEventRef.current = handleWorkflowPlanTextEvent; });
+  useEffect(() => { handleWorkflowPlanResetEventRef.current = handleWorkflowPlanResetEvent; });
+  useEffect(() => { handleWorkflowPlanEndEventRef.current = handleWorkflowPlanEndEvent; });
+  useEffect(() => { handleToolActivityEventRef.current = handleToolActivityEvent; });
+  useEffect(() => { handleToolStreamEventRef.current = handleToolStreamEvent; });
+  useEffect(() => { handleStreamEndEventRef.current = handleStreamEndEvent; });
+
+  // Stable ref for the conversation-ownership check. Updated whenever the
+  // relevant IDs change, but never causes the IPC registration to re-run.
+  const isMyConvRef = useRef((_evtConvId: string): boolean => false);
+  useEffect(() => {
+    const myConvId = loadConversationId ?? loadedConversationId;
+    isMyConvRef.current = (evtConvId: string) => !!myConvId && evtConvId === myConvId;
+  }, [loadConversationId, loadedConversationId]);
+
+  // Register IPC listeners exactly once (on mount). All dispatches go through
+  // refs so identity changes in callbacks never cause a teardown/re-register
+  // race that would drop CHAT_STREAM_TEXT or CHAT_STREAM_END events.
   useEffect(() => {
     const api = (window as any).clawdia;
     if (!api) return;
     const cleanups: (() => void)[] = [];
 
-    // Use loadConversationId (the prop) as the filter — it updates synchronously
-    // when the tab switches, before the async chat.load() resolves. This ensures
-    // we don't drop events during the brief gap between tab switch and load completion.
-    // Fall back to loadedConversationId for the case where neither is set yet.
-    const myConvId = loadConversationId ?? loadedConversationId;
-    // Only accept events for our specific conversation. If we don't have a
-    // conversation yet (new blank tab), reject all — we can't claim ownership
-    // of events that belong to another tab's conversation.
-    const isMyConv = (evtConvId: string) => !!myConvId && evtConvId === myConvId;
-
     cleanups.push(api.chat.onStreamText((payload: { delta: string; conversationId: string; source?: ConcurrentFeedSource }) => {
-      if (!isMyConv(payload.conversationId)) return;
-      handleStreamTextChunk(payload.delta, payload.source);
+      if (!isMyConvRef.current(payload.conversationId)) return;
+      handleStreamTextChunkRef.current(payload.delta, payload.source);
     }));
 
     cleanups.push(api.chat.onThinking((payload: { thought: string; conversationId: string }) => {
-      if (!isMyConv(payload.conversationId)) return;
-      handleThinkingEvent(payload.thought);
+      if (!isMyConvRef.current(payload.conversationId)) return;
+      handleThinkingEventRef.current(payload.thought);
     }));
     if (api.chat.onWorkflowPlanText) {
-      cleanups.push(api.chat.onWorkflowPlanText(handleWorkflowPlanTextEvent));
+      cleanups.push(api.chat.onWorkflowPlanText((payload: any) => handleWorkflowPlanTextEventRef.current(payload)));
     }
     if (api.chat.onWorkflowPlanReset) {
-      cleanups.push(api.chat.onWorkflowPlanReset(handleWorkflowPlanResetEvent));
+      cleanups.push(api.chat.onWorkflowPlanReset(() => handleWorkflowPlanResetEventRef.current()));
     }
     if (api.chat.onWorkflowPlanEnd) {
-      cleanups.push(api.chat.onWorkflowPlanEnd(handleWorkflowPlanEndEvent));
+      cleanups.push(api.chat.onWorkflowPlanEnd(() => handleWorkflowPlanEndEventRef.current()));
     }
 
     cleanups.push(api.chat.onToolActivity((activity: ToolCall & { conversationId?: string }) => {
-      if (activity.conversationId && !isMyConv(activity.conversationId)) return;
-      handleToolActivityEvent(activity);
+      if (activity.conversationId && !isMyConvRef.current(activity.conversationId)) return;
+      handleToolActivityEventRef.current(activity);
     }));
+
+    if (api.chat.onContextPressure) {
+      cleanups.push(api.chat.onContextPressure((payload: { used: number; budget: number; pct: number; conversationId: string }) => {
+        if (!isMyConvRef.current(payload.conversationId)) return;
+        setContextPressure({ used: payload.used, budget: payload.budget, pct: payload.pct });
+      }));
+    }
 
     if (api.chat.onToolStream) {
       cleanups.push(api.chat.onToolStream((payload: { toolId: string; toolName: string; chunk: string; conversationId?: string }) => {
-        if (payload.conversationId && !isMyConv(payload.conversationId)) return;
-        handleToolStreamEvent(payload);
+        if (payload.conversationId && !isMyConvRef.current(payload.conversationId)) return;
+        handleToolStreamEventRef.current(payload);
       }));
     }
 
     cleanups.push(api.chat.onStreamEnd((data: any) => {
-      if (data?.conversationId && !isMyConv(data.conversationId)) return;
-      handleStreamEndEvent(data);
+      if (data?.conversationId && !isMyConvRef.current(data.conversationId)) return;
+      handleStreamEndEventRef.current(data);
+      setConcurrentPhase('idle');
     }));
     if (api.chat.onClaudeStatus) {
       cleanups.push(api.chat.onClaudeStatus((payload: { conversationId: string; status: 'idle' | 'starting' | 'ready' | 'working' | 'errored' | 'stopped' }) => {
-        if (payload.conversationId === loadedConversationId) {
-          setClaudeStatus(payload.status);
-        }
+        if (!isMyConvRef.current(payload.conversationId)) return;
+        setClaudeStatus(payload.status);
+      }));
+    }
+
+    // Concurrent execution phase tracking
+    if (api.chat.onConcurrentExecutionStart) {
+      cleanups.push(api.chat.onConcurrentExecutionStart((payload: { plan: any; conversationId: string }) => {
+        if (!isMyConvRef.current(payload.conversationId)) return;
+        setConcurrentPhase('executing');
+      }));
+    }
+    if (api.chat.onConcurrentExecutionEnd) {
+      cleanups.push(api.chat.onConcurrentExecutionEnd((payload: { conversationId: string }) => {
+        if (!isMyConvRef.current(payload.conversationId)) return;
+        setConcurrentPhase('done');
+      }));
+    }
+    if (api.swarm?.onStateChanged) {
+      cleanups.push(api.swarm.onStateChanged((state: { phase?: string; conversationId?: string }) => {
+        if (state.conversationId && !isMyConvRef.current(state.conversationId)) return;
+        if (state.phase === 'planning') setConcurrentPhase('planning');
+        else if (state.phase === 'executing') setConcurrentPhase('executing');
+        else if (state.phase === 'synthesizing') setConcurrentPhase('synthesizing');
+        else if (state.phase === 'done') setConcurrentPhase('done');
       }));
     }
 
@@ -1799,7 +1984,8 @@ export default function ChatPanel({
       cleanups.forEach(fn => fn());
       if (rafRef.current) cancelAnimationFrame(rafRef.current);
     };
-  }, [handleStreamEndEvent, handleStreamTextChunk, handleThinkingEvent, handleWorkflowPlanResetEvent, handleWorkflowPlanTextEvent, handleWorkflowPlanEndEvent, handleToolActivityEvent, handleToolStreamEvent, loadedConversationId, loadConversationId]);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []); // mount only — all live state is accessed through refs above
 
   const handleToggleClaudeMode = useCallback(async () => {
     const api = (window as any).clawdia;
@@ -1879,7 +2065,6 @@ export default function ChatPanel({
       timestamp: new Date().toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' }),
     };
     setMessages(prev => [...prev, userMsg]);
-    setTimeout(() => scrollMessageToTop(userMsg.id, 'smooth'), 50);
 
     const assistantId = `assistant-${Date.now()}`;
     assistantMsgIdRef.current = assistantId;
@@ -1902,7 +2087,15 @@ export default function ChatPanel({
         isStreaming: true,
       }]);
       setIsStreaming(true);
-      requestAnimationFrame(() => scrollMessageToTop(userMsg.id));
+      // Scroll to bottom after both user + assistant bubbles are in the DOM so the
+      // start of the response is never hidden. We must keep isUserScrolledUpRef false
+      // here — using scrollMessageToTop would trigger handleScroll and re-engage the
+      // scroll-lock, causing autoScroll() to bail for the whole response.
+      isUserScrolledUpRef.current = false;
+      requestAnimationFrame(() => requestAnimationFrame(() => {
+        isUserScrolledUpRef.current = false;
+        scrollToBottom('smooth');
+      }));
     }, 100);
 
     try {
@@ -1961,7 +2154,6 @@ export default function ChatPanel({
       assistantMsgIdRef.current = null;
       setActiveStreamMode('chat');
       isUserScrolledUpRef.current = false;
-      requestAnimationFrame(() => scrollToBottom('smooth'));
     } catch (err: any) {
       onConversationMetaResolved(tabId, { title: nextTitle, mode: conversationMode, status: 'failed' });
       setMessages(prev => prev.map(m =>
@@ -1992,6 +2184,12 @@ export default function ChatPanel({
   const handleResume = useCallback(() => {
     (window as any).clawdia?.chat.resume(loadedConversationId ?? undefined);
     setIsPaused(false);
+  }, [loadedConversationId]);
+
+  const handleCompressHistory = useCallback(async () => {
+    const api = (window as any).clawdia;
+    if (!api?.chat?.compress) return { ok: false, error: 'Not available' };
+    return api.chat.compress(loadedConversationId ?? undefined);
   }, [loadedConversationId]);
 
   const handleRateTool = useCallback((messageId: string, toolId: string, rating: 'up' | 'down' | null, note?: string) => {
@@ -2094,27 +2292,22 @@ export default function ChatPanel({
     && !historyMode;
 
   return (
-    <div ref={chatRootRef} className="flex h-full w-full min-w-0 flex-col self-stretch">
-      {!historyMode && (
-        <TabStrip
-          tabs={tabs}
-          activeTabId={activeTabId}
-          onSwitch={onSwitchTab}
-          onClose={onCloseTab}
-          onNew={onNewTab}
-          onReorder={onReorderTabs}
-        />
-      )}
+    <div ref={chatRootRef} className="flex h-full w-full min-w-0 flex-col self-stretch" style={{ backgroundColor: '#171717' }}>
       {historyMode ? (
         <div className="flex min-h-0 w-full flex-1 overflow-hidden self-stretch">
           <HistoryBrowser
             currentTabs={tabs}
             onSelectConversation={onOpenConversation}
             onClose={() => onToggleHistory()}
+            extensionsOpen={extensionsOpen}
+            onToggleExtensions={onToggleExtensions}
           />
         </div>
       ) : (
-        <div className="relative flex flex-1 min-h-0 flex-col">
+        <div
+          className="relative flex flex-1 min-h-0 flex-col"
+          style={{ backgroundColor: '#171717' }}
+        >
         {/* Chat nav: prev chevron */}
         {tabs.length > 1 && tabs.findIndex(t => t.id === activeTabId) > 0 && (
           <button
@@ -2171,7 +2364,7 @@ export default function ChatPanel({
         )}
         <div ref={scrollRef} onScroll={handleScroll} className="flex-1 overflow-y-auto overflow-x-hidden scroll-smooth">
           <div
-            className="flex min-h-full flex-col px-5 pt-5 pb-8"
+            className="flex min-h-full flex-col px-5 pt-5 pb-4"
             style={{ zoom: chatZoom / 100 }}
           >
             {showClawdiaEmptyState && (
@@ -2184,11 +2377,9 @@ export default function ChatPanel({
               <ClaudeCodeEmptyState onSend={(text) => { void handleSend(text); }} />
             )}
             {messages.map((msg, idx) =>
-              msg.type === 'pipeline'
-              ? <div key={msg.id} data-message-id={msg.id} className={idx === 0 ? '' : 'border-t border-white/[0.06] pt-4 mt-4'}><PipelineBlock /></div>
-              : msg.role === 'assistant'
+              msg.role === 'assistant'
               ? (
-                <div key={msg.id} data-message-id={msg.id} className={idx === 0 ? '' : 'border-t border-white/[0.06] pt-4 mt-4'}>
+                <div key={msg.id} data-message-id={msg.id} className={idx === 0 ? '' : 'border-t border-white/[0.10] pt-4 mt-4'}>
                   <AssistantMessage
                     message={msg}
                     fillAvailableSpace={msg.isStreaming && idx === messages.length - 1}
@@ -2213,7 +2404,7 @@ export default function ChatPanel({
                 </div>
               )
               : (
-                <div key={msg.id} data-message-id={msg.id} className={idx === 0 ? '' : 'border-t border-white/[0.06] pt-4 mt-4'}>
+                <div key={msg.id} data-message-id={msg.id} className={idx === 0 ? '' : 'border-t border-white/[0.10] pt-4 mt-4'}>
                   <UserMessage
                     message={msg}
                     onRetry={(message) => {
@@ -2251,11 +2442,20 @@ export default function ChatPanel({
         </div>
       )}
 
-      <SwarmPanel />
-
       {!historyMode && (
         <InlineShimmer text={shimmerText} visible={isStreaming && !!shimmerText} />
       )}
+
+      {!historyMode && (
+        <div>
+        <TabStrip
+          tabs={tabs}
+          activeTabId={activeTabId}
+          onSwitch={onSwitchTab}
+          onClose={onCloseTab}
+          onNew={onNewTab}
+          onReorder={onReorderTabs}
+        />
 
       <InputBar
         onSend={handleSend}
@@ -2276,15 +2476,27 @@ export default function ChatPanel({
         concurrentMode={conversationMode === 'concurrent'}
         onToggleConcurrentMode={handleToggleConcurrentMode}
         concurrentModeDisabled={false}
+        concurrentPhase={concurrentPhase}
         disabled={historyMode}
         chatZoom={chatZoom}
         onChatZoomIn={handleChatZoomIn}
         onChatZoomOut={handleChatZoomOut}
         onChatZoomReset={handleChatZoomReset}
-        taskHistoryAvailable={Boolean(loadedConversationId)}
-        taskHistoryOpen={showTaskHistory}
-        onToggleTaskHistory={() => setShowTaskHistory((prev) => !prev)}
+        historyOpen={historyMode}
+        onToggleHistory={onToggleHistory}
+        terminalOpen={terminalOpen}
+        onToggleTerminal={onToggleTerminal}
+        docsOpen={docsOpen}
+        onToggleDocs={onToggleDocs}
+        filesOpen={filesOpen}
+        onToggleFiles={onToggleFiles}
+        onOpenSettings={onOpenSettings}
+        contextPressure={contextPressure}
+        canCompress={messages.length > 0}
+        onCompressHistory={handleCompressHistory}
       />
+        </div>
+      )}
 
     </div>
   );

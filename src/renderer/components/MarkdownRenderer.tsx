@@ -1,4 +1,4 @@
-import React, { useMemo, useState, useCallback } from 'react';
+import React, { useMemo, useState, useCallback, useRef, useEffect } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 
@@ -53,14 +53,91 @@ function CopyButton({ text }: { text: string }) {
   );
 }
 
+/* ── Typewriter hook ──
+   Reveals `fullText` progressively in small character bursts while streaming.
+   Once streaming stops the full text is shown immediately. */
+const CHARS_PER_TICK = 3;
+const TICK_MS = 12;
+
+function useTypewriter(fullText: string, isStreaming: boolean): string {
+  const revealedRef = useRef(0);
+  const rafRef = useRef<number | null>(null);
+  const [revealed, setRevealed] = useState(0);
+  const prevStreamingRef = useRef(false);
+
+  // Reset counter when a new streaming message begins
+  useEffect(() => {
+    if (isStreaming && !prevStreamingRef.current) {
+      revealedRef.current = 0;
+      setRevealed(0);
+    }
+    prevStreamingRef.current = isStreaming;
+  }, [isStreaming]);
+
+  // When not streaming, show everything immediately
+  useEffect(() => {
+    if (!isStreaming) {
+      revealedRef.current = fullText.length;
+      setRevealed(fullText.length);
+      if (rafRef.current !== null) {
+        cancelAnimationFrame(rafRef.current);
+        rafRef.current = null;
+      }
+    }
+  }, [isStreaming, fullText.length]);
+
+  // Tick loop while streaming and behind the full text
+  useEffect(() => {
+    if (!isStreaming) return;
+
+    let lastTime = 0;
+
+    const tick = (now: number) => {
+      if (!lastTime) lastTime = now;
+      const elapsed = now - lastTime;
+
+      if (elapsed >= TICK_MS) {
+        const steps = Math.max(1, Math.floor(elapsed / TICK_MS));
+        const advance = steps * CHARS_PER_TICK;
+        const next = Math.min(revealedRef.current + advance, fullText.length);
+        if (next !== revealedRef.current) {
+          revealedRef.current = next;
+          setRevealed(next);
+        }
+        lastTime = now;
+      }
+
+      if (revealedRef.current < fullText.length) {
+        rafRef.current = requestAnimationFrame(tick);
+      } else {
+        rafRef.current = null;
+      }
+    };
+
+    // If already caught up, wait for new text
+    if (revealedRef.current >= fullText.length) return;
+
+    rafRef.current = requestAnimationFrame(tick);
+    return () => {
+      if (rafRef.current !== null) {
+        cancelAnimationFrame(rafRef.current);
+        rafRef.current = null;
+      }
+    };
+  }, [isStreaming, fullText.length]);
+
+  return isStreaming ? fullText.slice(0, revealed) : fullText;
+}
+
 export default function MarkdownRenderer({ content, isStreaming }: MarkdownRendererProps) {
   if (!content) return null;
 
   const plugins = useMemo(() => [remarkGfm], []);
-  const normalizedContent = useMemo(() => normalizeLinkedLabelText(content), [content]);
+  const displayText = useTypewriter(content, !!isStreaming);
+  const normalizedContent = useMemo(() => normalizeLinkedLabelText(displayText), [displayText]);
 
   return (
-    <div className="markdown-prose">
+    <div className={`markdown-prose${isStreaming ? ' streaming-plain' : ''}`}>
       <ReactMarkdown
         remarkPlugins={plugins}
         components={{
