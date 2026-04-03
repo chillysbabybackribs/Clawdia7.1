@@ -783,11 +783,13 @@ const AssistantMessage = React.memo(function AssistantMessage({
               const hasTextAfter = groups.slice(groupIdx + 1).some(g => g.kind === 'text');
               return (
                 <SourceFeedBlock key={group.lastToolId} source={group.source}>
-                  <ToolActivityComponent
-                    tools={group.tools}
-                    isStreaming={!!message.isStreaming}
-                    hasTextAfter={hasTextAfter}
-                  />
+                  <div className="my-1">
+                    <ToolActivityComponent
+                      tools={group.tools}
+                      isStreaming={!!message.isStreaming}
+                      hasTextAfter={hasTextAfter}
+                    />
+                  </div>
                 </SourceFeedBlock>
               );
             })}
@@ -1344,6 +1346,13 @@ export default function ChatPanel({
   const [workflowPlanDraft, setWorkflowPlanDraft] = useState('');
   const [isWorkflowPlanStreaming, setIsWorkflowPlanStreaming] = useState(false);
   const [loadedConversationId, setLoadedConversationId] = useState<string | null>(null);
+  const [priorSessionPeek, setPriorSessionPeek] = useState<{
+    hasPriorSession: boolean;
+    sessionId?: string | null;
+    title?: string | null;
+    updatedAt?: string | null;
+  } | null>(null);
+  const [interruptedRun, setInterruptedRun] = useState<{ goal: string | null; runId: string } | null>(null);
   const [activeStreamMode, setActiveStreamMode] = useState<'chat' | 'claude_terminal' | 'codex_terminal' | 'concurrent'>('chat');
   const [concurrentPhase, setConcurrentPhase] = useState<'idle' | 'planning' | 'executing' | 'synthesizing' | 'done'>('idle');
   const [chatZoom, setChatZoom] = useState(DEFAULT_CHAT_ZOOM);
@@ -1355,6 +1364,7 @@ export default function ChatPanel({
   const assistantMsgIdRef = useRef<string | null>(null);
   const rafRef = useRef<number | null>(null);
   const pendingUpdateRef = useRef(false);
+  const liveConversationIdRef = useRef<string | null>(null);
   const isUserScrolledUpRef = useRef(false);
   const isProgrammaticScrollRef = useRef(false);
   const replayedBufferRef = useRef<string | null>(null);
@@ -1367,8 +1377,10 @@ export default function ChatPanel({
     if (!scrollRef.current) return;
     isProgrammaticScrollRef.current = true;
     scrollRef.current.scrollTo({ top: scrollRef.current.scrollHeight, behavior });
-    // Clear the flag after the scroll event fires (next microtask is too early for smooth scroll)
-    setTimeout(() => { isProgrammaticScrollRef.current = false; }, 50);
+    // Smooth scrolls fire browser scroll events throughout the animation.
+    // 50ms is not enough to cover the full animation; use 400ms so the flag
+    // stays set until the animation fully settles and can't trip the user-scroll lock.
+    setTimeout(() => { isProgrammaticScrollRef.current = false; }, behavior === 'smooth' ? 400 : 50);
   }, []);
 
   const scrollToTop = useCallback((behavior: 'auto' | 'smooth' = 'smooth') => {
@@ -1390,6 +1402,7 @@ export default function ChatPanel({
 
   const [showScrollToBottom, setShowScrollToBottom] = useState(false);
   const [showScrollToTop, setShowScrollToTop] = useState(false);
+  const currentConversationId = loadedConversationId ?? loadConversationId ?? null;
 
   const handleScroll = useCallback(() => {
     if (!scrollRef.current) return;
@@ -1414,12 +1427,14 @@ export default function ChatPanel({
     // Double-rAF: first frame lets React commit DOM changes,
     // second frame scrolls after the browser has reflowed layout.
     // This prevents the scroll from using stale scrollHeight.
+    // No isProgrammaticScrollRef needed here — setting scrollTop to scrollHeight
+    // makes distFromBottom === 0, so handleScroll's lock threshold (>120px) never
+    // fires. The flag would race with rapid streaming ticks and falsely engage
+    // the lock when it clears between ResizeObserver callbacks.
     requestAnimationFrame(() => {
       requestAnimationFrame(() => {
         if (!scrollRef.current || isUserScrolledUpRef.current) return;
-        isProgrammaticScrollRef.current = true;
         scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
-        setTimeout(() => { isProgrammaticScrollRef.current = false; }, 50);
       });
     });
   }, []);
@@ -1430,16 +1445,22 @@ export default function ChatPanel({
   useEffect(() => {
     const container = scrollRef.current;
     if (!container) return;
-    // Observe the inner flex div (direct child). Fall back to the container itself
-    // if the inner div isn't mounted yet (empty conversation on first render).
-    const target = (container.firstElementChild as HTMLElement | null) ?? container;
+    // Observe the container itself (not its child). Observing the child div
+    // breaks on conversation switch when the child remounts — the observer
+    // would be watching a detached node and never fire.
     const ro = new ResizeObserver(() => {
       if (isUserScrolledUpRef.current) return;
-      isProgrammaticScrollRef.current = true;
-      container.scrollTop = container.scrollHeight;
-      setTimeout(() => { isProgrammaticScrollRef.current = false; }, 50);
+      // Double-rAF: first frame lets React/browser finish layout for the newly
+      // grown content (e.g. a code block completing its fence, a tool card
+      // expanding). Second frame reads scrollHeight after reflow is stable.
+      requestAnimationFrame(() => {
+        requestAnimationFrame(() => {
+          if (isUserScrolledUpRef.current) return;
+          container.scrollTop = container.scrollHeight;
+        });
+      });
     });
-    ro.observe(target);
+    ro.observe(container);
     return () => ro.disconnect();
   }, []);
 
@@ -1710,7 +1731,11 @@ export default function ChatPanel({
     clearThinkingAdvanceTimer();
     assistantMsgIdRef.current = null;
     setActiveStreamMode('chat');
-  }, [clearThinkingAdvanceTimer, flushStreamUpdate]);
+    // Scroll to the end of the final response — override user-scrolled-up state
+    // so the closing summary of a long task is always visible.
+    isUserScrolledUpRef.current = false;
+    requestAnimationFrame(() => requestAnimationFrame(() => scrollToBottom('smooth')));
+  }, [clearThinkingAdvanceTimer, flushStreamUpdate, scrollToBottom]);
 
   useEffect(() => {
     if (!loadConversationId) return;
@@ -1768,6 +1793,7 @@ export default function ChatPanel({
       // If an agent is still running for this conversation, re-enter streaming
       // mode so incoming events render correctly after a tab switch.
       setIsStreaming(!!result.isRunning);
+      setInterruptedRun(result.interruptedRun ?? null);
       isUserScrolledUpRef.current = false;
       requestAnimationFrame(() => requestAnimationFrame(() => {
         if (!scrollRef.current) return;
@@ -1777,6 +1803,29 @@ export default function ChatPanel({
       }));
     }).catch(() => {});
   }, [loadConversationId, replayBuffer, tabId, onConversationMetaResolved]);
+
+  useEffect(() => {
+    const api = (window as any).clawdia;
+    if (!api?.session?.peekLatest) return;
+    if (historyMode || isStreaming || messages.length > 0) {
+      setPriorSessionPeek(null);
+      return;
+    }
+
+    let cancelled = false;
+    api.session.peekLatest(currentConversationId)
+      .then((peek: any) => {
+        if (cancelled) return;
+        setPriorSessionPeek(peek?.hasPriorSession ? peek : null);
+      })
+      .catch(() => {
+        if (!cancelled) setPriorSessionPeek(null);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [currentConversationId, historyMode, isStreaming, messages.length]);
 
   useEffect(() => () => clearThinkingAdvanceTimer(), [clearThinkingAdvanceTimer]);
 
@@ -1896,6 +1945,7 @@ export default function ChatPanel({
   const isMyConvRef = useRef((_evtConvId: string): boolean => false);
   useEffect(() => {
     const myConvId = loadConversationId ?? loadedConversationId;
+    liveConversationIdRef.current = myConvId;
     isMyConvRef.current = (evtConvId: string) => !!myConvId && evtConvId === myConvId;
   }, [loadConversationId, loadedConversationId]);
 
@@ -2056,8 +2106,18 @@ export default function ChatPanel({
   const handleSend = useCallback(async (text: string, attachments: MessageAttachment[] = [], provider?: string, model?: string) => {
     const api = (window as any).clawdia;
     if (!api) return;
+    let conversationId = loadedConversationId ?? loadConversationId ?? null;
+    if (!conversationId) {
+      const created = await api.chat.create();
+      if (!created?.id) return;
+      conversationId = created.id;
+      liveConversationIdRef.current = conversationId;
+      isMyConvRef.current = (evtConvId: string) => !!liveConversationIdRef.current && evtConvId === liveConversationIdRef.current;
+      setLoadedConversationId(conversationId);
+      onConversationMetaResolved(tabId, { conversationId, mode: conversationMode });
+    }
     const nextTitle = text.trim().slice(0, 60) || 'New conversation';
-    onConversationMetaResolved(tabId, { title: nextTitle, mode: conversationMode, status: 'running' });
+    onConversationMetaResolved(tabId, { conversationId, title: nextTitle, mode: conversationMode, status: 'running' });
 
     isUserScrolledUpRef.current = false;
     const userMsg: Message = {
@@ -2074,7 +2134,14 @@ export default function ChatPanel({
     setIsWorkflowPlanStreaming(false);
     setActiveStreamMode(conversationMode);
 
-    setTimeout(() => {
+    // Set streaming immediately so the UI reflects it before the IPC round-trip.
+    // The assistant bubble is added in a short setTimeout to let the user message
+    // render first, but isStreaming must be true before the await so a fast
+    // response cannot race the timeout and leave isStreaming stuck at true.
+    setIsStreaming(true);
+    let streamingCompleted = false;
+    const assistantBubbleTimer = setTimeout(() => {
+      if (streamingCompleted) return;
       setMessages(prev => [...prev, {
         id: assistantId,
         role: 'assistant',
@@ -2086,7 +2153,6 @@ export default function ChatPanel({
         timestamp: new Date().toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' }),
         isStreaming: true,
       }]);
-      setIsStreaming(true);
       // Scroll to bottom after both user + assistant bubbles are in the DOM so the
       // start of the response is never hidden. We must keep isUserScrolledUpRef false
       // here — using scrollMessageToTop would trigger handleScroll and re-engage the
@@ -2100,7 +2166,10 @@ export default function ChatPanel({
 
     try {
       if (conversationMode !== 'chat') setClaudeStatus('working');
-      const result = await api.chat.send(text, attachments, loadedConversationId ?? loadConversationId ?? null, provider, model);
+      const result = await api.chat.send(text, attachments, conversationId, provider, model);
+      // Mark completed so the bubble timer (if still pending) is a no-op.
+      streamingCompleted = true;
+      clearTimeout(assistantBubbleTimer);
       if (result?.conversationId && result.conversationId !== loadedConversationId) {
         setLoadedConversationId(result.conversationId);
       }
@@ -2118,32 +2187,19 @@ export default function ChatPanel({
         finalFeed.filter(i => i.kind === 'text').map(i => (i as any).text).join('\n\n') || '';
       const finalTools = finalFeed.filter(i => i.kind === 'tool').map(i => (i as any).tool) as ToolCall[];
 
+      const assistantTs = new Date().toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
       if (result.error) {
-        setMessages(prev => prev.map(m =>
-          m.id === assistantId
-            ? {
-                ...m,
-                content: `⚠️ ${result.error}`,
-                isStreaming: false,
-                feed: [],
-                toolCalls: [],
-              }
-            : m
-        ));
+        setMessages(prev => {
+          const exists = prev.some(m => m.id === assistantId);
+          const base = exists ? prev : [...prev, { id: assistantId, role: 'assistant' as const, content: '', timestamp: assistantTs, isStreaming: false }];
+          return base.map(m => m.id === assistantId ? { ...m, content: `⚠️ ${result.error}`, isStreaming: false, feed: [], toolCalls: [] } : m);
+        });
       } else {
-        setMessages(prev => prev.map(m =>
-          m.id === assistantId
-            ? {
-                ...m,
-                content: finalContent,
-                toolCalls: finalTools,
-                feed: finalFeed,
-                isStreaming: false,
-                fileRefs: result.fileRefs,
-                linkPreviews: result.linkPreviews,
-              }
-            : m
-        ));
+        setMessages(prev => {
+          const exists = prev.some(m => m.id === assistantId);
+          const base = exists ? prev : [...prev, { id: assistantId, role: 'assistant' as const, content: '', timestamp: assistantTs, isStreaming: false }];
+          return base.map(m => m.id === assistantId ? { ...m, content: finalContent, toolCalls: finalTools, feed: finalFeed, isStreaming: false, fileRefs: result.fileRefs, linkPreviews: result.linkPreviews } : m);
+        });
       }
 
       setIsStreaming(false);
@@ -2154,11 +2210,17 @@ export default function ChatPanel({
       assistantMsgIdRef.current = null;
       setActiveStreamMode('chat');
       isUserScrolledUpRef.current = false;
+      requestAnimationFrame(() => requestAnimationFrame(() => scrollToBottom('smooth')));
     } catch (err: any) {
+      streamingCompleted = true;
+      clearTimeout(assistantBubbleTimer);
       onConversationMetaResolved(tabId, { title: nextTitle, mode: conversationMode, status: 'failed' });
-      setMessages(prev => prev.map(m =>
-        m.id === assistantId ? { ...m, content: `⚠️ ${err.message || 'Unknown error'}`, isStreaming: false } : m
-      ));
+      const errTs = new Date().toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+      setMessages(prev => {
+        const exists = prev.some(m => m.id === assistantId);
+        const base = exists ? prev : [...prev, { id: assistantId, role: 'assistant' as const, content: '', timestamp: errTs, isStreaming: false }];
+        return base.map(m => m.id === assistantId ? { ...m, content: `⚠️ ${err.message || 'Unknown error'}`, isStreaming: false } : m);
+      });
       setIsStreaming(false);
       setShimmerText(''); thinkingBatchRef.current = [];
       setWorkflowPlanDraft('');
@@ -2166,8 +2228,10 @@ export default function ChatPanel({
       if (conversationMode !== 'chat') setClaudeStatus('errored');
       assistantMsgIdRef.current = null;
       setActiveStreamMode('chat');
+      isUserScrolledUpRef.current = false;
+      requestAnimationFrame(() => requestAnimationFrame(() => scrollToBottom('smooth')));
     }
-  }, [conversationMode, scrollMessageToTop, loadedConversationId, loadConversationId, onConversationMetaResolved, tabId]);
+  }, [conversationMode, loadedConversationId, loadConversationId, onConversationMetaResolved, scrollToBottom, tabId]);
 
   const handleStop = useCallback(() => {
     (window as any).clawdia?.chat.stop(loadedConversationId ?? undefined);
@@ -2291,8 +2355,74 @@ export default function ChatPanel({
     && !isStreaming
     && !historyMode;
 
+  const activeTab = tabs.find(t => t.id === activeTabId);
+  const chatTitle = activeTab?.title?.trim() || 'New conversation';
+  const modeLabel = conversationMode === 'claude_terminal'
+    ? 'Claude Code'
+    : conversationMode === 'codex_terminal'
+      ? 'Codex'
+      : conversationMode === 'concurrent'
+        ? 'Concurrent'
+        : 'Chat';
+  const runState = isStreaming ? 'running' : activeTab?.status === 'failed' ? 'failed' : activeTab?.status === 'completed' ? 'done' : 'idle';
+
   return (
-    <div ref={chatRootRef} className="flex h-full w-full min-w-0 flex-col self-stretch" style={{ backgroundColor: '#171717' }}>
+    <div
+      ref={chatRootRef}
+      className="flex h-full w-full min-w-0 flex-col self-stretch"
+      style={{
+        backgroundColor: '#161616',
+        border: '1px solid rgba(255,255,255,0.10)',
+        borderRadius: 12,
+        overflow: 'hidden',
+        boxShadow: 'inset 0 0 0 1px rgba(255,255,255,0.02)',
+      }}
+    >
+      {/* Chat panel header */}
+      {!historyMode && (
+        <div
+          className="flex flex-shrink-0 items-center px-5 gap-2.5"
+          style={{
+            height: 52,
+            borderBottom: '1px solid rgba(255,255,255,0.13)',
+            background: 'linear-gradient(180deg, rgba(255,255,255,0.055) 0%, rgba(255,255,255,0.018) 100%)',
+            boxShadow: '0 1px 0 rgba(0,0,0,0.55)',
+          }}
+        >
+          <span
+            className="flex-1 truncate text-[13px] font-semibold text-text-primary"
+            style={{ letterSpacing: '0em' }}
+          >
+            {chatTitle}
+          </span>
+          <span
+            className="flex-shrink-0 text-[10px] font-semibold px-2 py-0.5 rounded"
+            style={{
+              color: 'rgba(255,255,255,0.55)',
+              background: 'rgba(255,255,255,0.09)',
+              border: '1px solid rgba(255,255,255,0.12)',
+              letterSpacing: '0.08em',
+              textTransform: 'uppercase',
+            }}
+          >
+            {modeLabel}
+          </span>
+          <span
+            className="flex-shrink-0 flex items-center gap-1.5 text-[11px]"
+            style={{ color: runState === 'running' ? '#3ddb85' : runState === 'failed' ? '#ff7d7d' : 'rgba(255,255,255,0.25)' }}
+          >
+            <span
+              className="inline-block w-[6px] h-[6px] rounded-full flex-shrink-0"
+              style={{
+                background: runState === 'running' ? '#3ddb85' : runState === 'failed' ? '#ff7d7d' : 'rgba(255,255,255,0.18)',
+                boxShadow: runState === 'running' ? '0 0 6px #3ddb85' : 'none',
+              }}
+            />
+            {runState === 'running' ? 'running' : runState === 'failed' ? 'failed' : runState === 'done' ? 'done' : 'idle'}
+          </span>
+        </div>
+      )}
+
       {historyMode ? (
         <div className="flex min-h-0 w-full flex-1 overflow-hidden self-stretch">
           <HistoryBrowser
@@ -2306,7 +2436,7 @@ export default function ChatPanel({
       ) : (
         <div
           className="relative flex flex-1 min-h-0 flex-col"
-          style={{ backgroundColor: '#171717' }}
+          style={{ backgroundColor: '#161616' }}
         >
         {/* Chat nav: prev chevron */}
         {tabs.length > 1 && tabs.findIndex(t => t.id === activeTabId) > 0 && (
@@ -2379,7 +2509,7 @@ export default function ChatPanel({
             {messages.map((msg, idx) =>
               msg.role === 'assistant'
               ? (
-                <div key={msg.id} data-message-id={msg.id} className={idx === 0 ? '' : 'border-t border-white/[0.10] pt-4 mt-4'}>
+                <div key={msg.id} data-message-id={msg.id} className={idx === 0 ? '' : 'border-t border-white/[0.08] pt-5 mt-5'}>
                   <AssistantMessage
                     message={msg}
                     fillAvailableSpace={msg.isStreaming && idx === messages.length - 1}
@@ -2404,7 +2534,7 @@ export default function ChatPanel({
                 </div>
               )
               : (
-                <div key={msg.id} data-message-id={msg.id} className={idx === 0 ? '' : 'border-t border-white/[0.10] pt-4 mt-4'}>
+                <div key={msg.id} data-message-id={msg.id} className={idx === 0 ? '' : 'border-t border-white/[0.08] pt-5 mt-5'}>
                   <UserMessage
                     message={msg}
                     onRetry={(message) => {
@@ -2417,7 +2547,7 @@ export default function ChatPanel({
               )
             )}
             {pendingApprovalRunId && nonWorkflowApproval && (
-              <div className={`flex justify-start animate-slide-up ${messages.length > 0 ? 'border-t border-white/[0.06] pt-4 mt-4' : ''}`}>
+              <div className={`flex justify-start animate-slide-up ${messages.length > 0 ? 'border-t border-white/[0.06] pt-5 mt-5' : ''}`}>
                 <div className="max-w-[92%] px-1 py-1 text-text-primary">
                   <ApprovalBanner
                     approval={nonWorkflowApproval}
@@ -2447,7 +2577,7 @@ export default function ChatPanel({
       )}
 
       {!historyMode && (
-        <div>
+        <div style={{ borderTop: '1px solid rgba(255,255,255,0.10)', background: '#131313', boxShadow: '0 -2px 8px rgba(0,0,0,0.45)' }}>
         <TabStrip
           tabs={tabs}
           activeTabId={activeTabId}
@@ -2456,7 +2586,60 @@ export default function ChatPanel({
           onNew={onNewTab}
           onReorder={onReorderTabs}
         />
-
+        {interruptedRun && (
+          <div className="mx-3 mb-3 rounded-xl border border-white/[0.08] bg-white/[0.03] px-3 py-2 text-[12px] text-text-secondary">
+            <div className="flex items-center justify-between gap-3">
+              <div className="min-w-0">
+                <span className="text-text-primary">Run interrupted</span>
+                {interruptedRun.goal ? `: ${interruptedRun.goal}` : ''}
+              </div>
+              <button
+                type="button"
+                className="flex-shrink-0 rounded-md bg-white/[0.06] px-2 py-1 text-[11px] text-text-primary transition-colors hover:bg-white/[0.1]"
+                onClick={() => window.dispatchEvent(new CustomEvent('clawdia:prefill-input', { detail: interruptedRun.goal ?? 'continue' }))}
+              >
+                Retry
+              </button>
+              <button
+                type="button"
+                className="flex-shrink-0 rounded-md px-2 py-1 text-[11px] text-text-secondary transition-colors hover:bg-white/[0.06] hover:text-text-primary"
+                onClick={() => setInterruptedRun(null)}
+              >
+                Dismiss
+              </button>
+            </div>
+          </div>
+        )}
+        {priorSessionPeek?.hasPriorSession && (
+          <div className="mx-3 mb-3 rounded-xl border border-white/[0.08] bg-white/[0.03] px-3 py-2 text-[12px] text-text-secondary">
+            <div className="flex items-center justify-between gap-3">
+              <div className="min-w-0">
+                <span className="text-text-primary">Recent session available</span>
+                {priorSessionPeek.title ? `: ${priorSessionPeek.title}` : ''}. Ask "continue" or "what were we working on?" to pull it in only when needed.
+              </div>
+              <button
+                type="button"
+                className="flex-shrink-0 rounded-md bg-white/[0.06] px-2 py-1 text-[11px] text-text-primary transition-colors hover:bg-white/[0.1]"
+                onClick={() => window.dispatchEvent(new CustomEvent('clawdia:prefill-input', { detail: 'continue' }))}
+              >
+                Continue
+              </button>
+              <button
+                type="button"
+                className="flex-shrink-0 rounded-md px-2 py-1 text-[11px] text-text-secondary transition-colors hover:bg-white/[0.06] hover:text-text-primary"
+                onClick={() => {
+                  const sessionId = priorSessionPeek.sessionId;
+                  if (sessionId) {
+                    void (window as any).clawdia?.session?.dismiss?.(sessionId);
+                  }
+                  setPriorSessionPeek(null);
+                }}
+              >
+                Dismiss
+              </button>
+            </div>
+          </div>
+        )}
       <InputBar
         onSend={handleSend}
         isStreaming={isStreaming}

@@ -13,12 +13,25 @@ export interface KnownTarget {
     confidence: number;
 }
 
+export interface WindowGeometry {
+    x: number;
+    y: number;
+    width: number;
+    height: number;
+    /** Zero-based monitor index derived from xrandr output. */
+    monitor: number;
+    /** Human-readable monitor label, e.g. "HDMI-1 (2560x1440 @ 0,0)". */
+    monitorLabel: string;
+}
+
 export interface FocusedWindow {
     title: string;
     /** Canonical app identifier (e.g. "gimp", "code"). */
     app: string;
     /** Timestamp of last confirmed focus. */
     focusedAt: number;
+    /** Geometry at time of last focus/attach. Null if not yet measured. */
+    geometry: WindowGeometry | null;
 }
 
 export interface DesktopState {
@@ -51,11 +64,17 @@ export const desktopState: DesktopState = createDesktopState();
 
 // ─── State mutation helpers ───────────────────────────────────────────────────
 
-export function recordFocus(state: DesktopState, title: string, app: string): void {
-    state.focusedWindow = { title, app: app || guessApp(title), focusedAt: Date.now() };
+export function recordFocus(state: DesktopState, title: string, app: string, geometry?: WindowGeometry): void {
+    state.focusedWindow = { title, app: app || guessApp(title), focusedAt: Date.now(), geometry: geometry ?? null };
     state.activeApp = state.focusedWindow.app;
     // Grow confidence on successful focus
     state.confidence = Math.min(1.0, state.confidence + 0.1);
+}
+
+export function recordGeometry(state: DesktopState, geometry: WindowGeometry): void {
+    if (state.focusedWindow) {
+        state.focusedWindow.geometry = geometry;
+    }
 }
 
 export function recordSkippedFocus(state: DesktopState): void {

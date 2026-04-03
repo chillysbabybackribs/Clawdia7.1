@@ -162,47 +162,6 @@ export function getMemoryContext(userMessage: string): string {
     // Silently skip facts if DB unavailable
   }
 
-  try {
-    // Conversation recall: last 90 days, limit 3 snippets
-    const cutoff = Date.now() - 90 * 24 * 60 * 60 * 1000;
-    const ftsQuery = userMessage.slice(0, 200);
-    let snippets: { content: string }[] = [];
-    try {
-      snippets = getDb()
-        .prepare(
-          `SELECT m.content FROM messages m
-           JOIN messages_fts fts ON m.rowid = fts.rowid
-           WHERE messages_fts MATCH ?
-             AND m.created_at > ?
-           ORDER BY rank
-           LIMIT 3`
-        )
-        .all(ftsQuery, cutoff) as { content: string }[];
-    } catch {
-      // FTS failed silently — skip conversation recall
-    }
-
-    if (snippets.length > 0) {
-      const lines = snippets
-        .map(s => {
-          // content is JSON-serialized Message — extract plain text
-          try {
-            const msg = JSON.parse(s.content);
-            const text = typeof msg.content === 'string'
-              ? msg.content
-              : JSON.stringify(msg.content);
-            return `- "${text.slice(0, 200)}"`;
-          } catch {
-            return `- "${s.content.slice(0, 200)}"`;
-          }
-        })
-        .join('\n');
-      parts.push(`[Past conversations]\n${lines}`);
-    }
-  } catch {
-    // Silently skip conversation recall if DB unavailable
-  }
-
   if (parts.length === 0) return '';
 
   const result = parts.join('\n\n');

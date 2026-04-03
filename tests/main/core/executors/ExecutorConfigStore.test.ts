@@ -28,7 +28,6 @@ describe('loadExecutorConfigs', () => {
     expect(configs.agentLoop.enabled).toBe(true);
     expect(configs.agentLoop.sameConversationPolicy).toBe('exclusive');
     expect(configs.agentLoop.timeoutMs).toBe(0);
-    expect(configs.agentLoop.pipelineEnabled).toBe(true);
     expect(configs.agentLoop.maxSessionTurns).toBe(20);
     expect(configs.agentLoop.maxMappingSessionTurns).toBe(6);
 
@@ -64,7 +63,6 @@ describe('loadExecutorConfigs', () => {
     expect(configs.codex.resumeThread).toBe(false);
 
     // Non-overridden defaults survive
-    expect(configs.agentLoop.pipelineEnabled).toBe(true);
     expect(configs.agentLoop.maxMappingSessionTurns).toBe(6);
     expect(configs.claudeCode.enabled).toBe(true);
     expect(configs.concurrent.enabled).toBe(false);
@@ -110,7 +108,6 @@ describe('patchExecutorConfig', () => {
     const saved = (saveSettings as ReturnType<typeof vi.fn>).mock.calls[0][0];
     expect(saved.executorConfigs.agentLoop.enabled).toBe(false);
     // Other agentLoop fields should survive
-    expect(saved.executorConfigs.agentLoop.pipelineEnabled).toBe(true);
     expect(saved.executorConfigs.agentLoop.maxSessionTurns).toBe(20);
   });
 

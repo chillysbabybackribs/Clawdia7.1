@@ -237,6 +237,7 @@ export class TerminalSessionController extends EventEmitter {
     if (session.kind === 'archived') {
       return {
         sessionId: session.sessionId,
+        pid: null,
         owner: session.owner,
         mode: session.mode,
         connected: false,
@@ -250,6 +251,7 @@ export class TerminalSessionController extends EventEmitter {
     }
     return {
       sessionId: session.sessionId,
+      pid: session.proc.pid,
       owner: session.owner,
       mode: session.mode,
       connected: true,

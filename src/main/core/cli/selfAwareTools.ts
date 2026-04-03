@@ -52,7 +52,9 @@ export const SELF_AWARE_TOOLS: Anthropic.Tool[] = [
     name: 'agent_plan',
     description:
       'Read or write a free-text scratchpad plan scoped to the current run. ' +
-      'Use this to persist reasoning, sub-goals, or a checklist across iterations. ' +
+      'Use ONLY for genuinely complex multi-phase tasks where you need to track sub-goals across many iterations. ' +
+      'Do NOT use for simple linear tasks, single-step execution, or post-task summaries. ' +
+      'Do NOT use agent_plan as a reporting tool, status log, or completion marker. ' +
       'The plan is only visible to the agent — it is not shown to the user.',
     input_schema: {
       type: 'object' as const,
@@ -152,6 +154,9 @@ function execToolCallHistory(input: Record<string, unknown>, ctx: DispatchContex
     name: c.name,
     input_summary: JSON.stringify(c.input).slice(0, 150),
     result_summary: c.result.slice(0, 200),
+    elapsed_ms: c.elapsed_ms,
+    success: c.success,
+    start_ts: c.startMs,
   }));
   return JSON.stringify({
     ok: true,
@@ -166,6 +171,7 @@ function execToolCallHistory(input: Record<string, unknown>, ctx: DispatchContex
 function execAgentPlan(input: Record<string, unknown>, ctx: DispatchContext): string {
   const action = input.action as string;
   const content = input.content as string | undefined;
+  console.log(`[self-aware:agent_plan] action=${action} runId=${ctx.runId} iteration=${ctx.iterationIndex + 1} toolCallCount=${ctx.toolCallCount}`);
 
   if (action === 'read') {
     const plan = planStore.get(ctx.runId) ?? '';

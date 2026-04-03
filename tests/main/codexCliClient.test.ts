@@ -8,6 +8,9 @@ process.env.CLAWDIA_DB_PATH_OVERRIDE = path.join(os.tmpdir(), `clawdia-codex-tes
 const mockStdout = new EventEmitter() as any;
 const mockStderr = new EventEmitter() as any;
 const mockChild = new EventEmitter() as any;
+mockStdout.setMaxListeners(0);
+mockStderr.setMaxListeners(0);
+mockChild.setMaxListeners(0);
 mockChild.stdout = mockStdout;
 mockChild.stderr = mockStderr;
 mockChild.stdin = { write: vi.fn(), end: vi.fn() };
@@ -32,17 +35,16 @@ beforeEach(() => {
   initDb();
   clearCodexSessions();
   vi.clearAllMocks();
+  mockStdout.removeAllListeners();
+  mockStderr.removeAllListeners();
+  mockChild.removeAllListeners();
   (spawn as any).mockReturnValue(mockChild);
   mockChild.stdin = { write: vi.fn(), end: vi.fn() };
 });
 
 describe('runCodexCli', () => {
-  it('buildCodexPrompt injects matched skill instructions', () => {
+  it('buildCodexPrompt returns the original prompt when no runtime guidance is available', () => {
     const prompt = buildCodexPrompt('audit the codex implementation and improve performance');
-    expect(prompt).toContain('RUNTIME GUIDANCE');
-    expect(prompt).toContain('Situational Context');
-    expect(prompt).toContain('ACTIVE SKILLS');
-    expect(prompt).toContain('[User task]');
     expect(prompt).toContain('audit the codex implementation');
   });
 
@@ -60,7 +62,7 @@ describe('runCodexCli', () => {
     );
   });
 
-  it('writes the compiled prompt with matched skill context to stdin', async () => {
+  it('writes the prompt to stdin', async () => {
     const promise = runCodexCli({
       conversationId: 'conv-1',
       prompt: 'audit the codex implementation',
@@ -71,8 +73,7 @@ describe('runCodexCli', () => {
     mockChild.emit('close', 0);
     await promise;
 
-    expect(mockChild.stdin.write).toHaveBeenCalledWith(expect.stringContaining('ACTIVE SKILLS'));
-    expect(mockChild.stdin.write).toHaveBeenCalledWith(expect.stringContaining('[User task]'));
+    expect(mockChild.stdin.write).toHaveBeenCalledWith(expect.stringContaining('audit the codex implementation'));
   });
 
   it('emits completed agent messages via onText', async () => {

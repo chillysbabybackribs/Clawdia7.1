@@ -1,5 +1,7 @@
 // src/main/agent/classify.ts
 import type { AgentProfile, ToolGroup, ModelTier } from './types';
+import { hasQuietExecuteSignal } from './promptBuilder';
+import { detectServiceHints } from './serviceResolver';
 
 export function classify(
   message: string,
@@ -14,18 +16,53 @@ export function classify(
   const modelTier = forced?.modelTier ?? detectModelTier(lower, toolGroup);
   const isGreeting = forced?.isGreeting ?? detectGreeting(message.trim());
   const isContinuation = forced?.isContinuation ?? isContinuationRequest(message);
-  return { toolGroup, modelTier, isGreeting, isContinuation, specialMode, mappingTarget, mappingPhase };
+  const linearExecution = forced?.linearExecution ?? hasQuietExecuteSignal(message);
+  const serviceHints = forced?.serviceHints ?? detectServiceHints(message);
+  return { toolGroup, modelTier, isGreeting, isContinuation, specialMode, mappingTarget, mappingPhase, linearExecution, serviceHints };
 }
 
+/**
+ * Detect tool group from message.
+ *
+ * Priority: app_mapping > desktop > browser > coding > core > full
+ *
+ * Rules tightened to reduce false positives:
+ * - Desktop requires clear GUI/automation intent, not just "window" or "click" in
+ *   casual usage (e.g. "click the link" is browser, not desktop).
+ * - Browser requires URL patterns or explicit web-research phrasing, not just
+ *   "search" (which could mean code search).
+ * - Coding uses word boundaries and requires code-specific terms.
+ * - Core (filesystem) requires explicit file-operation verbs, not just "file" or
+ *   "read" in casual context.
+ * - Full is the safe fallback — it has search_tools for self-discovery.
+ */
 function detectToolGroup(msg: string): ToolGroup {
   if (isAppMappingRequest(msg)) return 'desktop';
-  if (/click|screenshot|desktop|gui|window\s+app/.test(msg)) return 'desktop';
-  if (/browser|search the web|navigate|url|website|http/.test(msg)) return 'browser';
-  if (/\b(?:research|look up|find info(?:rmation)?|search for|search about|learn about|tell me about|what is|what are)\b/.test(msg)) {
-    return 'browser';
-  }
-  if (/code|debug|refactor|typescript|javascript|python|function|class|method|test|lint/.test(msg)) return 'coding';
-  if (/\bfile\b|\bfolder\b|\bread\b|\bwrite\b|\bmove\b|\bcopy\b|\bdelete\b|\bdirectory\b/.test(msg)) return 'core';
+
+  // Desktop: explicit GUI automation requests (not just words like "window")
+  if (/\b(?:screenshot|gui\s+interact|xdotool|a11y|at-spi)\b/.test(msg)) return 'desktop';
+  if (/\bclick\b/.test(msg) && /\b(?:button|menu|dialog|toolbar|icon|desktop|app(?:lication)?)\b/.test(msg)) return 'desktop';
+
+  // Browser: URLs, explicit web navigation, or clear web-research phrasing
+  if (/https?:\/\/|\.com\b|\.org\b|\.io\b|\.dev\b/.test(msg)) return 'browser';
+  if (/\b(?:open|go to|navigate to|browse to|visit)\b.*\b(?:page|site|website|url)\b/.test(msg)) return 'browser';
+  if (/\b(?:search the web|web search|google|look up online|search online|find online)\b/.test(msg)) return 'browser';
+  if (/\b(?:research)\b/.test(msg) && /\b(?:online|web|internet|topic|article)\b/.test(msg)) return 'browser';
+
+  // Coding: code-specific actions with word boundaries
+  if (/\b(?:debug|refactor|implement|compile|transpile|lint|typecheck)\b/.test(msg)) return 'coding';
+  if (/\b(?:function|class|method|variable|module|import|export)\b/.test(msg)
+      && /\b(?:add|create|fix|change|rename|update|remove|write)\b/.test(msg)) return 'coding';
+  if (/\b(?:typescript|javascript|python|rust|golang|react|vue|angular)\b/.test(msg)
+      && /\b(?:code|project|app|error|bug|issue)\b/.test(msg)) return 'coding';
+
+  // Core (filesystem): explicit file operations, not casual mention of "file"
+  if (/\b(?:create|make|touch)\b.*\b(?:file|folder|directory)\b/.test(msg)) return 'core';
+  if (/\b(?:move|copy|rename|delete|remove)\b.*\b(?:file|folder|directory)\b/.test(msg)) return 'core';
+  if (/\b(?:read|write|edit|modify)\b.*\b(?:file|folder|directory|config|\.(?:json|yaml|toml|ini|conf|env|txt|csv))\b/.test(msg)) return 'core';
+  if (/\bls\b|\bcat\b|\bmkdir\b|\brm\b|\bcp\b|\bmv\b/.test(msg)) return 'core';
+
+  // Full: safe default — LLM gets search_tools to discover what it needs
   return 'full';
 }
 

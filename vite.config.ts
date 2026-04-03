@@ -19,5 +19,13 @@ export default defineConfig({
   build: {
     outDir: path.resolve(__dirname, 'dist/renderer'),
     emptyOutDir: true,
+    rollupOptions: {
+      output: {
+        manualChunks: {
+          'vendor-markdown': ['react-markdown', 'remark-gfm'],
+          'vendor-react': ['react', 'react-dom'],
+        },
+      },
+    },
   },
 });

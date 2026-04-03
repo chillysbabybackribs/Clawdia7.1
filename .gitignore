@@ -21,3 +21,10 @@ __pycache__/
 
 # OS files
 Thumbs.db
+
+# Test output
+coverage/
+
+# Scratch / one-off files
+google-landing-clone.html
+AUDIT-REPORT.md

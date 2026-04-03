@@ -7,7 +7,7 @@ This file gives me grounding in the live environment. Load it for any non-chat t
 - OS: Linux (x86_64), user: dp, home: /home/dp
 - App name: clawdia7 (Electron, frameless window, 1400×900)
 - App process: Node.js main process + Chromium renderer process
-- Source tree: `~/Desktop/clawdia7.0/`
+- Source tree: `~/Desktop/Clawdia7.1/`
 - Settings file: `~/.config/clawdia7/clawdia-settings.json`
 - Database: SQLite, path resolved at runtime via `initDb()` in `src/main/db.ts`
 
@@ -22,7 +22,12 @@ src/
       cli/           ← shell, file, browser, memory, workspace tools
       desktop/       ← GUI automation: a11y, screenshot, dbus, coordinate tools
       terminal/      ← terminal session controller
-      executors/     ← provider-specific chat executors
+      executors/     ← concurrent executor, config, registry, router
+      providers/     ← Anthropic, OpenAI, Gemini message protocols
+    db/              ← memory, agents, policies, response cache, spending
+    ipc/             ← ChatIpc, BrowserIpc, AgentIpc, RunIpc
+    skills/          ← prompt composition stub
+    prompts/         ← prompt assembler
     db.ts            ← SQLite init
     main.ts          ← Electron entry point
     registerIpc.ts   ← IPC channel registration
@@ -32,7 +37,7 @@ src/
     App.tsx          ← root renderer component
   shared/
     model-registry.ts ← provider + model definitions
-system/              ← capability file system (this directory)
+system/              ← recovery playbooks, registry configs
 ```
 
 ## App UI Structure
@@ -40,26 +45,24 @@ system/              ← capability file system (this directory)
 The Clawdia window has these panels:
 
 ```
-┌─────────────────────────────────────────────────────┐
-│ AppChrome (top bar: clock, VPN toggle, window controls) │
-├──────────────┬──────────────────────────────────────┤
-│  TabStrip    │  active panel (chat / browser / terminal) │
-│  (left side) │                                      │
-│  conversation│  ChatPanel:                          │
-│  tabs        │    message history + streaming       │
-│              │    ToolActivity cards (per tool call)│
-│              │    InputBar (bottom of chat)         │
-│              ├──────────────────────────────────────┤
-│              │  BrowserPanel (embedded Chromium)    │
-│              ├──────────────────────────────────────┤
-│              │  TerminalPanel (pty sessions)        │
-└──────────────┴──────────────────────────────────────┘
+┌──────────────────────────────────────────────────┐
+│ AppChrome (top bar: workspace, history, terminal, │
+│   settings, VPN, files controls)                  │
+├──────────────────────────────────────────────────┤
+│ TabStrip (conversation tabs with + button)        │
+├──────────────────────────────────────────────────┤
+│  Left pane (35%)          │  Right pane (65%)     │
+│  ChatPanel:               │  BrowserPanel         │
+│    message history        │  -or- EditorPanel     │
+│    ToolActivity cards     │  -or- TerminalPanel   │
+│    InputBar (bottom)      │                       │
+└──────────────────────────────────────────────────┘
 ```
 
 Key UI concepts:
 - **Conversation tab** — a chat session in the TabStrip. Each tab has its own message history and run state.
 - **Browser tab** — a web page inside the embedded Chromium BrowserPanel. Separate from conversation tabs.
-- The InputBar contains: text input, model selector, provider toggle, send button.
+- The InputBar contains: send button (left), text input (center), model selector (top-right), attach file button (right).
 - ToolActivity cards appear inline in the chat as tools run, showing name, status, input/output.
 
 ## Tool Architecture

@@ -4,6 +4,7 @@ export const IPC = {
   CHAT_PAUSE: 'chat:pause',
   CHAT_RESUME: 'chat:resume',
   CHAT_ADD_CONTEXT: 'chat:add-context',
+  CHAT_COMPRESS: 'chat:compress',
   CHAT_RATE_TOOL: 'chat:rate-tool',
   CHAT_NEW: 'chat:new',
   CHAT_CREATE: 'chat:create',
@@ -69,7 +70,6 @@ export const IPC = {
   AGENT_HISTORY: 'agent:history',
   AGENT_TEST: 'agent:test',
   POLICY_LIST: 'policy:list',
-  CALENDAR_LIST: 'calendar:list',
   // Terminal
   TERMINAL_SPAWN: 'terminal:spawn',
   TERMINAL_WRITE: 'terminal:write',
@@ -95,6 +95,9 @@ export const IPC = {
   DESKTOP_LIST_APPS: 'desktop:list-apps',
   DESKTOP_FOCUS_APP: 'desktop:focus-app',
   DESKTOP_KILL_APP: 'desktop:kill-app',
+  // Emitted by smartFocus before stealing OS focus from the user's active window.
+  // Payload: { targetWindow: string } — lets the UI show a non-blocking warning toast.
+  DESKTOP_FOCUS_STEAL_WARNING: 'desktop:focus-steal-warning',
   // Browser sessions
   BROWSER_LIST_SESSIONS: 'browser:list-sessions',
   BROWSER_CLEAR_SESSION: 'browser:clear-session',
@@ -153,6 +156,9 @@ export const IPC = {
   TASK_GET: 'task:get',
   TASK_GET_LATEST: 'task:get-latest',
   TASK_LIST: 'task:list',
+  SESSION_PEEK_LATEST: 'session:peek-latest',
+  SESSION_RECALL: 'session:recall',
+  SESSION_DISMISS: 'session:dismiss',
 } as const;
 
 export const IPC_EVENTS = {
@@ -164,6 +170,7 @@ export const IPC_EVENTS = {
   CHAT_THINKING: 'chat:thinking',
   CHAT_PROMPT_DEBUG: 'chat:prompt-debug',
   CHAT_TOOL_ACTIVITY: 'chat:tool-activity',
+  CHAT_CONTEXT_PRESSURE: 'chat:context-pressure',
   CHAT_TOOL_STREAM: 'chat:tool-stream',
   CHAT_CLAUDE_STATUS: 'chat:claude-status',
   BROWSER_URL_CHANGED: 'browser:url-changed',
@@ -173,13 +180,9 @@ export const IPC_EVENTS = {
   BROWSER_MODE_CHANGED: 'browser:mode-changed',
   // Process events (pushed from main to renderer)
   PROCESS_LIST_CHANGED: 'process:list',
-  CALENDAR_EVENTS_CHANGED: 'calendar:events-changed',
   // Swarm events (pushed from main to renderer)
   SWARM_STATE_CHANGED: 'swarm:state-changed',
-  // Concurrent planner events (pushed from main to renderer)
-  CONCURRENT_PLAN_START: 'concurrent:plan:start',
-  CONCURRENT_PLAN_TEXT: 'concurrent:plan:text',
-  CONCURRENT_PLAN_END: 'concurrent:plan:end',
+  // Concurrent execution events (pushed from main to renderer)
   CONCURRENT_EXECUTION_START: 'concurrent:execution:start',
   CONCURRENT_EXECUTION_END: 'concurrent:execution:end',
   // Identity events (pushed from main to renderer)
@@ -197,4 +200,5 @@ export const IPC_EVENTS = {
   TERMINAL_EXIT: 'terminal:exit',
   TERMINAL_EVENT: 'terminal:event',
   TERMINAL_SESSION_STATE: 'terminal:session-state',
+  CHAT_TITLE_UPDATED: 'chat:title-updated',
 } as const;

@@ -56,6 +56,31 @@ export class ElectronBrowserService implements BrowserService {
   // browser tab so concurrent runs cannot corrupt each other's page state.
   private readonly convTabMap = new Map<string, string>();
 
+  // ── Per-tab input serialization queue ────────────────────────────────────────
+  // Maps tabId → the tail of a promise chain for that tab's input operations.
+  //
+  // Without this, two concurrent agent steps targeting the same tab interleave
+  // CDP events arbitrarily: e.g. agent A's mousePressed arrives between agent B's
+  // mousePressed and mouseReleased, corrupting both clicks.
+  //
+  // Every *OnTab input method (click, type, hover, drag, scroll, key, right-click,
+  // double-click) must be enqueued via tabInputQueue() so they run serially per tab.
+  // Read-only operations (screenshot, extractText, getPageState) do not queue since
+  // they have no side-effects and concurrent reads are safe.
+  private readonly tabInputQueues = new Map<string, Promise<unknown>>();
+
+  /**
+   * Enqueue an async input operation for a specific tab.
+   * Returns the result of fn() once all previously-enqueued operations for this
+   * tab have completed. Errors in earlier operations do not block later ones.
+   */
+  private tabInputQueue<T>(tabId: string, fn: () => Promise<T>): Promise<T> {
+    const prev = this.tabInputQueues.get(tabId) ?? Promise.resolve();
+    const next = prev.then(fn, fn as any); // always advance the chain even on error
+    this.tabInputQueues.set(tabId, next.catch(() => {})); // keep tail error-silent
+    return next;
+  }
+
   constructor(
     private readonly window: BrowserWindow,
     private readonly userDataPath: string,
@@ -761,6 +786,8 @@ export class ElectronBrowserService implements BrowserService {
     this.convTabMap.delete(conversationId);
     const tab = this.tabs.get(tabId);
     if (!tab) return;
+    // Drop the input queue for this tab so it doesn't hold references.
+    this.tabInputQueues.delete(tabId);
     // If this tab is currently shown in the window, detach it first.
     if (this.window.getBrowserView() === tab.view) this.window.setBrowserView(null);
     tab.view.webContents.close();
@@ -786,6 +813,14 @@ export class ElectronBrowserService implements BrowserService {
     if (!tab) return;
     console.log(`[BrowserService] Switched browser to conversation ${conversationId} → tab ${tabId}`);
     await this.activateTab(tab);
+  }
+
+  async getActiveTabOwner(): Promise<string | null> {
+    if (!this.activeTabId) return null;
+    for (const [conversationId, tabId] of this.convTabMap.entries()) {
+      if (tabId === this.activeTabId) return conversationId;
+    }
+    return null;
   }
 
   /**
@@ -880,11 +915,90 @@ export class ElectronBrowserService implements BrowserService {
     return { path: filePath, mimeType: 'image/png', width: size.width, height: size.height };
   }
 
-  /** Click on a specific tab. */
+  /**
+   * Capture a screenshot of a specific tab and return raw RGBA pixel data for diffing.
+   * Used internally by verifyActionOnTab — not exposed as an agent tool.
+   */
+  private async captureRawOnTab(tabId: string): Promise<{ buf: Buffer; w: number; h: number } | null> {
+    const tab = this.tabs.get(tabId);
+    if (!tab) return null;
+    const image = await tab.view.webContents.capturePage();
+    const size = image.getSize();
+    return { buf: image.toBitmap(), w: size.width, h: size.height };
+  }
+
+  /**
+   * Compute the fraction of pixels that differ between two RGBA bitmaps.
+   * Samples every Nth pixel for speed (N chosen so ~10 000 samples are taken).
+   * Returns a value in [0, 1]: 0 = identical, 1 = every pixel different.
+   */
+  private pixelDiffRatio(
+    a: Buffer,
+    b: Buffer,
+    w: number,
+    h: number,
+    threshold = 10,
+  ): number {
+    const totalPixels = w * h;
+    if (totalPixels === 0 || a.length !== b.length) return 1;
+    const stride = Math.max(1, Math.floor(totalPixels / 10_000));
+    let diffCount = 0;
+    let sampledCount = 0;
+    for (let i = 0; i < totalPixels; i += stride) {
+      const base = i * 4;
+      const dr = Math.abs(a[base]     - b[base]);
+      const dg = Math.abs(a[base + 1] - b[base + 1]);
+      const db = Math.abs(a[base + 2] - b[base + 2]);
+      if (dr > threshold || dg > threshold || db > threshold) diffCount++;
+      sampledCount++;
+    }
+    return sampledCount > 0 ? diffCount / sampledCount : 0;
+  }
+
+  /**
+   * Run a browser input action on a specific tab and verify it had a visible effect.
+   *
+   * Captures a screenshot before and after the action, computes the pixel-diff ratio,
+   * and returns { ok, diffRatio, changed } alongside the action's own result.
+   *
+   * changed = true when diffRatio > minDiffRatio (default 0.002 = 0.2% of pixels changed).
+   *
+   * Usage:
+   *   const result = await browser.verifyActionOnTab(tabId, () => browser.clickOnTab(tabId, sel));
+   *   if (!result.changed) console.warn('Click may have missed — page did not change');
+   */
+  async verifyActionOnTab(
+    tabId: string,
+    action: () => Promise<BrowserServiceResult>,
+    minDiffRatio = 0.002,
+    settleMs = 300,
+  ): Promise<BrowserServiceResult & { diffRatio: number; changed: boolean }> {
+    const before = await this.captureRawOnTab(tabId);
+    const actionResult = await action();
+    // Allow the page to paint the response before diffing
+    await new Promise(r => setTimeout(r, settleMs));
+    const after = await this.captureRawOnTab(tabId);
+
+    if (!before || !after || before.w !== after.w || before.h !== after.h) {
+      // Can't diff (tab gone or size changed due to layout shift) — trust the action result
+      return { ...actionResult, diffRatio: -1, changed: true };
+    }
+
+    const diffRatio = this.pixelDiffRatio(before.buf, after.buf, before.w, before.h);
+    return { ...actionResult, diffRatio, changed: diffRatio >= minDiffRatio };
+  }
+
+  /** Click on a specific tab.
+   *
+   * Uses CDP Input.dispatchMouseEvent so the click reaches the WebContents even when
+   * the BrowserView is not the currently-active (rendered) view. sendInputEvent() only
+   * works reliably on the compositor-attached view; CDP bypasses that restriction and
+   * delivers events directly to the renderer process — no OS cursor movement required.
+   */
   async clickOnTab(tabId: string, selector: string): Promise<BrowserServiceResult> {
     const wc = this.getTabWebContents(tabId);
     if (!wc) return { ok: false, error: `Tab ${tabId} not found` };
-    try {
+    return this.tabInputQueue(tabId, async () => { try {
       const rect = await wc.executeJavaScript(`
         (function() {
           function deepQuery(root, sel) {
@@ -897,26 +1011,89 @@ export class ElectronBrowserService implements BrowserService {
           }
           const el = deepQuery(document, ${JSON.stringify(selector)});
           if (!el) return null;
-          el.focus();
           const r = el.getBoundingClientRect();
           return { x: Math.round(r.left + r.width / 2), y: Math.round(r.top + r.height / 2) };
         })()
       `);
       if (!rect) return { ok: false, error: `Element not found: ${selector}` };
-      for (const type of ['mouseDown', 'mouseUp'] as const) {
-        wc.sendInputEvent({ type, x: rect.x, y: rect.y, button: 'left', clickCount: 1 } as any);
-      }
+      // CDP Input.dispatchMouseEvent works on any attached WebContents (active or background).
+      await this.cdpMouseEventOnTab(tabId, 'mousePressed', rect.x, rect.y, { button: 'left', clickCount: 1 });
+      await this.cdpMouseEventOnTab(tabId, 'mouseReleased', rect.x, rect.y, { button: 'left', clickCount: 1 });
       return { ok: true };
     } catch (err) {
       return { ok: false, error: (err as Error).message };
-    }
+    } });
+  }
+
+  /** Right-click on a specific tab (opens context menus, triggers contextmenu event handlers). */
+  async rightClickOnTab(tabId: string, selector: string): Promise<BrowserServiceResult> {
+    const wc = this.getTabWebContents(tabId);
+    if (!wc) return { ok: false, error: `Tab ${tabId} not found` };
+    return this.tabInputQueue(tabId, async () => { try {
+      const rect = await wc.executeJavaScript(`
+        (function() {
+          function deepQuery(root, sel) {
+            let el = root.querySelector(sel);
+            if (el) return el;
+            for (const node of root.querySelectorAll('*')) {
+              if (node.shadowRoot) { el = deepQuery(node.shadowRoot, sel); if (el) return el; }
+            }
+            return null;
+          }
+          const el = deepQuery(document, ${JSON.stringify(selector)});
+          if (!el) return null;
+          const r = el.getBoundingClientRect();
+          return { x: Math.round(r.left + r.width / 2), y: Math.round(r.top + r.height / 2) };
+        })()
+      `);
+      if (!rect) return { ok: false, error: `Element not found: ${selector}` };
+      await this.cdpMouseEventOnTab(tabId, 'mousePressed', rect.x, rect.y, { button: 'right', clickCount: 1 });
+      await this.cdpMouseEventOnTab(tabId, 'mouseReleased', rect.x, rect.y, { button: 'right', clickCount: 1 });
+      return { ok: true };
+    } catch (err) {
+      return { ok: false, error: (err as Error).message };
+    } });
+  }
+
+  /** Double-click on a specific tab (selects words in text fields, triggers dblclick handlers). */
+  async doubleClickOnTab(tabId: string, selector: string): Promise<BrowserServiceResult> {
+    const wc = this.getTabWebContents(tabId);
+    if (!wc) return { ok: false, error: `Tab ${tabId} not found` };
+    return this.tabInputQueue(tabId, async () => { try {
+      const rect = await wc.executeJavaScript(`
+        (function() {
+          function deepQuery(root, sel) {
+            let el = root.querySelector(sel);
+            if (el) return el;
+            for (const node of root.querySelectorAll('*')) {
+              if (node.shadowRoot) { el = deepQuery(node.shadowRoot, sel); if (el) return el; }
+            }
+            return null;
+          }
+          const el = deepQuery(document, ${JSON.stringify(selector)});
+          if (!el) return null;
+          const r = el.getBoundingClientRect();
+          return { x: Math.round(r.left + r.width / 2), y: Math.round(r.top + r.height / 2) };
+        })()
+      `);
+      if (!rect) return { ok: false, error: `Element not found: ${selector}` };
+      // A double-click is two press/release pairs at clickCount 1 and 2.
+      // CDP requires clickCount to increment so the browser fires the dblclick event.
+      await this.cdpMouseEventOnTab(tabId, 'mousePressed',  rect.x, rect.y, { button: 'left', clickCount: 1 });
+      await this.cdpMouseEventOnTab(tabId, 'mouseReleased', rect.x, rect.y, { button: 'left', clickCount: 1 });
+      await this.cdpMouseEventOnTab(tabId, 'mousePressed',  rect.x, rect.y, { button: 'left', clickCount: 2 });
+      await this.cdpMouseEventOnTab(tabId, 'mouseReleased', rect.x, rect.y, { button: 'left', clickCount: 2 });
+      return { ok: true };
+    } catch (err) {
+      return { ok: false, error: (err as Error).message };
+    } });
   }
 
   /** Type into a specific tab. */
   async typeOnTab(tabId: string, selector: string, text: string, clearFirst = true): Promise<BrowserServiceResult> {
     const wc = this.getTabWebContents(tabId);
     if (!wc) return { ok: false, error: `Tab ${tabId} not found` };
-    try {
+    return this.tabInputQueue(tabId, async () => { try {
       const info = await wc.executeJavaScript(`
         (function() {
           function deepQuery(root, sel) {
@@ -939,9 +1116,9 @@ export class ElectronBrowserService implements BrowserService {
         })()
       `);
       if (!info) return { ok: false, error: `Element not found: ${selector}` };
-      for (const evType of ['mouseDown', 'mouseUp'] as const) {
-        wc.sendInputEvent({ type: evType, x: info.x, y: info.y, button: 'left', clickCount: 1 } as any);
-      }
+      // Focus via CDP mouse events — works on background (non-active) tabs unlike sendInputEvent.
+      await this.cdpMouseEventOnTab(tabId, 'mousePressed', info.x, info.y, { button: 'left', clickCount: 1 });
+      await this.cdpMouseEventOnTab(tabId, 'mouseReleased', info.x, info.y, { button: 'left', clickCount: 1 });
       await new Promise(r => setTimeout(r, 60));
       if (info.isNative) {
         if (clearFirst) {
@@ -963,8 +1140,9 @@ export class ElectronBrowserService implements BrowserService {
             })()
           `);
         }
+        // CDP Input.dispatchKeyEvent('char') works on background tabs; sendInputEvent does not.
         for (const char of text) {
-          wc.sendInputEvent({ type: 'char', keyCode: char } as any);
+          await this.cdpKeyEventOnTab(tabId, 'char', char, { text: char });
           await new Promise(r => setTimeout(r, 12));
         }
       } else {
@@ -992,15 +1170,21 @@ export class ElectronBrowserService implements BrowserService {
       return { ok: true };
     } catch (err) {
       return { ok: false, error: (err as Error).message };
-    }
+    } });
   }
 
-  /** Scroll on a specific tab. */
+  /** Scroll on a specific tab.
+   *
+   * With a selector: scrolls the element into view via JS (fine for background tabs — no rendering needed).
+   * Without a selector: uses CDP Input.dispatchMouseEvent(mouseWheel) which reaches the renderer even
+   * on background tabs and correctly triggers scroll handlers on canvas-heavy / custom-scroll pages.
+   */
   async scrollOnTab(tabId: string, selector: string | null, deltaY = 500): Promise<BrowserServiceResult> {
     const wc = this.getTabWebContents(tabId);
     if (!wc) return { ok: false, error: `Tab ${tabId} not found` };
-    try {
+    return this.tabInputQueue(tabId, async () => { try {
       if (selector) {
+        // scrollIntoView is a layout operation — works fine via JS on any WebContents.
         await wc.executeJavaScript(`
           (function() {
             function deepQuery(root, sel) {
@@ -1016,12 +1200,19 @@ export class ElectronBrowserService implements BrowserService {
           })()
         `);
       } else {
-        await wc.executeJavaScript(`window.scrollBy(0, ${deltaY})`);
+        // CDP mouseWheel works on background tabs and on canvas/custom-scroll surfaces.
+        // Deliver the wheel event at the viewport centre so the right scroll container receives it.
+        const size = await wc.executeJavaScript(
+          '({ w: window.innerWidth, h: window.innerHeight })'
+        ) as { w: number; h: number };
+        const cx = Math.round(size.w / 2);
+        const cy = Math.round(size.h / 2);
+        await this.cdpMouseEventOnTab(tabId, 'mouseWheel', cx, cy, { deltaY });
       }
       return { ok: true };
     } catch (err) {
       return { ok: false, error: (err as Error).message };
-    }
+    } });
   }
 
   /** Wait for selector on a specific tab. */
@@ -1112,12 +1303,18 @@ export class ElectronBrowserService implements BrowserService {
     }
   }
 
-  /** Hover on a specific tab. */
+  /** Hover on a specific tab.
+   *
+   * Uses CDP Input.dispatchMouseEvent(mouseMoved) which triggers Chromium's compositor-level
+   * hover tracking — :hover CSS states, tooltip timers, and framework mouseenter handlers all
+   * fire correctly. Pure JS MouseEvent dispatch (the previous implementation) only reaches
+   * script handlers and does not update the compositor's hit-test state.
+   */
   async hoverOnTab(tabId: string, selector: string): Promise<BrowserServiceResult> {
     const wc = this.getTabWebContents(tabId);
     if (!wc) return { ok: false, error: `Tab ${tabId} not found` };
-    try {
-      const found = await wc.executeJavaScript(`
+    return this.tabInputQueue(tabId, async () => { try {
+      const rect = await wc.executeJavaScript(`
         (function() {
           function deepQuery(root, sel) {
             let el = root.querySelector(sel);
@@ -1128,30 +1325,170 @@ export class ElectronBrowserService implements BrowserService {
             return null;
           }
           const el = deepQuery(document, ${JSON.stringify(selector)});
-          if (!el) return false;
-          el.dispatchEvent(new MouseEvent('mouseover',  { bubbles: true }));
-          el.dispatchEvent(new MouseEvent('mouseenter', { bubbles: true }));
-          return true;
+          if (!el) return null;
+          const r = el.getBoundingClientRect();
+          return { x: Math.round(r.left + r.width / 2), y: Math.round(r.top + r.height / 2) };
         })()
       `);
-      if (!found) return { ok: false, error: `Element not found: ${selector}` };
+      if (!rect) return { ok: false, error: `Element not found: ${selector}` };
+      await this.cdpMouseEventOnTab(tabId, 'mouseMoved', rect.x, rect.y);
       return { ok: true };
     } catch (err) {
       return { ok: false, error: (err as Error).message };
-    }
+    } });
   }
 
-  /** Key press on a specific tab. */
+  /** Key press on a specific tab.
+   *
+   * Uses CDP Input.dispatchKeyEvent so the key reaches the renderer even when the
+   * BrowserView is not the currently-active compositor view.
+   */
   async keyPressOnTab(tabId: string, key: string): Promise<BrowserServiceResult> {
-    const wc = this.getTabWebContents(tabId);
-    if (!wc) return { ok: false, error: `Tab ${tabId} not found` };
-    try {
-      wc.sendInputEvent({ type: 'keyDown', keyCode: key } as any);
-      wc.sendInputEvent({ type: 'keyUp',   keyCode: key } as any);
+    if (!this.getTabWebContents(tabId)) return { ok: false, error: `Tab ${tabId} not found` };
+    return this.tabInputQueue(tabId, async () => { try {
+      await this.cdpKeyEventOnTab(tabId, 'keyDown', key);
+      await this.cdpKeyEventOnTab(tabId, 'keyUp', key);
       return { ok: true };
     } catch (err) {
       return { ok: false, error: (err as Error).message };
-    }
+    } });
+  }
+
+  /** Drag from one coordinate to another on a specific tab.
+   *
+   * Emits a proper CDP mouse sequence: mousePressed → N mouseMoved steps → mouseReleased.
+   * Works on canvas-heavy pages, sortable lists, sliders, and custom drag targets.
+   * No OS cursor movement — runs entirely inside the renderer via CDP.
+   */
+  async dragOnTab(
+    tabId: string,
+    fromSelector: string,
+    toSelector: string,
+    steps = 10,
+  ): Promise<BrowserServiceResult> {
+    const wc = this.getTabWebContents(tabId);
+    if (!wc) return { ok: false, error: `Tab ${tabId} not found` };
+    return this.tabInputQueue(tabId, async () => { try {
+      const coords = await wc.executeJavaScript(`
+        (function() {
+          function deepQuery(root, sel) {
+            let el = root.querySelector(sel);
+            if (el) return el;
+            for (const node of root.querySelectorAll('*')) {
+              if (node.shadowRoot) { el = deepQuery(node.shadowRoot, sel); if (el) return el; }
+            }
+            return null;
+          }
+          const from = deepQuery(document, ${JSON.stringify(fromSelector)});
+          const to   = deepQuery(document, ${JSON.stringify(toSelector)});
+          if (!from || !to) return null;
+          const fr = from.getBoundingClientRect();
+          const tr = to.getBoundingClientRect();
+          return {
+            fx: Math.round(fr.left + fr.width / 2),
+            fy: Math.round(fr.top  + fr.height / 2),
+            tx: Math.round(tr.left + tr.width / 2),
+            ty: Math.round(tr.top  + tr.height / 2),
+          };
+        })()
+      `);
+      if (!coords) return { ok: false, error: `One or both selectors not found: ${fromSelector}, ${toSelector}` };
+      const { fx, fy, tx, ty } = coords;
+      await this.cdpMouseEventOnTab(tabId, 'mousePressed', fx, fy, { button: 'left', clickCount: 1 });
+      for (let i = 1; i <= steps; i++) {
+        const x = Math.round(fx + (tx - fx) * (i / steps));
+        const y = Math.round(fy + (ty - fy) * (i / steps));
+        await this.cdpMouseEventOnTab(tabId, 'mouseMoved', x, y, { button: 'left' });
+        await new Promise(r => setTimeout(r, 16)); // ~60fps
+      }
+      await this.cdpMouseEventOnTab(tabId, 'mouseReleased', tx, ty, { button: 'left', clickCount: 1 });
+      return { ok: true };
+    } catch (err) {
+      return { ok: false, error: (err as Error).message };
+    } });
+  }
+
+  // ── Coordinate-based input (no DOM selector required) ────────────────────────
+  // Useful for canvas elements, WebGL surfaces, game UIs, and any target that
+  // cannot be identified by a CSS selector. Coordinates are viewport-relative
+  // (same space as getBoundingClientRect). All methods are queued per-tab.
+
+  /** Click at absolute viewport coordinates on a specific tab. */
+  async clickAtOnTab(
+    tabId: string,
+    x: number,
+    y: number,
+    button: 'left' | 'right' | 'middle' = 'left',
+  ): Promise<BrowserServiceResult> {
+    if (!this.getTabWebContents(tabId)) return { ok: false, error: `Tab ${tabId} not found` };
+    return this.tabInputQueue(tabId, async () => { try {
+      await this.cdpMouseEventOnTab(tabId, 'mousePressed',  x, y, { button, clickCount: 1 });
+      await this.cdpMouseEventOnTab(tabId, 'mouseReleased', x, y, { button, clickCount: 1 });
+      return { ok: true };
+    } catch (err) {
+      return { ok: false, error: (err as Error).message };
+    } });
+  }
+
+  /** Double-click at absolute viewport coordinates on a specific tab. */
+  async doubleClickAtOnTab(tabId: string, x: number, y: number): Promise<BrowserServiceResult> {
+    if (!this.getTabWebContents(tabId)) return { ok: false, error: `Tab ${tabId} not found` };
+    return this.tabInputQueue(tabId, async () => { try {
+      await this.cdpMouseEventOnTab(tabId, 'mousePressed',  x, y, { button: 'left', clickCount: 1 });
+      await this.cdpMouseEventOnTab(tabId, 'mouseReleased', x, y, { button: 'left', clickCount: 1 });
+      await this.cdpMouseEventOnTab(tabId, 'mousePressed',  x, y, { button: 'left', clickCount: 2 });
+      await this.cdpMouseEventOnTab(tabId, 'mouseReleased', x, y, { button: 'left', clickCount: 2 });
+      return { ok: true };
+    } catch (err) {
+      return { ok: false, error: (err as Error).message };
+    } });
+  }
+
+  /** Drag between two viewport coordinate pairs on a specific tab. */
+  async dragCoordsOnTab(
+    tabId: string,
+    fromX: number,
+    fromY: number,
+    toX: number,
+    toY: number,
+    steps = 10,
+  ): Promise<BrowserServiceResult> {
+    if (!this.getTabWebContents(tabId)) return { ok: false, error: `Tab ${tabId} not found` };
+    return this.tabInputQueue(tabId, async () => { try {
+      await this.cdpMouseEventOnTab(tabId, 'mousePressed', fromX, fromY, { button: 'left', clickCount: 1 });
+      for (let i = 1; i <= steps; i++) {
+        const x = Math.round(fromX + (toX - fromX) * (i / steps));
+        const y = Math.round(fromY + (toY - fromY) * (i / steps));
+        await this.cdpMouseEventOnTab(tabId, 'mouseMoved', x, y, { button: 'left' });
+        await new Promise(r => setTimeout(r, 16));
+      }
+      await this.cdpMouseEventOnTab(tabId, 'mouseReleased', toX, toY, { button: 'left', clickCount: 1 });
+      return { ok: true };
+    } catch (err) {
+      return { ok: false, error: (err as Error).message };
+    } });
+  }
+
+  /** Move mouse to viewport coordinates on a specific tab (triggers hover/tooltip). */
+  async moveToOnTab(tabId: string, x: number, y: number): Promise<BrowserServiceResult> {
+    if (!this.getTabWebContents(tabId)) return { ok: false, error: `Tab ${tabId} not found` };
+    return this.tabInputQueue(tabId, async () => { try {
+      await this.cdpMouseEventOnTab(tabId, 'mouseMoved', x, y);
+      return { ok: true };
+    } catch (err) {
+      return { ok: false, error: (err as Error).message };
+    } });
+  }
+
+  /** Scroll at viewport coordinates on a specific tab. */
+  async scrollAtOnTab(tabId: string, x: number, y: number, deltaX = 0, deltaY = 500): Promise<BrowserServiceResult> {
+    if (!this.getTabWebContents(tabId)) return { ok: false, error: `Tab ${tabId} not found` };
+    return this.tabInputQueue(tabId, async () => { try {
+      await this.cdpMouseEventOnTab(tabId, 'mouseWheel', x, y, { deltaX, deltaY });
+      return { ok: true };
+    } catch (err) {
+      return { ok: false, error: (err as Error).message };
+    } });
   }
 
   /** Get element text on a specific tab. */
@@ -1197,6 +1534,207 @@ export class ElectronBrowserService implements BrowserService {
       tab.state.isNewTab = false;
       this.goForward(tab.view.webContents);
     }
+  }
+
+  /** Stop page loading on a specific tab. */
+  async stopLoadingOnTab(tabId: string): Promise<BrowserServiceResult> {
+    const wc = this.getTabWebContents(tabId);
+    if (!wc) return { ok: false, error: `Tab ${tabId} not found` };
+    wc.stop();
+    return { ok: true };
+  }
+
+  /** Stop page loading on the active tab. */
+  async stopLoading(): Promise<BrowserServiceResult> {
+    const wc = this.getActiveWebContents();
+    if (!wc) return { ok: false, error: 'No active browser tab' };
+    wc.stop();
+    return { ok: true };
+  }
+
+  /**
+   * Wait until no network requests are in-flight for `idleMs` milliseconds.
+   * Uses webContents loading state polling — lightweight and reliable.
+   * Returns early if idle condition met, or errors on timeout.
+   */
+  async waitForNetworkIdleOnTab(
+    tabId: string,
+    idleMs = 500,
+    timeoutMs = 30000,
+  ): Promise<BrowserServiceResult> {
+    const wc = this.getTabWebContents(tabId);
+    if (!wc) return { ok: false, error: `Tab ${tabId} not found` };
+    return this.waitForNetworkIdleImpl(wc, idleMs, timeoutMs);
+  }
+
+  async waitForNetworkIdle(idleMs = 500, timeoutMs = 30000): Promise<BrowserServiceResult> {
+    const wc = this.getActiveWebContents();
+    if (!wc) return { ok: false, error: 'No active browser tab' };
+    return this.waitForNetworkIdleImpl(wc, idleMs, timeoutMs);
+  }
+
+  private async waitForNetworkIdleImpl(
+    wc: Electron.WebContents,
+    idleMs: number,
+    timeoutMs: number,
+  ): Promise<BrowserServiceResult> {
+    const deadline = Date.now() + timeoutMs;
+    let idleStart = Date.now();
+
+    while (Date.now() < deadline) {
+      const isLoading = wc.isLoading();
+      // Also check if there are pending XHR/fetch requests via JS
+      const hasPendingRequests = await wc.executeJavaScript(`
+        (function() {
+          // Check if document is still loading
+          if (document.readyState === 'loading') return true;
+          // Check for pending fetch/XHR via PerformanceObserver entries
+          const entries = performance.getEntriesByType('resource');
+          const recent = entries.filter(e => e.responseEnd === 0 || (Date.now() - e.startTime) < ${idleMs});
+          return recent.length > 0;
+        })()
+      `).catch(() => false);
+
+      if (!isLoading && !hasPendingRequests) {
+        if (Date.now() - idleStart >= idleMs) {
+          return { ok: true, data: { idleAfterMs: Date.now() - idleStart } };
+        }
+      } else {
+        idleStart = Date.now();
+      }
+      await new Promise(r => setTimeout(r, 100));
+    }
+    return { ok: false, error: `Network not idle after ${timeoutMs}ms` };
+  }
+
+  /**
+   * Wait for a full navigation cycle to complete (did-navigate + did-stop-loading).
+   * Use after clicking a link or submitting a form to wait for the new page.
+   */
+  async waitForNavigationOnTab(tabId: string, timeoutMs = 15000): Promise<BrowserServiceResult> {
+    const wc = this.getTabWebContents(tabId);
+    if (!wc) return { ok: false, error: `Tab ${tabId} not found` };
+    return this.waitForNavigationImpl(wc, timeoutMs);
+  }
+
+  async waitForNavigation(timeoutMs = 15000): Promise<BrowserServiceResult> {
+    const wc = this.getActiveWebContents();
+    if (!wc) return { ok: false, error: 'No active browser tab' };
+    return this.waitForNavigationImpl(wc, timeoutMs);
+  }
+
+  private waitForNavigationImpl(
+    wc: Electron.WebContents,
+    timeoutMs: number,
+  ): Promise<BrowserServiceResult> {
+    return new Promise(resolve => {
+      let settled = false;
+      const cleanup = () => {
+        clearTimeout(timer);
+        wc.removeListener('did-navigate', onNav);
+        wc.removeListener('did-navigate-in-page', onNav);
+        wc.removeListener('did-fail-load', onFail);
+      };
+      const finish = (result: BrowserServiceResult) => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        resolve(result);
+      };
+      const onNav = (_event: Electron.Event, url: string) => {
+        // Navigation happened — now wait for loading to finish
+        const checkLoading = () => {
+          if (!wc.isLoading()) {
+            finish({ ok: true, data: { url, title: wc.getTitle() } });
+          } else {
+            setTimeout(checkLoading, 50);
+          }
+        };
+        checkLoading();
+      };
+      const onFail = (
+        _event: Electron.Event,
+        errorCode: number,
+        errorDescription: string,
+        validatedURL: string,
+        isMainFrame: boolean,
+      ) => {
+        if (!isMainFrame) return;
+        finish({ ok: false, error: `Navigation failed: ${errorDescription} (${errorCode}) at ${validatedURL}` });
+      };
+      const timer = setTimeout(
+        () => finish({ ok: false, error: `Navigation timeout after ${timeoutMs}ms` }),
+        timeoutMs,
+      );
+      wc.on('did-navigate', onNav);
+      wc.on('did-navigate-in-page', onNav);
+      wc.on('did-fail-load', onFail);
+    });
+  }
+
+  /**
+   * Get a snapshot of network activity on a tab — pending requests, completed count,
+   * document readyState, and timing info. Lightweight visibility into page load state.
+   */
+  async getNetworkActivityOnTab(tabId: string): Promise<BrowserServiceResult> {
+    const wc = this.getTabWebContents(tabId);
+    if (!wc) return { ok: false, error: `Tab ${tabId} not found` };
+    return this.getNetworkActivityImpl(wc);
+  }
+
+  async getNetworkActivity(): Promise<BrowserServiceResult> {
+    const wc = this.getActiveWebContents();
+    if (!wc) return { ok: false, error: 'No active browser tab' };
+    return this.getNetworkActivityImpl(wc);
+  }
+
+  private async getNetworkActivityImpl(wc: Electron.WebContents): Promise<BrowserServiceResult> {
+    try {
+      const activity = await wc.executeJavaScript(`
+        (function() {
+          const entries = performance.getEntriesByType('resource');
+          const nav = performance.getEntriesByType('navigation')[0] || {};
+          return {
+            readyState: document.readyState,
+            isLoading: document.readyState !== 'complete',
+            resourceCount: entries.length,
+            totalTransferSize: entries.reduce((sum, e) => sum + (e.transferSize || 0), 0),
+            recentResources: entries.slice(-10).map(e => ({
+              name: e.name.split('/').pop()?.split('?')[0] || e.name,
+              type: e.initiatorType,
+              duration: Math.round(e.duration),
+              size: e.transferSize || 0,
+            })),
+            timing: {
+              domContentLoaded: Math.round(nav.domContentLoadedEventEnd || 0),
+              loadComplete: Math.round(nav.loadEventEnd || 0),
+              domInteractive: Math.round(nav.domInteractive || 0),
+            },
+          };
+        })()
+      `);
+      return { ok: true, data: { ...activity, electronIsLoading: wc.isLoading() } };
+    } catch (err) {
+      return { ok: false, error: (err as Error).message };
+    }
+  }
+
+  /**
+   * Override the User-Agent string for a specific tab's session.
+   * Helps avoid bot detection by presenting a realistic browser fingerprint.
+   */
+  async setUserAgentOnTab(tabId: string, userAgent: string): Promise<BrowserServiceResult> {
+    const wc = this.getTabWebContents(tabId);
+    if (!wc) return { ok: false, error: `Tab ${tabId} not found` };
+    wc.setUserAgent(userAgent);
+    return { ok: true };
+  }
+
+  async setUserAgent(userAgent: string): Promise<BrowserServiceResult> {
+    const wc = this.getActiveWebContents();
+    if (!wc) return { ok: false, error: 'No active browser tab' };
+    wc.setUserAgent(userAgent);
+    return { ok: true };
   }
 
   /** Profile page on a specific tab's webContents. */
@@ -1286,6 +1824,265 @@ export class ElectronBrowserService implements BrowserService {
     return tab?.view?.webContents ?? null;
   }
 
+  /**
+   * Send a Chrome DevTools Protocol command to the active tab's debugger.
+   * The debugger is attached automatically when a tab is created.
+   */
+  async sendCDP<T = unknown>(method: string, params?: Record<string, unknown>): Promise<T> {
+    const wc = this.getActiveWebContents();
+    if (!wc) throw new Error('No active browser tab');
+    if (!wc.debugger.isAttached()) {
+      wc.debugger.attach('1.3');
+    }
+    return wc.debugger.sendCommand(method, params) as Promise<T>;
+  }
+
+  /**
+   * Send a Chrome DevTools Protocol command to a specific tab's debugger.
+   * Attaches the debugger lazily if not already attached.
+   */
+  async sendCDPOnTab<T = unknown>(tabId: string, method: string, params?: Record<string, unknown>): Promise<T> {
+    const wc = this.getTabWebContents(tabId);
+    if (!wc) throw new Error(`Tab ${tabId} not found`);
+    if (!wc.debugger.isAttached()) {
+      wc.debugger.attach('1.3');
+    }
+    return wc.debugger.sendCommand(method, params) as Promise<T>;
+  }
+
+  // ── CDP Input Domain ──────────────────────────────────────────────────────────
+
+  /** Dispatch a low-level mouse event via CDP Input.dispatchMouseEvent. */
+  async cdpMouseEventOnTab(
+    tabId: string,
+    type: 'mousePressed' | 'mouseReleased' | 'mouseMoved' | 'mouseWheel',
+    x: number,
+    y: number,
+    opts: { button?: 'left' | 'right' | 'middle'; clickCount?: number; deltaX?: number; deltaY?: number; modifiers?: number } = {},
+  ): Promise<void> {
+    await this.sendCDPOnTab(tabId, 'Input.dispatchMouseEvent', {
+      type,
+      x,
+      y,
+      button: opts.button ?? 'left',
+      clickCount: opts.clickCount ?? 1,
+      deltaX: opts.deltaX ?? 0,
+      deltaY: opts.deltaY ?? 0,
+      modifiers: opts.modifiers ?? 0,
+    });
+  }
+
+  /** Dispatch a low-level key event via CDP Input.dispatchKeyEvent. */
+  async cdpKeyEventOnTab(
+    tabId: string,
+    type: 'keyDown' | 'keyUp' | 'rawKeyDown' | 'char',
+    key: string,
+    opts: { code?: string; text?: string; modifiers?: number; windowsVirtualKeyCode?: number } = {},
+  ): Promise<void> {
+    await this.sendCDPOnTab(tabId, 'Input.dispatchKeyEvent', {
+      type,
+      key,
+      code: opts.code ?? '',
+      text: opts.text ?? (type === 'char' ? key : ''),
+      modifiers: opts.modifiers ?? 0,
+      windowsVirtualKeyCode: opts.windowsVirtualKeyCode ?? 0,
+    });
+  }
+
+  /** Dispatch a touch event via CDP Input.dispatchTouchEvent. */
+  async cdpTouchEventOnTab(
+    tabId: string,
+    type: 'touchStart' | 'touchEnd' | 'touchMove' | 'touchCancel',
+    touchPoints: Array<{ x: number; y: number; id?: number; radiusX?: number; radiusY?: number; force?: number }>,
+  ): Promise<void> {
+    await this.sendCDPOnTab(tabId, 'Input.dispatchTouchEvent', { type, touchPoints });
+  }
+
+  // ── CDP Fetch / Network Domain ────────────────────────────────────────────────
+
+  /** Enable request interception with optional URL pattern filters. */
+  async cdpFetchEnableOnTab(tabId: string, patterns?: Array<{ urlPattern?: string; resourceType?: string; requestStage?: string }>): Promise<void> {
+    await this.sendCDPOnTab(tabId, 'Fetch.enable', { patterns: patterns ?? [] });
+  }
+
+  /** Disable request interception. */
+  async cdpFetchDisableOnTab(tabId: string): Promise<void> {
+    await this.sendCDPOnTab(tabId, 'Fetch.disable');
+  }
+
+  /** Continue an intercepted request, optionally modifying it. */
+  async cdpFetchContinueOnTab(
+    tabId: string,
+    requestId: string,
+    overrides?: { url?: string; method?: string; headers?: Array<{ name: string; value: string }>; postData?: string },
+  ): Promise<void> {
+    await this.sendCDPOnTab(tabId, 'Fetch.continueRequest', { requestId, ...overrides });
+  }
+
+  /** Fulfill an intercepted request with a synthetic response. */
+  async cdpFetchFulfillOnTab(
+    tabId: string,
+    requestId: string,
+    responseCode: number,
+    body?: string,
+    headers?: Array<{ name: string; value: string }>,
+  ): Promise<void> {
+    const params: Record<string, unknown> = { requestId, responseCode };
+    if (body != null) params.body = Buffer.from(body).toString('base64');
+    if (headers) params.responseHeaders = headers;
+    await this.sendCDPOnTab(tabId, 'Fetch.fulfillRequest', params);
+  }
+
+  /** Fail an intercepted request. */
+  async cdpFetchFailOnTab(tabId: string, requestId: string, reason: string): Promise<void> {
+    await this.sendCDPOnTab(tabId, 'Fetch.failRequest', { requestId, errorReason: reason });
+  }
+
+  /** Get all cookies, optionally filtered by URLs. */
+  async cdpGetCookiesOnTab(tabId: string, urls?: string[]): Promise<unknown[]> {
+    const result = await this.sendCDPOnTab<{ cookies: unknown[] }>(tabId, 'Network.getCookies', urls ? { urls } : {});
+    return result.cookies;
+  }
+
+  /** Set a cookie. */
+  async cdpSetCookieOnTab(tabId: string, cookie: { name: string; value: string; domain?: string; path?: string; secure?: boolean; httpOnly?: boolean; sameSite?: string; url?: string; expires?: number }): Promise<boolean> {
+    const result = await this.sendCDPOnTab<{ success: boolean }>(tabId, 'Network.setCookie', cookie);
+    return result.success;
+  }
+
+  /** Delete cookies matching the given filter. */
+  async cdpDeleteCookiesOnTab(tabId: string, filter: { name: string; domain?: string; path?: string; url?: string }): Promise<void> {
+    await this.sendCDPOnTab(tabId, 'Network.deleteCookies', filter);
+  }
+
+  /** Get the response body for a given requestId (from Network.responseReceived). */
+  async cdpGetResponseBodyOnTab(tabId: string, requestId: string): Promise<{ body: string; base64Encoded: boolean }> {
+    return this.sendCDPOnTab(tabId, 'Network.getResponseBody', { requestId });
+  }
+
+  /** Enable Network domain events. */
+  async cdpNetworkEnableOnTab(tabId: string): Promise<void> {
+    await this.sendCDPOnTab(tabId, 'Network.enable');
+  }
+
+  /** Emulate network conditions (throttling, offline). */
+  async cdpEmulateNetworkOnTab(tabId: string, opts: { offline?: boolean; latency?: number; downloadThroughput?: number; uploadThroughput?: number }): Promise<void> {
+    await this.sendCDPOnTab(tabId, 'Network.emulateNetworkConditions', {
+      offline: opts.offline ?? false,
+      latency: opts.latency ?? 0,
+      downloadThroughput: opts.downloadThroughput ?? -1,
+      uploadThroughput: opts.uploadThroughput ?? -1,
+    });
+  }
+
+  // ── CDP Accessibility + DOMSnapshot ───────────────────────────────────────────
+
+  /** Get the full accessibility tree for the page. */
+  async cdpGetAccessibilityTreeOnTab(tabId: string): Promise<unknown> {
+    return this.sendCDPOnTab(tabId, 'Accessibility.getFullAXTree');
+  }
+
+  /** Query the accessibility tree by role, name, or label. */
+  async cdpQueryAccessibilityOnTab(
+    tabId: string,
+    opts: { role?: string; name?: string; objectId?: string },
+  ): Promise<unknown> {
+    // Accessibility.queryAXTree requires an objectId of the root node to search from.
+    // If none provided, get the document node objectId first.
+    let objectId = opts.objectId;
+    if (!objectId) {
+      const doc = await this.sendCDPOnTab<{ root: { backendNodeId: number } }>(tabId, 'DOM.getDocument', { depth: 0 });
+      const resolved = await this.sendCDPOnTab<{ object: { objectId: string } }>(tabId, 'DOM.resolveNode', { backendNodeId: doc.root.backendNodeId });
+      objectId = resolved.object.objectId;
+    }
+    const params: Record<string, unknown> = { objectId };
+    if (opts.role) params.role = opts.role;
+    if (opts.name) params.name = opts.name;
+    return this.sendCDPOnTab(tabId, 'Accessibility.queryAXTree', params);
+  }
+
+  /** Capture a full DOM + CSS + layout snapshot in one call. */
+  async cdpDOMSnapshotOnTab(tabId: string, opts?: { computedStyles?: string[] }): Promise<unknown> {
+    return this.sendCDPOnTab(tabId, 'DOMSnapshot.captureSnapshot', {
+      computedStyles: opts?.computedStyles ?? ['display', 'visibility', 'opacity', 'color', 'font-size', 'background-color'],
+    });
+  }
+
+  // ── CDP Emulation Domain ──────────────────────────────────────────────────────
+
+  /** Override device metrics (viewport, scale, mobile flag). */
+  async cdpSetDeviceMetricsOnTab(tabId: string, opts: { width: number; height: number; deviceScaleFactor?: number; mobile?: boolean }): Promise<void> {
+    await this.sendCDPOnTab(tabId, 'Emulation.setDeviceMetricsOverride', {
+      width: opts.width,
+      height: opts.height,
+      deviceScaleFactor: opts.deviceScaleFactor ?? 1,
+      mobile: opts.mobile ?? false,
+    });
+  }
+
+  /** Override geolocation. */
+  async cdpSetGeolocationOnTab(tabId: string, latitude: number, longitude: number, accuracy = 100): Promise<void> {
+    await this.sendCDPOnTab(tabId, 'Emulation.setGeolocationOverride', { latitude, longitude, accuracy });
+  }
+
+  /** Override timezone. */
+  async cdpSetTimezoneOnTab(tabId: string, timezoneId: string): Promise<void> {
+    await this.sendCDPOnTab(tabId, 'Emulation.setTimezoneOverride', { timezoneId });
+  }
+
+  // ── CDP Page Domain extras ────────────────────────────────────────────────────
+
+  /** Generate a PDF of the current page. */
+  async cdpPrintToPDFOnTab(tabId: string, opts?: { landscape?: boolean; printBackground?: boolean; scale?: number; paperWidth?: number; paperHeight?: number }): Promise<{ data: string }> {
+    return this.sendCDPOnTab(tabId, 'Page.printToPDF', {
+      landscape: opts?.landscape ?? false,
+      printBackground: opts?.printBackground ?? true,
+      scale: opts?.scale ?? 1,
+      paperWidth: opts?.paperWidth ?? 8.5,
+      paperHeight: opts?.paperHeight ?? 11,
+      transferMode: 'ReturnAsBase64',
+    });
+  }
+
+  /** Intercept file chooser dialogs so files can be selected programmatically. */
+  async cdpSetFileChooserInterceptOnTab(tabId: string, enabled: boolean): Promise<void> {
+    await this.sendCDPOnTab(tabId, 'Page.setInterceptFileChooserDialog', { enabled });
+  }
+
+  /** Handle a file chooser that was intercepted. */
+  async cdpHandleFileChooserOnTab(tabId: string, action: 'accept' | 'cancel' | 'fallBack', files?: string[]): Promise<void> {
+    await this.sendCDPOnTab(tabId, 'Page.handleFileChooser', { action, files });
+  }
+
+  /** Handle a JavaScript dialog (alert/confirm/prompt). */
+  async cdpHandleDialogOnTab(tabId: string, accept: boolean, promptText?: string): Promise<void> {
+    await this.sendCDPOnTab(tabId, 'Page.handleJavaScriptDialog', { accept, promptText });
+  }
+
+  // ── CDP Storage Domain ────────────────────────────────────────────────────────
+
+  /** Get DOM storage items for an origin. */
+  async cdpGetStorageOnTab(tabId: string, origin: string, isLocalStorage: boolean): Promise<Array<[string, string]>> {
+    const result = await this.sendCDPOnTab<{ entries: Array<[string, string]> }>(tabId, 'DOMStorage.getDOMStorageItems', {
+      storageId: { securityOrigin: origin, isLocalStorage },
+    });
+    return result.entries;
+  }
+
+  /** Set a DOM storage item. */
+  async cdpSetStorageItemOnTab(tabId: string, origin: string, isLocalStorage: boolean, key: string, value: string): Promise<void> {
+    await this.sendCDPOnTab(tabId, 'DOMStorage.setDOMStorageItem', {
+      storageId: { securityOrigin: origin, isLocalStorage },
+      key,
+      value,
+    });
+  }
+
+  /** Clear data for a specific origin. */
+  async cdpClearStorageOnTab(tabId: string, origin: string, storageTypes = 'all'): Promise<void> {
+    await this.sendCDPOnTab(tabId, 'Storage.clearDataForOrigin', { origin, storageTypes });
+  }
+
   private async ensureActiveTab(): Promise<InternalTab> {
     const active = this.getActiveTab();
     if (active) return active;
@@ -1311,6 +2108,16 @@ export class ElectronBrowserService implements BrowserService {
 
   private bindTabEvents(tab: InternalTab): void {
     const wc = tab.view.webContents;
+
+    // Attach the CDP debugger so tools can issue Chrome DevTools Protocol commands
+    try {
+      if (!wc.debugger.isAttached()) {
+        wc.debugger.attach('1.3');
+      }
+    } catch (err) {
+      console.warn(`[ElectronBrowserService] Failed to attach debugger to tab ${tab.id}:`, err);
+    }
+
     const update = () => {
       tab.state.url = wc.getURL() || tab.state.url;
       tab.state.title = wc.getTitle() || tab.state.title;

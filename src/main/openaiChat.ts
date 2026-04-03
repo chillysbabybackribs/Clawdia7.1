@@ -334,6 +334,7 @@ export async function streamOpenAIChat({
           // ── End policy gate ──────────────────────────────────────────────────
 
           let visionContent: OpenAI.Chat.ChatCompletionContentPart[] | null = null;
+          let tcIsError = false;
           try {
             if (tc.name.startsWith('browser_') && browserService) {
               const output = await withTimeout(executeBrowserTool(tc.name, args, browserService, conversationId), TOOL_TIMEOUTS.browser, tc.name);
@@ -355,11 +356,13 @@ export async function streamOpenAIChat({
             }
           } catch (err) {
             resultStr = JSON.stringify({ ok: false, error: (err as Error).message });
+            tcIsError = true;
           }
 
-          const durationMs = Date.now() - startMs;
+          const endMs = Date.now();
+          const durationMs = endMs - startMs;
           if (runId && eventId) trackToolResult(runId, eventId, resultStr.slice(0, 200), durationMs);
-          toolCallHistory.push({ id: toolCallId, name: tc.name, input: args, result: resultStr });
+          toolCallHistory.push({ id: toolCallId, name: tc.name, input: args, result: resultStr, startMs, endMs, elapsed_ms: durationMs, success: !tcIsError });
           if (!webContents.isDestroyed()) {
             webContents.send(IPC_EVENTS.CHAT_TOOL_ACTIVITY, {
               id: toolCallId, name: tc.name, status: 'success',

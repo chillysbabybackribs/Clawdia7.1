@@ -13,8 +13,9 @@
 import * as os from 'os';
 import { run, cmdExists, wait } from './shared';
 import { smartFocus } from './smartFocus';
+import { VirtualDisplay } from './virtualDisplay';
 import { captureAndAnalyze, captureScreen, runOcr } from './screenshot';
-import { desktopState, recordSuccess, recordError, cacheTarget } from './state';
+import { desktopState, recordSuccess, recordError, cacheTarget, recordFocus, recordGeometry, guessApp, WindowGeometry } from './state';
 import {
     isA11yAvailable,
     a11yListApps,
@@ -108,6 +109,155 @@ async function focusIfNeeded(
 
 // ─── Primitive actions ────────────────────────────────────────────────────────
 
+// ─── Window geometry + monitor helpers ───────────────────────────────────────
+
+/**
+ * Parse `wmctrl -l -G` output to get geometry for ALL windows matching titlePattern.
+ * wmctrl -l -G columns: WID  DESKTOP  X  Y  W  H  HOST  TITLE
+ * Returns array sorted by WID descending (newest window first).
+ */
+async function getWindowsGeometry(titlePattern: string, display?: string): Promise<Array<{ wid: string; x: number; y: number; width: number; height: number }>> {
+    if (!await cmdExists('wmctrl')) return [];
+    const listing = await run('wmctrl -l -G 2>/dev/null', undefined, display);
+    if (listing.startsWith('[Error]') || listing === '[No output]') return [];
+    const re = new RegExp(titlePattern, 'i');
+    const results: Array<{ wid: string; x: number; y: number; width: number; height: number }> = [];
+    for (const line of listing.split('\n')) {
+        if (!re.test(line)) continue;
+        // WID(hex)  desktop  x  y  w  h  host  title...
+        const parts = line.trim().split(/\s+/);
+        if (parts.length < 6) continue;
+        const wid = parts[0];
+        const x = parseInt(parts[2], 10);
+        const y = parseInt(parts[3], 10);
+        const width = parseInt(parts[4], 10);
+        const height = parseInt(parts[5], 10);
+        if ([x, y, width, height].some(isNaN)) continue;
+        results.push({ wid, x, y, width, height });
+    }
+    // Sort descending by WID (hex) — higher WID = more recently created window
+    results.sort((a, b) => (parseInt(b.wid, 16) - parseInt(a.wid, 16)));
+    return results;
+}
+
+async function getWindowGeometry(titlePattern: string, display?: string): Promise<{ x: number; y: number; width: number; height: number } | null> {
+    const all = await getWindowsGeometry(titlePattern, display);
+    return all.length > 0 ? all[0] : null;
+}
+
+interface MonitorInfo {
+    index: number;
+    name: string;
+    x: number;
+    y: number;
+    width: number;
+    height: number;
+}
+
+/**
+ * Parse `xrandr` output to get a list of connected monitors with their geometry.
+ */
+async function getMonitors(): Promise<MonitorInfo[]> {
+    if (!await cmdExists('xrandr')) return [];
+    const output = await run('xrandr 2>/dev/null', undefined, process.env.DISPLAY ?? ':0');
+    if (output.startsWith('[Error]') || output === '[No output]') return [];
+    const monitors: MonitorInfo[] = [];
+    // Match lines like: HDMI-1 connected 2560x1440+0+0 ...  or  eDP-1 connected primary 1920x1080+2560+0
+    const re = /^(\S+)\s+connected(?:\s+primary)?\s+(\d+)x(\d+)\+(\d+)\+(\d+)/m;
+    let index = 0;
+    for (const line of output.split('\n')) {
+        const m = line.match(/^(\S+)\s+connected(?:\s+primary)?\s+(\d+)x(\d+)\+(\d+)\+(\d+)/);
+        if (m) {
+            monitors.push({
+                index: index++,
+                name: m[1],
+                width: parseInt(m[2], 10),
+                height: parseInt(m[3], 10),
+                x: parseInt(m[4], 10),
+                y: parseInt(m[5], 10),
+            });
+        }
+    }
+    return monitors;
+}
+
+/**
+ * Given a window's top-left corner, determine which monitor it's on.
+ * Uses the monitor whose bounds contain the window origin; falls back to
+ * the monitor whose centre is closest to the window centre.
+ */
+async function resolveMonitor(wx: number, wy: number, ww: number, wh: number): Promise<{ monitor: number; monitorLabel: string }> {
+    const monitors = await getMonitors();
+    if (monitors.length === 0) return { monitor: 0, monitorLabel: 'unknown' };
+
+    // 1. Find monitor that contains the window's top-left origin
+    for (const m of monitors) {
+        if (wx >= m.x && wx < m.x + m.width && wy >= m.y && wy < m.y + m.height) {
+            return { monitor: m.index, monitorLabel: `${m.name} (${m.width}x${m.height} @ ${m.x},${m.y})` };
+        }
+    }
+
+    // 2. Fallback: closest monitor centre to window centre
+    const wCx = wx + ww / 2;
+    const wCy = wy + wh / 2;
+    let best = monitors[0];
+    let bestDist = Infinity;
+    for (const m of monitors) {
+        const mCx = m.x + m.width / 2;
+        const mCy = m.y + m.height / 2;
+        const dist = Math.hypot(wCx - mCx, wCy - mCy);
+        if (dist < bestDist) { bestDist = dist; best = m; }
+    }
+    return { monitor: best.index, monitorLabel: `${best.name} (${best.width}x${best.height} @ ${best.x},${best.y})` };
+}
+
+/**
+ * Get full WindowGeometry (position + size + monitor) for a window by title.
+ * Returns null if wmctrl is unavailable or the window is not found.
+ *
+ * If preferMonitor is specified (0-based index), returns the matching window
+ * on that monitor; falls back to the newest (highest WID) match if none are
+ * on the preferred monitor. This disambiguates same-titled windows on dual
+ * monitor setups.
+ */
+async function measureWindow(titlePattern: string, display?: string, preferMonitor?: number): Promise<WindowGeometry & { wid?: string } | null> {
+    const all = await getWindowsGeometry(titlePattern, display);
+    if (all.length === 0) return null;
+
+    // Annotate each candidate with its monitor
+    const candidates: Array<{ wid: string; x: number; y: number; width: number; height: number; monitor: number; monitorLabel: string }> = [];
+    for (const g of all) {
+        const { monitor, monitorLabel } = await resolveMonitor(g.x, g.y, g.width, g.height);
+        candidates.push({ ...g, monitor, monitorLabel });
+    }
+
+    let chosen = candidates[0]; // default: newest window
+    if (preferMonitor !== undefined) {
+        const onPreferred = candidates.find((c) => c.monitor === preferMonitor);
+        if (onPreferred) chosen = onPreferred;
+    }
+
+    return chosen;
+}
+
+/**
+ * Get the display string to use for agent desktop commands.
+ *
+ * Ensures the virtual display (Xvfb :99) is running, then returns its display
+ * string. Falls back to the host display if Xvfb is unavailable, with a console
+ * warning so the operator knows isolation is degraded.
+ *
+ * The virtual display runs actions in an isolated X session so that xdotool
+ * mouse/keyboard injection never affects the user's real (:0) display.
+ */
+async function getAgentDisplay(): Promise<string> {
+    const vd = VirtualDisplay.getInstance();
+    await vd.ensure();
+    if (vd.display) return vd.display;
+    console.warn('[Desktop] Virtual display unavailable — falling back to host display (user may see cursor movement)');
+    return process.env.DISPLAY ?? ':0';
+}
+
 async function execPrimitive(
     input: Record<string, unknown>,
     batchWindow?: string,
@@ -119,31 +269,66 @@ async function execPrimitive(
     const text = input.text as string | undefined;
     const delayMs = (input.delay as number | undefined) ?? 0;
 
+    // Two display contexts:
+    //   hostDisplay  — the real user display (process.env.DISPLAY).
+    //                  Used for window DISCOVERY: wmctrl -l, xrandr, geometry queries.
+    //                  Windows only appear here; querying agentDisplay returns nothing.
+    //   agentDisplay — the isolated virtual display (Xvfb :99).
+    //                  Used for INPUT INJECTION: xdotool click/type/key, focus.
+    //                  Keeps injected events off the user's real session.
+    const hostDisplay = process.env.DISPLAY ?? ':0';
+    const agentDisplay = await getAgentDisplay();
+
+    // runH: read-only queries that need to see real windows (wmctrl -l, xrandr)
+    // runD: input injection that must target the virtual display
+    const runH = (cmd: string, timeout?: number) => run(cmd, timeout, hostDisplay);
+    const runD = (cmd: string, timeout?: number) => run(cmd, timeout, agentDisplay);
+    const focusD = (win: string) => smartFocus(win, hostDisplay);
+
     const sessionType = (process.env.XDG_SESSION_TYPE ?? '').toLowerCase();
     const useYdotool = sessionType === 'wayland' && await cmdExists('ydotool');
 
     switch (action) {
         case 'list_windows': {
             if (!await cmdExists('wmctrl')) return '[Error] wmctrl not installed. Run: sudo apt install wmctrl';
-            return run('wmctrl -l -p');
+            return runH('wmctrl -l -p');
+        }
+
+        case 'window_geometry': {
+            // Returns position, size, and monitor for a window by title pattern.
+            // Automatically called by attach_window — use this standalone to query
+            // a window without changing focus.
+            if (!winName) return '[Error] window_geometry requires "window" (title pattern).';
+            const geom = await measureWindow(winName, hostDisplay);
+            if (!geom) return `[Error] Could not get geometry for "${winName}". Is wmctrl installed and the window open?`;
+            recordGeometry(desktopState, geom);
+            return JSON.stringify({
+                window: winName,
+                x: geom.x,
+                y: geom.y,
+                width: geom.width,
+                height: geom.height,
+                monitor: geom.monitor,
+                monitorLabel: geom.monitorLabel,
+            });
         }
 
         case 'find_window': {
             if (!winName) return '[Error] window name required.';
             if (!await cmdExists('xdotool')) return '[Error] xdotool not installed.';
-            const ids = await run(`xdotool search --name "${winName}" 2>/dev/null`);
+            const ids = await runH(`xdotool search --name "${winName}" 2>/dev/null`);
             if (ids.startsWith('[Error]') || ids === '[No output]') return `No windows matching "${winName}".`;
             const wids = ids.split('\n').filter(Boolean).slice(0, 5);
             const details: string[] = [];
             for (const wid of wids) {
-                details.push(`  ${wid}: ${await run(`xdotool getwindowname ${wid} 2>/dev/null`)}`);
+                details.push(`  ${wid}: ${await runH(`xdotool getwindowname ${wid} 2>/dev/null`)}`);
             }
             return `Found ${wids.length} window(s):\n${details.join('\n')}`;
         }
 
         case 'focus': {
             if (!winName) return '[Error] window name required.';
-            const { focused, skipped } = await smartFocus(winName);
+            const { focused, skipped } = await focusD(winName);
             if (!focused) return `[Error] Could not focus "${winName}".`;
             if (delayMs) await wait(delayMs);
             return skipped ? `Focused: "${winName}" [cached — already focused]` : `Focused: "${winName}"`;
@@ -151,12 +336,12 @@ async function execPrimitive(
 
         case 'maximize_window': {
             if (!winName) return '[Error] window name required.';
-            const { focused } = await smartFocus(winName);
+            const { focused } = await focusD(winName);
             if (!focused) return `[Error] Could not focus "${winName}" — aborting maximize.`;
             await wait(100);
 
             if (await cmdExists('wmctrl')) {
-                const result = await run(`wmctrl -r "${winName}" -b add,maximized_vert,maximized_horz 2>&1`);
+                const result = await runH(`wmctrl -r "${winName}" -b add,maximized_vert,maximized_horz 2>&1`);
                 if (!result.startsWith('[Error]')) {
                     recordSuccess(desktopState, 'maximize_window', winName);
                     return `Maximized "${winName}"`;
@@ -164,7 +349,7 @@ async function execPrimitive(
             }
 
             if (await cmdExists('xdotool')) {
-                const keyResult = await run('xdotool key alt+F10 2>&1');
+                const keyResult = await runH('xdotool key alt+F10 2>&1');
                 if (!keyResult.startsWith('[Error]')) {
                     recordSuccess(desktopState, 'maximize_window', winName);
                     return `Maximized "${winName}" via Alt+F10 fallback`;
@@ -177,12 +362,12 @@ async function execPrimitive(
 
         case 'fullscreen_window': {
             if (!winName) return '[Error] window name required.';
-            const { focused } = await smartFocus(winName);
+            const { focused } = await focusD(winName);
             if (!focused) return `[Error] Could not focus "${winName}" — aborting fullscreen.`;
             await wait(100);
 
             if (await cmdExists('wmctrl')) {
-                const result = await run(`wmctrl -r "${winName}" -b add,fullscreen 2>&1`);
+                const result = await runH(`wmctrl -r "${winName}" -b add,fullscreen 2>&1`);
                 if (!result.startsWith('[Error]')) {
                     recordSuccess(desktopState, 'fullscreen_window', winName);
                     return `Fullscreened "${winName}"`;
@@ -190,7 +375,7 @@ async function execPrimitive(
             }
 
             if (await cmdExists('xdotool')) {
-                const keyResult = await run('xdotool key F11 2>&1');
+                const keyResult = await runH('xdotool key F11 2>&1');
                 if (!keyResult.startsWith('[Error]')) {
                     recordSuccess(desktopState, 'fullscreen_window', winName);
                     return `Fullscreened "${winName}" via F11 fallback`;
@@ -204,38 +389,60 @@ async function execPrimitive(
         case 'click': {
             if (x == null || y == null) return '[Error] x and y coordinates required.';
             if (!await cmdExists('xdotool') && !useYdotool) return '[Error] xdotool/ydotool not installed.';
+            console.log(`[DESKTOP_ACTION] click (${x}, ${y})${winName ? ` in "${winName}"` : ''}`);
             if (winName) {
-                const { focused } = await smartFocus(winName);
-                if (!focused) return `[Error] Could not focus "${winName}" — aborting click.`;
+                console.log(`[FOCUS_REQUESTED] Window: "${winName}"`);
+                const { focused } = await focusD(winName);
+                if (!focused) {
+                    console.error(`[FOCUS_GATE_BLOCKED] click aborted: focus failed for "${winName}"`);
+                    return `[Error] Could not focus "${winName}" — aborting click.`;
+                }
+                console.log(`[FOCUS_GATE_PASSED]`);
                 await wait(100);
             }
             if (delayMs) await wait(delayMs);
+            console.log(`[DISPATCH] Executing click at (${x}, ${y})`);
             const clickResult = useYdotool
-                ? await run(`ydotool mousemove -a ${x} ${y} && ydotool click 0x00`)
-                : await run(`xdotool mousemove ${x} ${y} click 1`);
+                ? await runD(`ydotool mousemove -a ${x} ${y} && ydotool click 0x00`)
+                : await runD(`xdotool mousemove ${x} ${y} click 1`);
             if (clickResult.startsWith('[Error]')) {
                 recordError(desktopState, 'click', `(${x},${y})`);
                 return clickResult;
             }
             recordSuccess(desktopState, 'click', `(${x},${y})`);
             let verifyBlock = '';
-            if (shouldVerify('click', input, x, y)) verifyBlock = await postVerify(winName);
+            if (shouldVerify('click', input, x, y)) {
+                console.log(`[VERIFY_START] click at (${x}, ${y})`);
+                verifyBlock = await postVerify(winName);
+                if (verifyBlock) {
+                    console.log(`[VERIFY_OK]`);
+                } else {
+                    console.log(`[VERIFY_UNAVAILABLE] tesseract/scrot missing`);
+                }
+            }
             return `Clicked (${x}, ${y})${verifyBlock ? '\n' + verifyBlock : ''}`;
         }
 
         case 'type': {
             if (!text) return '[Error] text required.';
             if (!await cmdExists('xdotool') && !useYdotool) return '[Error] xdotool/ydotool not installed.';
+            console.log(`[DESKTOP_ACTION] type (${text.length} chars)${winName ? ` in "${winName}"` : ''}`);
             if (winName) {
-                const { focused } = await smartFocus(winName);
-                if (!focused) return `[Error] Could not focus "${winName}" — aborting type.`;
+                console.log(`[FOCUS_REQUESTED] Window: "${winName}"`);
+                const { focused } = await focusD(winName);
+                if (!focused) {
+                    console.error(`[FOCUS_GATE_BLOCKED] type aborted: focus failed for "${winName}"`);
+                    return `[Error] Could not focus "${winName}" — aborting type.`;
+                }
+                console.log(`[FOCUS_GATE_PASSED]`);
                 await wait(100);
             }
             if (delayMs) await wait(delayMs);
             const escaped = text.replace(/"/g, '\\"');
+            console.log(`[DISPATCH] Executing type (${text.length} chars)`);
             const typeResult = useYdotool
-                ? await run(`ydotool type -- "${escaped}"`)
-                : await run(`xdotool type --delay 15 -- "${escaped}"`);
+                ? await runD(`ydotool type -- "${escaped}"`)
+                : await runD(`xdotool type --delay 15 -- "${escaped}"`);
             if (typeResult.startsWith('[Error]')) return typeResult;
             recordSuccess(desktopState, 'type', text.slice(0, 30));
             return `Typed "${text.slice(0, 50)}"`;
@@ -244,62 +451,99 @@ async function execPrimitive(
         case 'key': {
             if (!text) return '[Error] key combo required (e.g. "ctrl+s", "Return").';
             if (!await cmdExists('xdotool') && !useYdotool) return '[Error] xdotool/ydotool not installed.';
+            const isImportantKey = /^(ctrl\+[nospeqwz]|alt\+f|ctrl\+shift\+[es]|F\d+|Return|Escape)$/i.test(text);
+            console.log(`[DESKTOP_ACTION] key ${text}${isImportantKey ? ' [IMPORTANT]' : ''}${winName ? ` in "${winName}"` : ''}`);
             if (winName) {
-                const { focused } = await smartFocus(winName);
-                if (!focused) return `[Error] Could not focus "${winName}" — aborting key press.`;
+                console.log(`[FOCUS_REQUESTED] Window: "${winName}"`);
+                const { focused } = await focusD(winName);
+                if (!focused) {
+                    console.error(`[FOCUS_GATE_BLOCKED] key aborted: focus failed`);
+                    return `[Error] Could not focus "${winName}" — aborting key press.`;
+                }
+                console.log(`[FOCUS_GATE_PASSED]`);
                 await wait(100);
             }
             if (delayMs) await wait(delayMs);
+            console.log(`[DISPATCH] Executing key ${text}`);
             const keyResult = useYdotool
-                ? await run(`ydotool key ${text}`)
-                : await run(`xdotool key ${text}`);
+                ? await runD(`ydotool key ${text}`)
+                : await runD(`xdotool key ${text}`);
             if (keyResult.startsWith('[Error]')) return keyResult;
             recordSuccess(desktopState, 'key', text);
             let verifyBlock = '';
-            if (shouldVerify('key', input)) verifyBlock = await postVerify(winName);
+            if (shouldVerify('key', input)) {
+                console.log(`[VERIFY_START] key ${text}`);
+                verifyBlock = await postVerify(winName);
+                if (!verifyBlock) console.log(`[VERIFY_UNAVAILABLE]`);
+                else console.log(`[VERIFY_OK]`);
+            }
             return `Key: ${text}${verifyBlock ? '\n' + verifyBlock : ''}`;
         }
 
         case 'right_click': {
             if (x == null || y == null) return '[Error] x and y required.';
+            console.log(`[DESKTOP_ACTION] right_click (${x}, ${y})${winName ? ` in "${winName}"` : ''}`);
             if (winName) {
-                const { focused } = await smartFocus(winName);
-                if (!focused) return `[Error] Could not focus "${winName}".`;
+                console.log(`[FOCUS_REQUESTED] Window: "${winName}"`);
+                const { focused } = await focusD(winName);
+                if (!focused) {
+                    console.error(`[FOCUS_GATE_BLOCKED] right_click aborted: focus failed`);
+                    return `[Error] Could not focus "${winName}".`;
+                }
+                console.log(`[FOCUS_GATE_PASSED]`);
                 await wait(100);
             }
             if (delayMs) await wait(delayMs);
+            console.log(`[DISPATCH] Executing right_click at (${x}, ${y})`);
             const rcResult = useYdotool
-                ? await run(`ydotool mousemove -a ${x} ${y} && ydotool click 0x02`)
-                : await run(`xdotool mousemove ${x} ${y} click 3`);
-            return rcResult.startsWith('[Error]') ? rcResult : `Right-clicked (${x}, ${y})`;
+                ? await runD(`ydotool mousemove -a ${x} ${y} && ydotool click 0x02`)
+                : await runD(`xdotool mousemove ${x} ${y} click 3`);
+            if (rcResult.startsWith('[Error]')) return rcResult;
+            console.log(`[VERIFY_START] right_click at (${x}, ${y})`);
+            let verifyBlock = await postVerify(winName);
+            if (!verifyBlock) console.log(`[VERIFY_UNAVAILABLE]`);
+            else console.log(`[VERIFY_OK]`);
+            return `Right-clicked (${x}, ${y})${verifyBlock ? '\n' + verifyBlock : ''}`;
         }
 
         case 'double_click': {
             if (x == null || y == null) return '[Error] x and y required.';
+            console.log(`[DESKTOP_ACTION] double_click (${x}, ${y})${winName ? ` in "${winName}"` : ''}`);
             if (winName) {
-                const { focused } = await smartFocus(winName);
-                if (!focused) return `[Error] Could not focus "${winName}".`;
+                console.log(`[FOCUS_REQUESTED] Window: "${winName}"`);
+                const { focused } = await focusD(winName);
+                if (!focused) {
+                    console.error(`[FOCUS_GATE_BLOCKED] double_click aborted: focus failed`);
+                    return `[Error] Could not focus "${winName}".`;
+                }
+                console.log(`[FOCUS_GATE_PASSED]`);
                 await wait(100);
             }
             if (delayMs) await wait(delayMs);
+            console.log(`[DISPATCH] Executing double_click at (${x}, ${y})`);
             const dcResult = useYdotool
-                ? await run(`ydotool mousemove -a ${x} ${y} && ydotool click 0x00 && ydotool click 0x00`)
-                : await run(`xdotool mousemove ${x} ${y} click --repeat 2 1`);
-            return dcResult.startsWith('[Error]') ? dcResult : `Double-clicked (${x}, ${y})`;
+                ? await runD(`ydotool mousemove -a ${x} ${y} && ydotool click 0x00 && ydotool click 0x00`)
+                : await runD(`xdotool mousemove ${x} ${y} click --repeat 2 1`);
+            if (dcResult.startsWith('[Error]')) return dcResult;
+            console.log(`[VERIFY_START] double_click at (${x}, ${y})`);
+            let verifyBlock = await postVerify(winName);
+            if (!verifyBlock) console.log(`[VERIFY_UNAVAILABLE]`);
+            else console.log(`[VERIFY_OK]`);
+            return `Double-clicked (${x}, ${y})${verifyBlock ? '\n' + verifyBlock : ''}`;
         }
 
         case 'scroll': {
             const direction = (input.direction as string | undefined) ?? 'down';
             const amount = (input.amount as number | undefined) ?? 3;
             if (winName) {
-                const { focused } = await smartFocus(winName);
+                const { focused } = await focusD(winName);
                 if (!focused) return `[Error] Could not focus "${winName}".`;
                 await wait(100);
             }
             const btn = direction === 'up' ? 4 : direction === 'left' ? 6 : direction === 'right' ? 7 : 5;
             const scrollResult = useYdotool
                 ? `[Info] ydotool scroll not directly supported — use xdotool`
-                : await run(`xdotool click --repeat ${amount} --delay 50 ${btn}`);
+                : await runD(`xdotool click --repeat ${amount} --delay 50 ${btn}`);
             return scrollResult;
         }
 
@@ -323,7 +567,7 @@ async function execPrimitive(
         }
 
         case 'verify_window_title': {
-            const title = await run('xdotool getactivewindow getwindowname 2>/dev/null');
+            const title = await runH('xdotool getactivewindow getwindowname 2>/dev/null');
             if (title.startsWith('[Error]')) return title;
             return `Active window: "${title.trim()}"`;
         }
@@ -331,8 +575,104 @@ async function execPrimitive(
         case 'verify_file_exists': {
             const filePath = (input.path ?? text) as string | undefined;
             if (!filePath) return '[Error] path or text (filepath) required.';
-            const stat = await run(`stat --printf="%s bytes, modified %y" "${filePath}" 2>/dev/null`);
+            const stat = await runD(`stat --printf="%s bytes, modified %y" "${filePath}" 2>/dev/null`);
             return stat.startsWith('[Error]') ? `File not found: ${filePath}` : `File exists: ${filePath} (${stat})`;
+        }
+
+        case 'attach_window': {
+            // Attach to an already-open window by title — no launch, immediate focus + screenshot.
+            // Use this instead of app_launch when the app is already running, or immediately
+            // after triggering an open via another method (e.g. xdg-open, shell exec).
+            if (!winName) return '[Error] attach_window requires "window" (title pattern to match).';
+            if (!await cmdExists('wmctrl')) return '[Error] wmctrl not installed.';
+            const re = new RegExp(winName, 'i');
+            const preferMonitorAttach = input.monitor as number | undefined;
+
+            // Wait up to 8s for the window to appear (handles race between trigger and render)
+            // Uses hostDisplay — windows live on the real display, not the virtual agent display.
+            const attachStart = Date.now();
+            let found = false;
+            while (Date.now() - attachStart < 8_000) {
+                const windows = await runH('wmctrl -l 2>/dev/null');
+                if (re.test(windows)) { found = true; break; }
+                await wait(300);
+            }
+            if (!found) return `[Error] No window matching "${winName}" found within 8s. Run list_windows to see what is open.`;
+
+            // Measure geometry first to pick the right window when there are multiple matches
+            const geom = await measureWindow(winName, hostDisplay, preferMonitorAttach);
+            const attachWid = (geom as any)?.wid;
+
+            // Focus by WID when available to avoid focusing wrong window on other monitor
+            // wmctrl -i -a targets the real WM on hostDisplay
+            let focused = false;
+            if (attachWid && await cmdExists('wmctrl')) {
+                const r = await runH(`wmctrl -i -a ${attachWid} 2>&1`);
+                focused = !r.startsWith('[Error]');
+            }
+            if (!focused) {
+                const res = await focusD(winName);
+                focused = res.focused;
+            }
+            if (!focused) return `[Error] Window "${winName}" found but could not focus it.`;
+            await wait(300);
+
+            if (geom) {
+                recordFocus(desktopState, winName, guessApp(winName), geom);
+            }
+
+            console.log(`[VERIFY_START] attach_window "${winName}"`);
+            const { imagePath, summary } = await captureAndAnalyze({ window: winName });
+            recordSuccess(desktopState, 'attach_window', winName);
+            if (imagePath || summary) console.log(`[VERIFY_OK]`);
+            else console.log(`[VERIFY_UNAVAILABLE]`);
+            const geomLine = geom
+                ? `\nGeometry: ${geom.width}x${geom.height} at (${geom.x},${geom.y}) — monitor ${geom.monitor} [${geom.monitorLabel}]`
+                : '';
+            return `Attached to "${winName}"${geomLine}${imagePath ? `\n[Screenshot: ${imagePath}]` : ''}\n${summary}`;
+        }
+
+        case 'close_window': {
+            // Close a window cleanly via WM close message (equivalent to clicking ×).
+            // Falls back to Alt+F4 if wmctrl cannot find the window.
+            // Pass force:true (via text="force") to send SIGTERM to the owning PID.
+            if (!winName) return '[Error] close_window requires "window" (title pattern).';
+            const force = text === 'force' || input.force === true;
+
+            if (!force && await cmdExists('wmctrl')) {
+                const closeResult = await runH(`wmctrl -c "${winName}" 2>&1`);
+                if (!closeResult.startsWith('[Error]')) {
+                    await wait(400);
+                    recordSuccess(desktopState, 'close_window', winName);
+                    return `Closed window "${winName}" via WM close`;
+                }
+            }
+
+            // Fallback: Alt+F4 while the window is focused
+            const { focused } = await focusD(winName);
+            if (focused) {
+                await runH('xdotool key alt+F4');
+                await wait(400);
+                recordSuccess(desktopState, 'close_window', winName);
+                return `Closed window "${winName}" via Alt+F4`;
+            }
+
+            if (force && await cmdExists('wmctrl')) {
+                // Get the PID from wmctrl -l -p and send SIGTERM
+                const listing = await runH('wmctrl -l -p 2>/dev/null');
+                const lines = listing.split('\n').filter(l => new RegExp(winName, 'i').test(l));
+                if (lines.length > 0) {
+                    const parts = lines[0].trim().split(/\s+/);
+                    const pid = parts[2];
+                    if (pid && /^\d+$/.test(pid)) {
+                        await run(`kill ${pid} 2>/dev/null`);
+                        await wait(400);
+                        return `Force-closed "${winName}" (SIGTERM pid ${pid})`;
+                    }
+                }
+            }
+
+            return `[Error] Could not close "${winName}" — window may already be closed.`;
         }
 
         case 'wait':
@@ -357,40 +697,104 @@ async function execMacro(
     const winName = (input.window as string | undefined) ?? batchWindow;
     const text = input.text as string | undefined;
 
+    const hostDisplay = process.env.DISPLAY ?? ':0';
+    const runH = (cmd: string, timeout?: number) => run(cmd, timeout, hostDisplay);
+
     switch (action) {
         case 'app_launch':
         case 'launch_and_focus': {
             const appBinary = (input.app ?? text) as string | undefined;
             if (!appBinary) return '[Error] app_launch requires "app" (binary name).';
+            console.log(`[DESKTOP_ACTION] app_launch "${appBinary}" (window timeout: 18s)`);
             const windowMatch = winName ?? appBinary;
+            const preferMonitor = input.monitor as number | undefined;
             const m = createTrace(`app_launch("${appBinary}")`);
+
+            // Snapshot ALL existing WIDs before launch (not just title-matched ones).
+            // This lets us detect the new window even when the binary name doesn't match
+            // the window title (e.g. binary "gnome-calculator" → title "Calculator").
+            const preLaunchWindows = await runH('wmctrl -l 2>/dev/null');
+            const re = new RegExp(windowMatch, 'i');
+            const allPreWids = new Set(
+                preLaunchWindows.split('\n')
+                    .map((l) => l.trim().split(/\s+/)[0])
+                    .filter((w) => /^0x[0-9a-f]+$/i.test(w))
+            );
 
             await m.step('launch', appBinary, async () => {
                 await run(`setsid ${appBinary} >/dev/null 2>&1 &`);
                 return `Launched ${appBinary} in background`;
             });
 
+            let newWid: string | undefined;
+            let detectedTitle: string | undefined;
             const waitResult = await m.step('wait_for_window', windowMatch, async () => {
                 const launchStart = Date.now();
-                while (Date.now() - launchStart < 12_000) {
-                    await wait(500);
-                    const windows = await run('wmctrl -l 2>/dev/null');
-                    if (new RegExp(windowMatch, 'i').test(windows)) {
-                        return `Window "${windowMatch}" appeared after ${Date.now() - launchStart}ms`;
+                // Two-pass detection:
+                //   Pass 1: look for a new WID whose title matches the windowMatch pattern
+                //   Pass 2: look for ANY new WID not present before launch (handles binary≠title)
+                for (let elapsed = 0; elapsed < 18_000; elapsed = Date.now() - launchStart) {
+                    const windows = await runH('wmctrl -l 2>/dev/null');
+                    // Pass 1: title match
+                    for (const line of windows.split('\n')) {
+                        if (!re.test(line)) continue;
+                        const wid = line.trim().split(/\s+/)[0];
+                        if (!allPreWids.has(wid)) { newWid = wid; break; }
                     }
+                    if (newWid) {
+                        detectedTitle = windows.split('\n').find((l) => l.includes(newWid!))?.split(/\s+/).slice(4).join(' ');
+                        return `Window "${windowMatch}" appeared after ${Date.now() - launchStart}ms (WID: ${newWid})`;
+                    }
+                    // Pass 2: any new WID (binary name ≠ window title case)
+                    for (const line of windows.split('\n')) {
+                        const wid = line.trim().split(/\s+/)[0];
+                        if (!wid || allPreWids.has(wid) || !/^0x[0-9a-f]+$/i.test(wid)) continue;
+                        // New window appeared — record it
+                        newWid = wid;
+                        detectedTitle = line.trim().split(/\s+/).slice(4).join(' ');
+                        return `New window appeared after ${Date.now() - launchStart}ms: "${detectedTitle}" (WID: ${newWid}) — title did not match pattern "${windowMatch}"`;
+                    }
+                    await wait(300);
                 }
-                return `[Error] No window matching "${windowMatch}" within 12s`;
+                return `[Error] No window matching "${windowMatch}" within 18s`;
             });
             if (waitResult.startsWith('[Error]')) return `${m.finish()}\n${waitResult}`;
 
-            await m.step('focus', windowMatch, async () => {
-                await smartFocus(windowMatch);
+            // Use detectedTitle as windowMatch if the original pattern didn't match
+            const effectiveMatch = detectedTitle && !re.test(detectedTitle ?? '') ? (detectedTitle ?? windowMatch) : windowMatch;
+
+            // Measure geometry and resolve monitor before focus
+            const geom = newWid
+                ? await (async () => {
+                    // Directly measure the exact WID we found
+                    const all = await getWindowsGeometry(effectiveMatch, hostDisplay);
+                    const match = all.find((w) => w.wid === newWid) ?? all[0];
+                    if (!match) return null;
+                    const { monitor, monitorLabel } = await resolveMonitor(match.x, match.y, match.width, match.height);
+                    return { ...match, monitor, monitorLabel };
+                })()
+                : await measureWindow(effectiveMatch, hostDisplay, preferMonitor);
+            const resolvedWid = newWid ?? (geom as any)?.wid;
+
+            await m.step('focus', effectiveMatch, async () => {
+                // Focus by WID to avoid ambiguity with same-titled windows on other monitors
+                if (resolvedWid && await cmdExists('wmctrl')) {
+                    await runH(`wmctrl -i -a ${resolvedWid} 2>&1`);
+                } else {
+                    await smartFocus(effectiveMatch, hostDisplay);
+                }
                 await wait(500);
-                return `Focused "${windowMatch}"`;
+                if (geom) recordFocus(desktopState, effectiveMatch, guessApp(effectiveMatch), geom);
+                const monLine = geom ? ` on monitor ${geom.monitor} [${geom.monitorLabel}]` : '';
+                return `Focused "${effectiveMatch}"${monLine}`;
             });
 
-            const { summary } = await captureAndAnalyze({ window: windowMatch });
-            return `${m.finish()}\n\nLaunched and focused "${appBinary}"\n${summary}`;
+            console.log(`[VERIFY_START] app_launch window "${effectiveMatch}"`);
+            const { summary } = await captureAndAnalyze({ window: effectiveMatch });
+            if (summary) console.log(`[VERIFY_OK] window detected`);
+            else console.log(`[VERIFY_UNAVAILABLE] capture failed`);
+            const geomLine = geom ? `\nGeometry: ${geom.width}x${geom.height} at (${geom.x},${geom.y}) — monitor ${geom.monitor} [${geom.monitorLabel}]` : '';
+            return `${m.finish()}\n\nLaunched and focused "${appBinary}" (window: "${effectiveMatch}")${geomLine}\n${summary}`;
         }
 
         case 'open_menu_path': {
@@ -688,11 +1092,7 @@ export async function executeGuiInteract(input: Record<string, unknown>): Promis
     const action = input.action as string | undefined;
     if (!action) return '[Error] action is required.';
 
-    // Guard: never use gui_interact on Clawdia/Electron itself
     const winName = ((input.window ?? '') as string).toLowerCase();
-    if (/clawdia|electron|chromium|browser/i.test(winName) && action !== 'list_windows' && action !== 'verify_window_title') {
-        return '[Error] Do not use gui_interact on the browser — use browser_* tools for DOM-level interaction.';
-    }
 
     // Capability overview (no side-effects, safe to call anytime)
     if (action === 'gui_query' || action === 'get_desktop_capabilities') {

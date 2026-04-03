@@ -34,8 +34,6 @@ export interface SharedExecutorConfig {
 // ─── agentLoop-specific config ────────────────────────────────────────────────
 
 export interface AgentLoopConfig extends SharedExecutorConfig {
-  /** Whether the pipeline orchestrator may be used for routing complex requests */
-  pipelineEnabled: boolean;
   /** Maximum number of session turns kept in memory */
   maxSessionTurns: number;
   /** Maximum session turns for app-mapping mode */
@@ -71,6 +69,8 @@ export interface ConcurrentConfig extends SharedExecutorConfig {
   strategy: 'parallel' | 'claude_primary_codex_review';
   /** Whether to run a synthesis LLM call to merge results. */
   synthesize: boolean;
+  /** Whether to isolate each worker in a git worktree to prevent file conflicts. */
+  useWorktrees: boolean;
 }
 
 // ─── Composite type ───────────────────────────────────────────────────────────
@@ -91,7 +91,6 @@ function defaultConfigs(): AllExecutorConfigs {
       displayOrder: 0,
       sameConversationPolicy: 'exclusive',
       timeoutMs: 0,
-      pipelineEnabled: true,
       maxSessionTurns: 20,
       maxMappingSessionTurns: 6,
     },
@@ -117,6 +116,7 @@ function defaultConfigs(): AllExecutorConfigs {
       timeoutMs: 300_000, // 5 min wall clock for both executors + synthesis
       strategy: 'parallel',
       synthesize: true,
+      useWorktrees: false,  // opt-in — requires git repo; isolates workers in separate worktrees
     },
   };
 }

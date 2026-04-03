@@ -196,7 +196,7 @@ function GraphStateArtifactView({ artifact }: { artifact: RunArtifact }) {
   const snapshot = parseGraphStateArtifact(artifact);
   if (!snapshot) {
     return (
-      <pre className="mt-3 overflow-x-auto rounded-lg border border-white/[0.04] bg-[#0f0f13] px-3 py-2 font-mono text-[11px] leading-[1.55] text-text-secondary whitespace-pre-wrap">
+      <pre className="mt-3 overflow-x-auto rounded-lg border border-white/[0.04] bg-[#0a0a0a] px-3 py-2 font-mono text-[11px] leading-[1.55] text-text-secondary whitespace-pre-wrap">
         {artifact.body}
       </pre>
     );
@@ -209,7 +209,7 @@ function GraphStateArtifactView({ artifact }: { artifact: RunArtifact }) {
       : 'text-blue-300 bg-blue-400/10';
 
   return (
-    <div className="mt-3 rounded-lg border border-white/[0.04] bg-[#0f0f13] px-3 py-3">
+    <div className="mt-3 rounded-lg border border-white/[0.04] bg-[#0a0a0a] px-3 py-3">
       <div className="flex flex-wrap items-center gap-2 text-2xs text-text-secondary">
         <span className={`px-2 py-1 rounded-md ${statusTone}`}>{snapshot.status}</span>
         <span className="px-2 py-1 rounded-md bg-white/[0.04]">{snapshot.nodeCount} nodes</span>
@@ -470,7 +470,7 @@ function RunDetail({
                 {artifact.kind === 'execution_graph_state' ? (
                   <GraphStateArtifactView artifact={artifact} />
                 ) : (
-                  <pre className="mt-3 overflow-x-auto rounded-lg border border-white/[0.04] bg-[#0f0f13] px-3 py-2 font-mono text-[11px] leading-[1.55] text-text-secondary whitespace-pre-wrap">
+                  <pre className="mt-3 overflow-x-auto rounded-lg border border-white/[0.04] bg-[#0a0a0a] px-3 py-2 font-mono text-[11px] leading-[1.55] text-text-secondary whitespace-pre-wrap">
                     {artifact.body}
                   </pre>
                 )}
@@ -597,7 +597,7 @@ function RunDetail({
                 </div>
 
                 {change.diffText && (
-                  <pre className="mt-3 overflow-x-auto rounded-lg border border-white/[0.04] bg-[#0f0f13] px-3 py-2 font-mono text-[11px] leading-[1.55] text-text-secondary whitespace-pre-wrap">
+                  <pre className="mt-3 overflow-x-auto rounded-lg border border-white/[0.04] bg-[#0a0a0a] px-3 py-2 font-mono text-[11px] leading-[1.55] text-text-secondary whitespace-pre-wrap">
                     {change.diffText}
                   </pre>
                 )}

@@ -1,22 +1,27 @@
-import React, { useState, useCallback, useEffect } from 'react';
+import React, { useState, useCallback, useEffect, lazy, Suspense } from 'react';
 import AppChrome from './components/AppChrome';
 import ChatPanel from './components/ChatPanel';
 import BrowserPanel from './components/BrowserPanel';
-import ConversationsView from './components/ConversationsView';
-import SettingsView from './components/SettingsView';
-import WelcomeScreen from './components/WelcomeScreen';
-import ProcessesPanel from './components/ProcessesPanel';
-import EditorPanel from './components/EditorPanel';
-import TerminalPanel from './components/TerminalPanel';
-import CreateAgentPanel from './components/agents/CreateAgentPanel';
-import AgentDetailPanel from './components/agents/AgentDetailPanel';
 import RightFilesDrawer from './components/RightFilesDrawer';
+import FocusStealToast from './components/FocusStealToast';
+import ExtensionsPanel from './components/ExtensionsPanel';
+
+// Lazy-loaded views — not needed on initial render
+const ConversationsView = lazy(() => import('./components/ConversationsView'));
+const SettingsView = lazy(() => import('./components/SettingsView'));
+const WelcomeScreen = lazy(() => import('./components/WelcomeScreen'));
+const ProcessesPanel = lazy(() => import('./components/ProcessesPanel'));
+const EditorPanel = lazy(() => import('./components/EditorPanel'));
+const TerminalPanel = lazy(() => import('./components/TerminalPanel'));
+const DocViewerPanel = lazy(() => import('./components/DocViewerPanel'));
+const CreateAgentPanel = lazy(() => import('./components/agents/CreateAgentPanel'));
+const AgentDetailPanel = lazy(() => import('./components/agents/AgentDetailPanel'));
 import { makeTab, addTab, closeTab, type ConversationTab } from './tabLogic';
 
 export type View = 'chat' | 'conversations' | 'settings' | 'processes' | 'agent-create' | 'agent-detail';
 
 type ReplayBufferItem = { type: string; data: any };
-type RightPaneMode = 'none' | 'browser' | 'editor' | 'terminal';
+type RightPaneMode = 'none' | 'browser' | 'editor' | 'terminal' | 'docs';
 type EditorTab = { id: string; filePath: string };
 
 interface UiSessionState {
@@ -47,9 +52,11 @@ export default function App() {
   const [tabs, setTabs] = useState<ConversationTab[]>(() => [makeTab(null)]);
   const [activeTabId, setActiveTabId] = useState<string>(() => tabs[0].id);
   const [filesDrawerOpen, setFilesDrawerOpen] = useState(false);
+  const [extensionsOpen, setExtensionsOpen] = useState(false);
   const browserVisible = rightPaneMode === 'browser';
   const editorOpen = rightPaneMode === 'editor';
   const terminalOpen = rightPaneMode === 'terminal';
+  const docsOpen = rightPaneMode === 'docs';
   const activeEditorTab = editorTabs.find((tab) => tab.id === activeEditorTabId) || null;
 
   const patchTab = useCallback((tabId: string, patch: Partial<ConversationTab>) => {
@@ -264,8 +271,9 @@ export default function App() {
       } catch { /* ignore */ }
       try {
         if (rightPaneMode === 'browser') {
-          const state = await api.browser.getExecutionMode?.();
-          browserUrl = state ?? null;
+          const tabs = await api.browser.listTabs?.();
+          const activeBrowserTab = (tabs ?? []).find((tab: any) => tab?.isActive);
+          browserUrl = activeBrowserTab?.url ?? null;
         }
       } catch { /* ignore */ }
 
@@ -326,13 +334,14 @@ export default function App() {
 
     const unsubEnd = api.chat.onStreamEnd((data: any) => {
       if (!data?.conversationId) return;
-      if (data.isPipelineStart) {
-        patchTabByConversationId(data.conversationId, () => ({ status: 'running' }));
-        return;
-      }
       patchTabByConversationId(data.conversationId, () => ({
         status: data.ok ? 'completed' : (data.cancelled ? 'idle' : 'failed'),
       }));
+    });
+
+    const unsubTitle = api.chat.onTitleUpdated?.((payload: { conversationId: string; title: string }) => {
+      if (!payload?.conversationId || !payload?.title) return;
+      patchTabByConversationId(payload.conversationId, () => ({ title: payload.title }));
     });
 
     const unsubClaudeStatus = api.chat.onClaudeStatus?.((payload: { conversationId: string; status: string }) => {
@@ -352,7 +361,7 @@ export default function App() {
       }
     });
 
-    return () => { unsubText?.(); unsubEnd?.(); unsubClaudeStatus?.(); };
+    return () => { unsubText?.(); unsubEnd?.(); unsubClaudeStatus?.(); unsubTitle?.(); };
   }, [patchTabByConversationId]);
 
   // Auto-reset completed/failed tab status back to idle after a delay
@@ -496,6 +505,17 @@ export default function App() {
     });
   }, []);
 
+  const handleToggleDocs = useCallback(() => {
+    setRightPaneMode((mode) => {
+      if (mode === 'docs') {
+        (window as any).clawdia?.browser.show();
+        return 'browser';
+      }
+      (window as any).clawdia?.browser.hide();
+      return 'docs';
+    });
+  }, []);
+
   const handleOpenEditorFile = useCallback((filePath: string) => {
     setEditorTabs((currentTabs) => {
       const existing = currentTabs.find((tab) => tab.filePath === filePath);
@@ -589,7 +609,7 @@ export default function App() {
   if (hasApiKey === null) {
     return (
       <div className="flex h-screen w-screen items-center justify-center bg-surface-0 text-text-secondary">
-        <div style={{ color: '#fff', fontSize: 24 }}>Starting…</div>
+        <div style={{ color: 'rgba(255,255,255,0.45)', fontSize: 14, letterSpacing: '0.04em' }}>Reconnecting…</div>
       </div>
     );
   }
@@ -603,19 +623,19 @@ export default function App() {
             className="relative flex h-full min-w-0 flex-col"
             style={{
               flex: browserVisible ? '35 0 0' : '1 0 0',
-              background: '#0b0b0f',
+              background: '#000000',
               ...(browserVisible ? {
                 borderRight: '2px solid rgba(255,255,255,0.09)',
                 boxShadow: 'inset -2px 0 12px rgba(0,0,0,0.35), 2px 0 8px rgba(0,0,0,0.3)',
               } : {}),
             }}
           >
-            <WelcomeScreen onComplete={handleWelcomeComplete} />
+            <Suspense fallback={<div />}><WelcomeScreen onComplete={handleWelcomeComplete} /></Suspense>
           </div>
 
           {browserVisible && (
             <div
-              className="flex h-full min-w-0 flex-col border-l-[2px] border-white/[0.06] shadow-[inset_2px_0_8px_rgba(0,0,0,0.3),-2px_0_12px_rgba(0,0,0,0.4)]"
+              className="flex h-full min-w-0 flex-col border-l-[0px] shadow-[inset_2px_0_8px_rgba(0,0,0,0.3),-2px_0_12px_rgba(0,0,0,0.4)]"
               style={{ flex: '65 0 0' }}
             >
               <BrowserPanel />
@@ -625,6 +645,8 @@ export default function App() {
       </div>
     );
   }
+
+  const lazyFallback = <div className="flex min-h-0 flex-1 items-center justify-center" style={{ color: '#555' }}>Loading…</div>;
 
   const renderPrimaryView = () => {
     if (displayedView === 'chat') {
@@ -650,7 +672,13 @@ export default function App() {
                   onShowBrowser={handleShowBrowser}
                   terminalOpen={terminalOpen}
                   onToggleTerminal={handleToggleTerminal}
+                  docsOpen={docsOpen}
+                  onToggleDocs={handleToggleDocs}
                   onOpenSettings={() => setActiveView('settings')}
+                  filesOpen={filesDrawerOpen}
+                  onToggleFiles={() => setFilesDrawerOpen((v) => !v)}
+                  extensionsOpen={extensionsOpen}
+                  onToggleExtensions={() => setExtensionsOpen((v) => !v)}
                   onOpenPendingApproval={handleOpenProcess}
                   loadConversationId={panel.loadConversationId}
                   replayBuffer={panel.replayBuffer}
@@ -672,51 +700,59 @@ export default function App() {
 
     if (displayedView === 'conversations') {
       return (
-        <ConversationsView
-          onBack={() => setActiveView('chat')}
-          onLoadConversation={handleLoadConversation}
-        />
+        <Suspense fallback={lazyFallback}>
+          <ConversationsView
+            onBack={() => setActiveView('chat')}
+            onLoadConversation={handleLoadConversation}
+          />
+        </Suspense>
       );
     }
 
     if (displayedView === 'processes') {
       return (
-        <ProcessesPanel
-          onBack={() => setActiveView('chat')}
-          initialRunId={selectedProcessId}
-          onAttach={(conversationId, buffer) => {
-            handleLoadConversation(conversationId, buffer);
-          }}
-        />
+        <Suspense fallback={lazyFallback}>
+          <ProcessesPanel
+            onBack={() => setActiveView('chat')}
+            initialRunId={selectedProcessId}
+            onAttach={(conversationId, buffer) => {
+              handleLoadConversation(conversationId, buffer);
+            }}
+          />
+        </Suspense>
       );
     }
 
     if (displayedView === 'settings') {
-      return <SettingsView onBack={() => setActiveView('chat')} />;
+      return <Suspense fallback={lazyFallback}><SettingsView onBack={() => setActiveView('chat')} /></Suspense>;
     }
 
     if (displayedView === 'agent-create') {
       return (
-        <CreateAgentPanel
-          onBack={() => setActiveView('chat')}
-          onCreated={(agent) => {
-            setSelectedAgentId(agent.id);
-            setActiveView('agent-detail');
-          }}
-        />
+        <Suspense fallback={lazyFallback}>
+          <CreateAgentPanel
+            onBack={() => setActiveView('chat')}
+            onCreated={(agent) => {
+              setSelectedAgentId(agent.id);
+              setActiveView('agent-detail');
+            }}
+          />
+        </Suspense>
       );
     }
 
     if (displayedView === 'agent-detail') {
       return (
-        <AgentDetailPanel
-          agentId={selectedAgentId}
-          onBack={() => setActiveView('chat')}
-          onDeleted={() => {
-            setSelectedAgentId(null);
-            setActiveView('chat');
-          }}
-        />
+        <Suspense fallback={lazyFallback}>
+          <AgentDetailPanel
+            agentId={selectedAgentId}
+            onBack={() => setActiveView('chat')}
+            onDeleted={() => {
+              setSelectedAgentId(null);
+              setActiveView('chat');
+            }}
+          />
+        </Suspense>
       );
     }
 
@@ -727,34 +763,18 @@ export default function App() {
     <>
     <div
       className="flex h-screen w-screen flex-col overflow-hidden rounded-[10px] border-[2px] border-white/[0.10]"
-      style={{ boxShadow: '0 8px 40px rgba(0,0,0,0.8), 0 2px 8px rgba(0,0,0,0.6), inset 0 1px 0 rgba(255,255,255,0.05)' }}
+      style={{ boxShadow: '0 8px 40px rgba(0,0,0,0.9), 0 2px 8px rgba(0,0,0,0.7)' }}
     >
-      <AppChrome
-        showChatControls={activeView === 'chat' || activeView === 'settings'}
-        historyOpen={historyMode}
-        terminalOpen={terminalOpen}
-        settingsOpen={activeView === 'settings'}
-        filesOpen={filesDrawerOpen}
-        onToggleHistory={() => {
-          setActiveView('chat');
-          setHistoryMode((current) => !current);
-        }}
-        onToggleTerminal={() => {
-          setActiveView('chat');
-          handleToggleTerminal();
-        }}
-        onOpenSettings={() => setActiveView((current) => current === 'settings' ? 'chat' : 'settings')}
-        onToggleFiles={() => setFilesDrawerOpen((v) => !v)}
-      />
+      <AppChrome />
       <div className="flex min-h-0 flex-1">
         <div
           className="relative flex h-full min-w-0 flex-col"
           style={{
             flex: rightPaneMode === 'none' ? '1 0 0' : '35 0 0',
-            background: '#0b0b0f',
+            background: '#000000',
             ...(rightPaneMode !== 'none' ? {
-              borderRight: '2px solid rgba(255,255,255,0.09)',
-              boxShadow: 'inset -2px 0 12px rgba(0,0,0,0.35), 2px 0 8px rgba(0,0,0,0.3)',
+              marginRight: 6,
+              boxShadow: '2px 0 12px rgba(0,0,0,0.5)',
             } : {}),
           }}
         >
@@ -773,37 +793,46 @@ export default function App() {
 
         {editorOpen && (
           <div
-            className="flex h-full min-w-0 flex-col border-l-[2px] border-white/[0.06]"
+            className="flex h-full min-w-0 flex-col border-l-[0px]"
             style={{ flex: '65 0 0' }}
           >
-            <EditorPanel
-              tabs={editorTabs}
-              activeTabId={activeEditorTabId}
-              onSelectTab={handleSelectEditorTab}
-              onCloseTab={handleCloseEditorTab}
-              onDirtyStateChange={(tabId, dirty) => {
-                setEditorDirtyByTabId((current) => {
-                  if (current[tabId] === dirty) return current;
-                  return { ...current, [tabId]: dirty };
-                });
-              }}
-            />
+            <Suspense fallback={<div />}>
+              <EditorPanel
+                tabs={editorTabs}
+                activeTabId={activeEditorTabId}
+                onSelectTab={handleSelectEditorTab}
+                onCloseTab={handleCloseEditorTab}
+                onDirtyStateChange={(tabId, dirty) => {
+                  setEditorDirtyByTabId((current) => {
+                    if (current[tabId] === dirty) return current;
+                    return { ...current, [tabId]: dirty };
+                  });
+                }}
+              />
+            </Suspense>
           </div>
         )}
 
         <div
-          className={`${terminalOpen ? 'flex' : 'hidden'} h-full min-w-0 flex-col border-l-[2px] border-white/[0.06]`}
+          className={`${terminalOpen ? 'flex' : 'hidden'} h-full min-w-0 flex-col border-l-[0px]`}
           style={{ flex: '65 0 0' }}
         >
-          <TerminalPanel visible={terminalOpen} conversationId={loadConversationId} />
+          <Suspense fallback={<div />}><TerminalPanel visible={terminalOpen} conversationId={loadConversationId} /></Suspense>
         </div>
 
-        {browserVisible && !editorOpen && !terminalOpen && (
+        <div
+          className={`${docsOpen ? 'flex' : 'hidden'} h-full min-w-0 flex-col border-l-[0px]`}
+          style={{ flex: '65 0 0' }}
+        >
+          <Suspense fallback={<div />}><DocViewerPanel visible={docsOpen} /></Suspense>
+        </div>
+
+        {browserVisible && !editorOpen && !terminalOpen && !docsOpen && (
           <div
-            className="flex h-full min-w-0 flex-col border-l-[2px] border-white/[0.06] shadow-[inset_2px_0_8px_rgba(0,0,0,0.3),-2px_0_12px_rgba(0,0,0,0.4)]"
+            className="flex h-full min-w-0 flex-col border-l-[0px]"
             style={{ flex: '65 0 0' }}
           >
-            <BrowserPanel reservedRight={filesDrawerOpen ? 280 : 0} />
+            <BrowserPanel reservedRight={filesDrawerOpen ? 280 : 0} hideNativeView={extensionsOpen} />
           </div>
         )}
       </div>
@@ -813,6 +842,10 @@ export default function App() {
         onClose={() => setFilesDrawerOpen(false)}
         conversationId={tabs.find((t) => t.id === activeTabId)?.conversationId ?? null}
       />
+      {extensionsOpen && (
+        <ExtensionsPanel onClose={() => setExtensionsOpen(false)} />
+      )}
+      <FocusStealToast />
     </>
   );
 }

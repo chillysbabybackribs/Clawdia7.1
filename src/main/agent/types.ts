@@ -16,6 +16,10 @@ export interface AgentProfile {
   specialMode?: SpecialMode;
   mappingTarget?: string;
   mappingPhase?: MappingPhase;
+  /** True when the task has explicit stop/quiet signals — suppresses planning tools */
+  linearExecution?: boolean;
+  /** Native API hints detected from user message — injected into prompt to prefer APIs over browser automation */
+  serviceHints?: import('./serviceResolver').ServiceHint[];
 }
 
 export interface LoopOptions {
@@ -30,12 +34,14 @@ export interface LoopOptions {
   forcedProfile?: Partial<AgentProfile>;
   unrestrictedMode?: boolean;
   browserService?: BrowserService;
+  terminalController?: import('../core/terminal/TerminalSessionController').TerminalSessionController;
   attachments?: MessageAttachment[];
   onText: (delta: string) => void;
   onThinking?: (delta: string) => void;
   onToolActivity?: (activity: ToolActivity) => void;
   onPromptDebug?: (snapshot: PromptDebugSnapshot) => void;
   onSystemPrompt?: (prompt: string) => void;
+  onContextPressure?: (pressure: { used: number; budget: number; pct: number }) => void;
 }
 
 export interface ToolActivity {
@@ -53,6 +59,10 @@ export interface ToolCallRecord {
   name: string;
   input: Record<string, unknown>;
   result: string;
+  startMs: number;
+  endMs: number;
+  elapsed_ms: number;
+  success: boolean;
 }
 
 export interface BrowserBudgetState {

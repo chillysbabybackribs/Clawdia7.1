@@ -9,8 +9,13 @@ import { isInitializeRequest } from '@modelcontextprotocol/sdk/types.js';
 import { z } from 'zod';
 import type { ElectronBrowserService } from './core/browser/ElectronBrowserService';
 import { executeBrowserTool } from './core/cli/browserTools';
+import { CDP_TOOLS, executeCDPTool } from './core/cli/cdpTools';
+import { SYSTEM_TOOLS } from './core/cli/systemTools';
+import { executeSystemTool } from './core/cli/systemExecutor';
 import { executeGuiInteract } from './core/desktop';
 import { executeDbusControl } from './core/desktop/dbus';
+import { executeShellTool } from './core/cli/shellTools';
+import type { TerminalSessionController } from './core/terminal/TerminalSessionController';
 
 type ConversationBridgeConfig = {
   conversationId: string;
@@ -27,6 +32,7 @@ type SessionTransport = {
 };
 
 let browserServiceRef: ElectronBrowserService | null = null;
+let terminalControllerRef: TerminalSessionController | null = null;
 let httpServer: HttpServer | null = null;
 let listenPromise: Promise<number> | null = null;
 let currentPort: number | null = null;
@@ -76,10 +82,13 @@ function createConversationServer(conversationId: string): McpServer {
       instructions:
         `You are running inside Clawdia, an Electron desktop app with a live embedded Chromium browser.\n` +
         `Use clawdia_browser_* tools to control the browser that is visible to the user in real time.\n` +
+        `Use clawdia_cdp_* tools for advanced CDP operations: low-level input (mouse/key/touch), request interception, accessibility tree, DOM snapshots, cookies, storage, emulation, PDF generation, and file chooser handling.\n` +
+        `Use clawdia_system_* tools for OS-level operations: secret storage (OS keychain), cookie-aware HTTP fetch, global shortcuts, and XDG RemoteDesktop portal (GNOME Wayland input injection).\n` +
         `Use clawdia_gui_interact for Linux desktop GUI automation (AT-SPI / xdotool on Wayland/X11).\n` +
         `Use clawdia_dbus_control to call system DBus services (media players, notifications, etc.).\n` +
+        `Use clawdia_terminal_spawn to launch processes in a pty and get a pid. Use clawdia_terminal_write to send commands, clawdia_terminal_read to get buffered output and session state, clawdia_terminal_list to see all sessions, and clawdia_terminal_kill to terminate a session.\n` +
         `Before starting a browser task, call clawdia_browser_get_page_state to check the current URL.\n` +
-        `Prefer clawdia_browser_* tools over WebFetch for all web interaction — they drive the live visible browser.\n` +
+        `Prefer clawdia_browser_* and clawdia_cdp_* tools over WebFetch for all web interaction — they drive the live visible browser.\n` +
         `Conversation: ${conversationId}`,
     },
   );
@@ -447,6 +456,91 @@ function createConversationServer(conversationId: string): McpServer {
   );
 
   server.registerTool(
+    'clawdia_browser_stop_loading',
+    {
+      description: 'Stop the current page from loading. Use when you have the content you need.',
+    },
+    async () => {
+      try {
+        const result = await executeBrowserTool('browser_stop_loading', {}, requireBrowserService(), conversationId);
+        return jsonToolResult({ conversationId, result });
+      } catch (error) {
+        return errorToolResult((error as Error).message);
+      }
+    },
+  );
+
+  server.registerTool(
+    'clawdia_browser_wait_for_network_idle',
+    {
+      description: 'Wait until no network requests are in-flight for a specified idle period. More reliable than wait_for for confirming a page is truly done loading.',
+      inputSchema: {
+        idleMs: z.number().optional().describe('Milliseconds of network silence to consider idle (default: 500)'),
+        timeoutMs: z.number().optional().describe('Max wait time in milliseconds (default: 30000)'),
+      },
+    },
+    async ({ idleMs, timeoutMs }) => {
+      try {
+        const result = await executeBrowserTool('browser_wait_for_network_idle', { idleMs, timeoutMs }, requireBrowserService(), conversationId);
+        return jsonToolResult({ conversationId, result });
+      } catch (error) {
+        return errorToolResult((error as Error).message);
+      }
+    },
+  );
+
+  server.registerTool(
+    'clawdia_browser_wait_for_navigation',
+    {
+      description: 'Wait for a full page navigation to complete (URL change + loading finished). Use after clicking a link or submitting a form.',
+      inputSchema: {
+        timeoutMs: z.number().optional().describe('Max wait time in milliseconds (default: 15000)'),
+      },
+    },
+    async ({ timeoutMs }) => {
+      try {
+        const result = await executeBrowserTool('browser_wait_for_navigation', { timeoutMs }, requireBrowserService(), conversationId);
+        return jsonToolResult({ conversationId, result });
+      } catch (error) {
+        return errorToolResult((error as Error).message);
+      }
+    },
+  );
+
+  server.registerTool(
+    'clawdia_browser_get_network_activity',
+    {
+      description: 'Get a snapshot of network/loading activity: readyState, resource count, transfer sizes, recent resources, and page timing.',
+    },
+    async () => {
+      try {
+        const result = await executeBrowserTool('browser_get_network_activity', {}, requireBrowserService(), conversationId);
+        return jsonToolResult({ conversationId, result });
+      } catch (error) {
+        return errorToolResult((error as Error).message);
+      }
+    },
+  );
+
+  server.registerTool(
+    'clawdia_browser_set_user_agent',
+    {
+      description: 'Override the User-Agent string for the current browser tab to avoid bot detection.',
+      inputSchema: {
+        userAgent: z.string().describe('User-Agent string to set'),
+      },
+    },
+    async ({ userAgent }) => {
+      try {
+        const result = await executeBrowserTool('browser_set_user_agent', { userAgent }, requireBrowserService(), conversationId);
+        return jsonToolResult({ conversationId, result });
+      } catch (error) {
+        return errorToolResult((error as Error).message);
+      }
+    },
+  );
+
+  server.registerTool(
     'clawdia_gui_interact',
     {
       description: 'Run a desktop GUI automation action against the Clawdia Linux desktop bridge.',
@@ -482,6 +576,181 @@ function createConversationServer(conversationId: string): McpServer {
       } catch (error) {
         return errorToolResult((error as Error).message);
       }
+    },
+  );
+
+  // ── Helper: build Zod schema from Anthropic tool input_schema ──────────────
+  function buildZodSchema(inputSchema: { properties?: Record<string, unknown>; required?: string[] }): Record<string, z.ZodTypeAny> {
+    const zSchema: Record<string, z.ZodTypeAny> = {};
+    if (!inputSchema.properties) return zSchema;
+    for (const [key, prop] of Object.entries(inputSchema.properties)) {
+      const p = prop as { type?: string; description?: string };
+      let zField: z.ZodTypeAny;
+      if (p.type === 'number') zField = z.number().describe(p.description ?? key);
+      else if (p.type === 'boolean') zField = z.boolean().describe(p.description ?? key);
+      else if (p.type === 'array') zField = z.array(z.any()).describe(p.description ?? key);
+      else if (p.type === 'object') zField = z.record(z.string(), z.any()).describe(p.description ?? key);
+      else zField = z.string().describe(p.description ?? key);
+
+      if (!inputSchema.required?.includes(key)) {
+        zField = zField.optional();
+      }
+      zSchema[key] = zField;
+    }
+    return zSchema;
+  }
+
+  // ── CDP Tools ───────────────────────────────────────────────────────────────
+  // Register all CDP-powered browser tools dynamically from the CDP_TOOLS array.
+  for (const tool of CDP_TOOLS) {
+    const mcpName = `clawdia_${tool.name.replace(/^browser_/, '')}`;
+    const schema = tool.input_schema as { properties?: Record<string, unknown>; required?: string[] };
+    const zSchema = buildZodSchema(schema);
+
+    server.registerTool(
+      mcpName,
+      {
+        description: tool.description ?? '',
+        inputSchema: Object.keys(zSchema).length > 0 ? z.object(zSchema) : undefined,
+      },
+      async (args: Record<string, unknown>) => {
+        try {
+          const browser = requireBrowserService();
+          const tabId = await browser.getOrAssignTab(conversationId);
+          const result = await executeCDPTool(tool.name, args, browser, tabId);
+          return jsonToolResult({ conversationId, result });
+        } catch (error) {
+          return errorToolResult((error as Error).message);
+        }
+      },
+    );
+  }
+
+  // ── System Tools ────────────────────────────────────────────────────────────
+  // Register all system-level tools dynamically from the SYSTEM_TOOLS array.
+  for (const tool of SYSTEM_TOOLS) {
+    const mcpName = `clawdia_${tool.name}`;
+    const schema = tool.input_schema as { properties?: Record<string, unknown>; required?: string[] };
+    const zSchema = buildZodSchema(schema);
+
+    server.registerTool(
+      mcpName,
+      {
+        description: tool.description ?? '',
+        inputSchema: Object.keys(zSchema).length > 0 ? z.object(zSchema) : undefined,
+      },
+      async (args: Record<string, unknown>) => {
+        try {
+          const result = await executeSystemTool(tool.name, args);
+          return jsonToolResult({ conversationId, result });
+        } catch (error) {
+          return errorToolResult((error as Error).message);
+        }
+      },
+    );
+  }
+
+  // ── Shell Exec ──────────────────────────────────────────────────────────────
+  server.registerTool(
+    'shell_exec',
+    {
+      description: 'Execute a bash shell command on the local system. Use for single commands (launch app, open file, kill process). Prefer this over clawdia_terminal_spawn for one-shot commands.',
+      inputSchema: {
+        command: z.string().describe('Shell command to execute'),
+      },
+    },
+    async ({ command }) => {
+      try {
+        const result = await executeShellTool('shell_exec', { command });
+        return jsonToolResult({ conversationId, result });
+      } catch (error) {
+        return errorToolResult((error as Error).message);
+      }
+    },
+  );
+
+  // ── Terminal Tools ──────────────────────────────────────────────────────────
+  server.registerTool(
+    'clawdia_terminal_spawn',
+    {
+      description: 'Spawn a new terminal session (pty). Returns sessionId and pid. Use clawdia_terminal_write to send commands.',
+      inputSchema: {
+        sessionId: z.string().describe('Unique id for this session'),
+        cwd: z.string().optional().describe('Working directory (default: home)'),
+        shell: z.string().optional().describe('Shell binary (default: $SHELL or /bin/bash)'),
+        cols: z.number().optional().describe('Terminal columns (default: 120)'),
+        rows: z.number().optional().describe('Terminal rows (default: 30)'),
+      },
+    },
+    async ({ sessionId, cwd, shell, cols, rows }) => {
+      const ctrl = terminalControllerRef;
+      if (!ctrl) return errorToolResult('Terminal controller not available');
+      const state = ctrl.spawn(sessionId, { cwd, shell, cols, rows });
+      if (!state) return errorToolResult('Failed to spawn terminal (node-pty unavailable)');
+      return jsonToolResult({ conversationId, state });
+    },
+  );
+
+  server.registerTool(
+    'clawdia_terminal_write',
+    {
+      description: 'Write input to a live terminal session. Use "\\n" to submit a command.',
+      inputSchema: {
+        sessionId: z.string().describe('Session id'),
+        data: z.string().describe('Data to write (e.g. "ls -la\\n")'),
+      },
+    },
+    async ({ sessionId, data }) => {
+      const ctrl = terminalControllerRef;
+      if (!ctrl) return errorToolResult('Terminal controller not available');
+      const ok = ctrl.write(sessionId, data, { source: 'clawdia_agent' });
+      return jsonToolResult({ conversationId, ok });
+    },
+  );
+
+  server.registerTool(
+    'clawdia_terminal_read',
+    {
+      description: 'Read buffered output from a terminal session. Returns full output buffer and session state including pid and exitCode.',
+      inputSchema: {
+        sessionId: z.string().describe('Session id'),
+      },
+    },
+    async ({ sessionId }) => {
+      const ctrl = terminalControllerRef;
+      if (!ctrl) return errorToolResult('Terminal controller not available');
+      const state = ctrl.getSnapshot(sessionId);
+      if (!state) return errorToolResult(`No session found: ${sessionId}`);
+      return jsonToolResult({ conversationId, state });
+    },
+  );
+
+  server.registerTool(
+    'clawdia_terminal_list',
+    {
+      description: 'List all terminal sessions (live and archived) with their state including pid, exitCode, and owner.',
+    },
+    async () => {
+      const ctrl = terminalControllerRef;
+      if (!ctrl) return errorToolResult('Terminal controller not available');
+      const sessions = ctrl.list();
+      return jsonToolResult({ conversationId, sessions });
+    },
+  );
+
+  server.registerTool(
+    'clawdia_terminal_kill',
+    {
+      description: 'Kill a live terminal session.',
+      inputSchema: {
+        sessionId: z.string().describe('Session id to kill'),
+      },
+    },
+    async ({ sessionId }) => {
+      const ctrl = terminalControllerRef;
+      if (!ctrl) return errorToolResult('Terminal controller not available');
+      const ok = ctrl.kill(sessionId);
+      return jsonToolResult({ conversationId, ok });
     },
   );
 
@@ -624,8 +893,9 @@ function ensureConversationConfig(conversationId: string, port: number): Convers
   return config;
 }
 
-export function attachClawdiaMcpBridge(browserService: ElectronBrowserService): void {
+export function attachClawdiaMcpBridge(browserService: ElectronBrowserService, terminalController?: TerminalSessionController): void {
   browserServiceRef = browserService;
+  if (terminalController) terminalControllerRef = terminalController;
 }
 
 export async function getClaudeMcpConfigPath(conversationId: string): Promise<string> {

@@ -95,9 +95,9 @@ export default function TaskHistoryPanel({ conversationId, onClose }: TaskHistor
   }, [load]);
 
   return (
-    <div className="flex h-full min-h-0 flex-col bg-[#18181c] shadow-[0_-18px_50px_rgba(0,0,0,0.42)] animate-fade-in">
+    <div className="flex h-full min-h-0 flex-col bg-[#0a0a0a] shadow-[0_-18px_50px_rgba(0,0,0,0.42)] animate-fade-in">
       {/* Header */}
-      <div className="flex items-center justify-between px-5 py-3.5 border-b border-white/[0.08] bg-[#18181c] flex-shrink-0">
+      <div className="flex items-center justify-between px-5 py-3.5 border-b border-white/[0.08] bg-[#0a0a0a] flex-shrink-0">
         <div className="flex items-center gap-2">
           <span className="text-sm font-semibold text-text-primary">Task History</span>
           {tasks.length > 0 && (
@@ -129,7 +129,7 @@ export default function TaskHistoryPanel({ conversationId, onClose }: TaskHistor
       </div>
 
       {/* Body */}
-      <div className="flex-1 overflow-y-auto px-4 py-3 bg-[#18181c]">
+      <div className="flex-1 overflow-y-auto px-4 py-3 bg-[#0a0a0a]">
         {loading && tasks.length === 0 && (
           <div className="text-center text-text-muted text-sm py-10">Loading…</div>
         )}

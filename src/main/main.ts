@@ -8,6 +8,9 @@ import { registerVideoExtractorIpc } from './ipc/videoExtractor';
 import { ExtensionManager } from './core/browser/extensions/ExtensionManager';
 import { registerExtensionsIpc } from './core/browser/extensions/registerExtensionsIpc';
 import { initDb } from './db';
+import { setFocusStealNotifier } from './core/desktop/smartFocus';
+import { VirtualDisplay } from './core/desktop/virtualDisplay';
+import { IPC } from './ipc-channels';
 
 const isDev = process.env.NODE_ENV === 'development';
 const isLinux = process.platform === 'linux';
@@ -75,36 +78,48 @@ function loadWindowContent(win: BrowserWindow): void {
   }
 }
 
+async function createAppWindow(userDataPath: string): Promise<void> {
+  const win = createWindow();
+  const browserService = new ElectronBrowserService(win, userDataPath);
+  const terminalController = new TerminalSessionController();
+  await browserService.init();
+
+  // Wire up the desktop focus-steal warning so the renderer can show a toast
+  // before the agent takes OS focus away from the user's current window.
+  setFocusStealNotifier((targetWindow) => {
+    if (!win.isDestroyed()) {
+      win.webContents.send(IPC.DESKTOP_FOCUS_STEAL_WARNING, { targetWindow });
+    }
+  });
+
+  registerIpc(browserService, terminalController);
+  registerTerminalIpc(terminalController, win);
+  registerVideoExtractorIpc(win, browserService);
+  loadWindowContent(win);
+}
+
 app.whenReady().then(async () => {
   if (!initDb()) {
     console.error('[main] Database initialization failed during startup; runtime DB calls will attempt lazy re-initialization.');
   }
-  const win = createWindow();
-  const browserService = new ElectronBrowserService(win, app.getPath('userData'));
-  const extManager = new ExtensionManager(app.getPath('userData'));
+  const userDataPath = app.getPath('userData');
+  const extManager = new ExtensionManager(userDataPath);
   // Load persisted extensions before any BrowserView is created
   await extManager.init();
-  // Restore persisted tabs (and their authenticated sessions) from the last run
-  await browserService.init();
-  const terminalController = new TerminalSessionController();
-  registerIpc(browserService, terminalController);
-  registerTerminalIpc(terminalController, win);
-  registerVideoExtractorIpc(win, browserService);
   registerExtensionsIpc(extManager);
-  loadWindowContent(win);
-  app.on('activate', () => {
+  await createAppWindow(userDataPath);
+  app.on('activate', async () => {
     if (BrowserWindow.getAllWindows().length === 0) {
-      const nextWin = createWindow();
-      const nextBrowserService = new ElectronBrowserService(nextWin, app.getPath('userData'));
-      const nextTerminalController = new TerminalSessionController();
-      registerIpc(nextBrowserService, nextTerminalController);
-      registerTerminalIpc(nextTerminalController, nextWin);
-      registerVideoExtractorIpc(nextWin, nextBrowserService);
-      loadWindowContent(nextWin);
+      await createAppWindow(userDataPath);
     }
   });
 });
 
 app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') app.quit();
+});
+
+app.on('before-quit', () => {
+  // Stop the virtual X display so Xvfb doesn't linger as an orphan process.
+  VirtualDisplay.getInstance().stop();
 });

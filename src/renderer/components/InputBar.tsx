@@ -1,7 +1,6 @@
 import React, { useState, useRef, useCallback, useEffect } from 'react';
 import { DEFAULT_PROVIDER, getModelsForProvider, PROVIDERS, MODEL_REGISTRY, type ProviderId } from '../../shared/model-registry';
 import type { MessageAttachment } from '../../shared/types';
-import ScreenshotSelector from './ScreenshotSelector';
 
 interface InputBarProps {
   onSend: (message: string, attachments?: MessageAttachment[], provider?: string, model?: string) => void;
@@ -23,18 +22,68 @@ interface InputBarProps {
   concurrentMode?: boolean;
   onToggleConcurrentMode?: () => void;
   concurrentModeDisabled?: boolean;
+  concurrentPhase?: 'idle' | 'planning' | 'executing' | 'synthesizing' | 'done';
   disabled?: boolean;
   chatZoom?: number;
   onChatZoomIn?: () => void;
   onChatZoomOut?: () => void;
   onChatZoomReset?: () => void;
-  taskHistoryAvailable?: boolean;
-  taskHistoryOpen?: boolean;
-  onToggleTaskHistory?: () => void;
+  historyOpen?: boolean;
+  onToggleHistory?: () => void;
+  terminalOpen?: boolean;
+  onToggleTerminal?: () => void;
+  docsOpen?: boolean;
+  onToggleDocs?: () => void;
+  filesOpen?: boolean;
+  onToggleFiles?: () => void;
+  onOpenSettings?: () => void;
+  contextPressure?: { used: number; budget: number; pct: number } | null;
+  canCompress?: boolean;
+  onCompressHistory?: () => Promise<{ ok: boolean; compressed?: boolean; savedTokens?: number; error?: string }> | void;
 }
 
 const LARGE_PASTE_CHAR_THRESHOLD = 2000;
 const LARGE_PASTE_LINE_THRESHOLD = 50;
+
+function InputVpnButton() {
+  const api = (window as any).clawdia;
+  const [connected, setConnected] = useState<boolean | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    api?.vpn?.status().then((s: boolean) => setConnected(s)).catch(() => setConnected(false));
+    const id = setInterval(() => {
+      api?.vpn?.status().then((s: boolean) => setConnected(s)).catch(() => {});
+    }, 5000);
+    return () => clearInterval(id);
+  }, [api]);
+
+  const toggle = async () => {
+    if (busy) return;
+    setBusy(true);
+    try {
+      const next = await api?.vpn?.toggle();
+      setConnected(next);
+    } catch {
+      api?.vpn?.status().then((s: boolean) => setConnected(s)).catch(() => {});
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <button
+      onClick={toggle}
+      disabled={busy}
+      title={connected ? 'VPN connected — click to disconnect' : 'VPN disconnected — click to connect'}
+      className={`px-2 py-1 rounded-md text-[10px] font-medium uppercase tracking-[0.08em] transition-all cursor-pointer ${
+        connected ? 'text-status-success bg-white/[0.04]' : 'text-text-muted hover:text-text-secondary hover:bg-white/[0.04]'
+      }`}
+    >
+      VPN
+    </button>
+  );
+}
 
 export default function InputBar({
   onSend,
@@ -56,24 +105,35 @@ export default function InputBar({
   concurrentMode = false,
   onToggleConcurrentMode,
   concurrentModeDisabled = false,
+  concurrentPhase = 'idle',
   disabled = false,
   chatZoom,
   onChatZoomIn,
   onChatZoomOut,
   onChatZoomReset,
-  taskHistoryAvailable = false,
-  taskHistoryOpen = false,
-  onToggleTaskHistory,
+  historyOpen = false,
+  onToggleHistory,
+  terminalOpen = false,
+  onToggleTerminal,
+  docsOpen = false,
+  onToggleDocs,
+  filesOpen = false,
+  onToggleFiles,
+  onOpenSettings,
+  contextPressure,
+  canCompress = false,
+  onCompressHistory,
 }: InputBarProps) {
   const [text, setText] = useState('');
   const [attachments, setAttachments] = useState<MessageAttachment[]>([]);
-  const [screenshotActive, setScreenshotActive] = useState(false);
   const [provider, setProvider] = useState<ProviderId>(DEFAULT_PROVIDER);
   const [models, setModels] = useState(() => getModelsForProvider(DEFAULT_PROVIDER));
   const [modelIdx, setModelIdx] = useState(0);
   const [modelOpen, setModelOpen] = useState(false);
   const [activeProviderMenu, setActiveProviderMenu] = useState<ProviderId | null>(null);
   const [focused, setFocused] = useState(false);
+  const [compressState, setCompressState] = useState<'idle' | 'busy' | 'done' | 'error'>('idle');
+  const compressTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const modelSelectorRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -204,7 +264,7 @@ export default function InputBar({
     setAttachments([]);
     if (textareaRef.current) textareaRef.current.style.height = 'auto';
     if (fileInputRef.current) fileInputRef.current.value = '';
-  }, [text, attachments, isStreaming, onSend, onAddContext]);
+  }, [text, attachments, isStreaming, onSend, onAddContext, disabled, provider, models, modelIdx]);
 
   const handleKeyDown = useCallback((e: React.KeyboardEvent) => {
     if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); handleSend(); }
@@ -215,7 +275,7 @@ export default function InputBar({
     setText(e.target.value);
     const el = e.target;
     el.style.height = 'auto';
-    el.style.height = Math.min(el.scrollHeight, 200) + 'px';
+    el.style.height = Math.min(el.scrollHeight, 280) + 'px';
   }, []);
 
   const handlePickFiles = useCallback(() => {
@@ -270,20 +330,6 @@ export default function InputBar({
     }
   }, [readFileAsDataUrl]);
 
-  const handleScreenshotCapture = useCallback((dataUrl: string) => {
-    setScreenshotActive(false);
-    const attachment: MessageAttachment = {
-      id: `screenshot-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
-      kind: 'image',
-      name: `screenshot-${Date.now()}.png`,
-      size: Math.round((dataUrl.length * 3) / 4),
-      mimeType: 'image/png',
-      dataUrl,
-    };
-    setAttachments((prev) => [...prev, attachment]);
-    textareaRef.current?.focus();
-  }, []);
-
   const handleRemoveAttachment = useCallback((id: string) => {
     setAttachments((prev) => prev.filter((attachment) => attachment.id !== id));
   }, []);
@@ -316,6 +362,16 @@ export default function InputBar({
     setAttachments((prev) => [...prev, ...nextAttachments]);
     e.target.value = '';
   }, [isTextLikeFile, readFileAsDataUrl, readFileAsText]);
+
+  const [cwd, setCwd] = useState<string>('');
+
+  useEffect(() => {
+    try {
+      setCwd((process as any).cwd());
+    } catch {
+      setCwd('');
+    }
+  }, []);
 
   const currentModel = models[modelIdx];
   const canSend = text.trim().length > 0 || attachments.length > 0;
@@ -380,214 +436,18 @@ export default function InputBar({
 
   return (
     <>
-    {screenshotActive && (
-      <ScreenshotSelector
-        onCapture={handleScreenshotCapture}
-        onCancel={() => setScreenshotActive(false)}
-      />
-    )}
     <div
-      className={`w-full px-5 pb-5 pt-4${disabled ? ' opacity-50 pointer-events-none' : ''}`}
+      className={`w-full px-0 pb-0 pt-0${disabled ? ' opacity-50 pointer-events-none' : ''}`}
       style={{
-        background: '#0d0d12',
-        borderTop: '2px solid rgba(255,255,255,0.07)',
-        boxShadow: 'inset 0 2px 8px rgba(0,0,0,0.3)',
+        background: '#131313',
+        borderTop: 'none',
       }}
       onPaste={handlePaste}
     >
-      {!isStreaming && (
-        <div className="no-drag flex items-center pb-2 px-1 relative">
-          <div ref={modelSelectorRef} className="flex-1 flex items-center relative">
-          <button
-            onClick={() => {
-              setModelOpen((v) => {
-                const next = !v;
-                if (!next) setActiveProviderMenu(null);
-                return next;
-              });
-            }}
-            className="flex items-center gap-1 text-[14px] text-text-tertiary hover:text-text-secondary transition-colors cursor-pointer"
-          >
-            <span
-              className={
-                claudeMode
-                  ? 'font-medium text-[#f08b73]'
-                  : codexMode
-                    ? 'font-semibold text-white'
-                    : ''
-              }
-            >
-              {currentSelectorLabel}
-            </span>
-            <svg width="8" height="8" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" className="opacity-40">
-              <polyline points="6 9 12 15 18 9" />
-            </svg>
-          </button>
-
-          {/* Executor status badge — visible only when a non-chat mode is active */}
-          {(claudeMode || codexMode || concurrentMode) && (() => {
-            const activeStatus = claudeMode ? claudeStatus : codexMode ? codexStatus : 'idle';
-            const dot: Record<string, string> = {
-              idle:     'bg-white/20',
-              starting: 'bg-yellow-400 animate-pulse',
-              ready:    'bg-emerald-400',
-              working:  'bg-accent animate-pulse',
-              errored:  'bg-red-400',
-              stopped:  'bg-white/20',
-            };
-            const label: Record<string, string> = {
-              idle: 'idle', starting: 'starting…', ready: 'ready',
-              working: 'working…', errored: 'error', stopped: 'stopped',
-            };
-            return (
-              <span className="ml-2 flex items-center gap-1.5 text-[11px] text-text-muted select-none">
-                <span className={`w-1.5 h-1.5 rounded-full flex-shrink-0 ${dot[activeStatus] ?? 'bg-white/20'}`} />
-                <span>{label[activeStatus] ?? activeStatus}</span>
-              </span>
-            );
-          })()}
-
-          {modelOpen && (
-            <div className="absolute bottom-full left-0 mb-2 min-w-[210px] overflow-visible animate-fade-in z-50">
-              <div className="py-1.5 bg-surface-2 border border-white/[0.08] rounded-xl shadow-xl shadow-black/50 max-h-[320px] overflow-y-auto">
-                {reversedProviders.map((prov) => {
-                  const isExpanded = activeProviderMenu === prov.id;
-                  return (
-                    <div key={prov.id} className="relative">
-                      <button
-                        onClick={() => toggleProviderSection(prov.id)}
-                        className="w-full flex items-center gap-2 px-3.5 pt-2 pb-2 text-left text-[10px] font-semibold uppercase tracking-wider text-text-muted hover:bg-white/[0.04] cursor-pointer"
-                      >
-                        <span className="flex-1">{prov.label}</span>
-                        <span className="text-[10px] text-text-muted">
-                          {isExpanded ? '▾' : '▸'}
-                        </span>
-                      </button>
-                    </div>
-                  );
-                })}
-                <div className="mx-2 my-1 h-px bg-white/[0.06]" />
-                <div>
-                  <div className="px-3.5 pt-2 pb-1 text-[10px] font-semibold uppercase tracking-wider text-text-muted">
-                    Modes
-                  </div>
-                  <button
-                    onClick={() => { void handleClaudeCodeSelect(); }}
-                    disabled={claudeModeDisabled}
-                    className={`w-full flex items-center gap-2.5 px-3.5 py-2 text-left text-[13px] transition-all ${
-                      claudeModeDisabled
-                        ? 'text-text-muted/35 cursor-default'
-                        : claudeMode
-                          ? 'bg-white/[0.08] cursor-pointer'
-                          : 'hover:bg-white/[0.05] cursor-pointer'
-                    }`}
-                  >
-                    <span className="flex-1 font-medium text-[#f08b73]">Claude Code</span>
-                    {claudeMode && (
-                      <svg className="text-text-secondary flex-shrink-0" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><polyline points="20 6 9 17 4 12" /></svg>
-                    )}
-                  </button>
-                  <button
-                    onClick={() => { void handleCodexSelect(); }}
-                    disabled={codexModeDisabled}
-                    className={`w-full flex items-center gap-2.5 px-3.5 py-2 text-left text-[13px] transition-all ${
-                      codexModeDisabled
-                        ? 'text-text-muted/35 cursor-default'
-                        : codexMode
-                          ? 'bg-white/[0.08] cursor-pointer'
-                          : 'hover:bg-white/[0.05] cursor-pointer'
-                    }`}
-                  >
-                    <span className="flex-1 font-semibold text-white">Codex</span>
-                    {codexMode && (
-                      <svg className="text-text-secondary flex-shrink-0" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><polyline points="20 6 9 17 4 12" /></svg>
-                    )}
-                  </button>
-                  {!concurrentModeDisabled && (
-                    <button
-                      onClick={() => { void handleConcurrentSelect(); }}
-                      className={`w-full flex items-center gap-2.5 px-3.5 py-2 text-left text-[13px] transition-all ${
-                        concurrentMode
-                          ? 'bg-white/[0.08] cursor-pointer'
-                          : 'hover:bg-white/[0.05] cursor-pointer'
-                      }`}
-                    >
-                      <span className="flex-1 font-medium" style={{ color: '#a78bfa' }}>Concurrent</span>
-                      {concurrentMode && (
-                        <svg className="text-text-secondary flex-shrink-0" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><polyline points="20 6 9 17 4 12" /></svg>
-                      )}
-                    </button>
-                  )}
-                </div>
-              </div>
-              {activeProviderMenu && (
-                <div className="absolute left-full top-0 ml-2 py-1.5 bg-surface-2 border border-white/[0.08] rounded-xl shadow-xl shadow-black/50 min-w-[240px] max-h-[320px] overflow-y-auto animate-fade-in z-[60]">
-                  <div className="px-3.5 pt-2 pb-1 text-[10px] font-semibold uppercase tracking-wider text-text-muted">
-                    {reversedProviders.find((prov) => prov.id === activeProviderMenu)?.label}
-                  </div>
-                  {MODEL_REGISTRY.filter((model) => model.provider === activeProviderMenu).map((model) => {
-                    const isSelected = model.provider === provider && model.id === models[modelIdx]?.id;
-                    return (
-                      <button
-                        key={model.id}
-                        onClick={() => { void handleModelSelect(model.provider, model.id); }}
-                        className={`w-full flex items-center gap-2.5 px-3.5 py-2 text-left text-[13px] transition-all cursor-pointer ${
-                          isSelected ? 'text-text-primary bg-white/[0.08]' : 'text-text-secondary hover:text-text-primary hover:bg-white/[0.05]'
-                        }`}
-                      >
-                        <span className="flex-1">{model.label}</span>
-                        <span className="text-[10px] text-text-muted uppercase tracking-wide">{model.tier}</span>
-                        {isSelected && (
-                          <svg className="text-text-secondary flex-shrink-0" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><polyline points="20 6 9 17 4 12" /></svg>
-                        )}
-                      </button>
-                    );
-                  })}
-                </div>
-              )}
-            </div>
-          )}
-          </div>
-
-          {chatZoom !== undefined && (
-            <div className="absolute left-1/2 -translate-x-1/2 flex items-center gap-0.5">
-              <button onClick={onChatZoomOut} title="Zoom out" className="flex items-center justify-center w-6 h-6 rounded-md text-[12px] text-text-muted hover:text-text-secondary hover:bg-white/[0.05] transition-colors cursor-pointer">-</button>
-              <button onClick={onChatZoomReset} title="Reset zoom" className="rounded-md px-1.5 py-0.5 text-[10px] text-text-muted hover:text-text-secondary hover:bg-white/[0.05] transition-colors cursor-pointer">{chatZoom}%</button>
-              <button onClick={onChatZoomIn} title="Zoom in" className="flex items-center justify-center w-6 h-6 rounded-md text-[12px] text-text-muted hover:text-text-secondary hover:bg-white/[0.05] transition-colors cursor-pointer">+</button>
-            </div>
-          )}
-
-          <div className="flex-1 flex items-center justify-end gap-2">
-            {taskHistoryAvailable && (
-              <button
-                onClick={onToggleTaskHistory}
-                title={taskHistoryOpen ? 'Close task history' : 'Open task history'}
-                className={`flex items-center gap-1.5 text-[11px] transition-colors cursor-pointer ${
-                  taskHistoryOpen
-                    ? 'text-text-primary'
-                    : 'text-text-muted hover:text-text-secondary'
-                }`}
-              >
-                <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                  <circle cx="12" cy="12" r="10" />
-                  <polyline points="12 6 12 12 16 14" />
-                </svg>
-                <span>Tasks</span>
-              </button>
-            )}
-          </div>
-        </div>
-      )}
-
       <div
         className={`
-          relative flex w-full flex-col rounded-xl transition-all duration-200
-          bg-[#18181c] border
-          border-[1.5px] transition-colors duration-200
-          ${focused
-            ? 'border-[#a0a0ad] shadow-[0_14px_30px_rgba(0,0,0,0.42),0_4px_12px_rgba(0,0,0,0.28),inset_0_1px_0_rgba(255,255,255,0.06),inset_0_3px_8px_rgba(255,255,255,0.025),inset_0_-8px_18px_rgba(0,0,0,0.42),0_0_0_1px_rgba(160,160,173,0.15)]'
-            : 'border-[#7a7a85] shadow-[0_12px_26px_rgba(0,0,0,0.38),0_3px_10px_rgba(0,0,0,0.25),inset_0_1px_0_rgba(255,255,255,0.05),inset_0_2px_6px_rgba(255,255,255,0.02),inset_0_-7px_16px_rgba(0,0,0,0.4)]'
-          }
+          relative flex w-full flex-col transition-all duration-200
+          bg-[#131313]
         `}
       >
         <input
@@ -635,99 +495,351 @@ export default function InputBar({
             ))}
           </div>
         )}
-        <div className="flex items-center px-4 py-3 gap-2">
-          <textarea
-            ref={textareaRef}
-            value={text}
-            onChange={handleInput}
-            onKeyDown={handleKeyDown}
-            onFocus={() => setFocused(true)}
-            onBlur={() => setFocused(false)}
-            placeholder={isStreaming ? 'Queue another message...' : 'Ask me anything...'}
-            rows={1}
-            disabled={disabled || isStreaming}
-            className="flex-1 bg-transparent text-text-primary text-[21px] placeholder:text-text-tertiary px-3 py-3 resize-none outline-none max-h-[200px] leading-[1.6]"
-          />
+        {/* ── Top half: textarea + controls ── */}
+        <div className="flex items-center gap-2 px-4 py-5">
+          {/* Attach */}
+          <button
+            onClick={handlePickFiles}
+            disabled={isStreaming}
+            title="Attach file"
+            className={`flex-shrink-0 flex items-center justify-center w-7 h-7 rounded-md transition-all text-[18px] font-light no-drag ${
+              isStreaming ? 'text-text-tertiary/35 cursor-default' : 'text-[#aaaaaa] hover:text-white hover:bg-white/[0.08] cursor-pointer'
+            }`}
+          >
+            +
+          </button>
 
-          <div className="flex items-center gap-1.5 no-drag relative flex-shrink-0">
+          {/* Textarea */}
+          <div className="flex-1 min-w-0">
+            <textarea
+              ref={textareaRef}
+              value={text}
+              onChange={handleInput}
+              onKeyDown={handleKeyDown}
+              onFocus={() => setFocused(true)}
+              onBlur={() => setFocused(false)}
+              placeholder={isStreaming ? 'Queue another message...' : 'Ask me anything...'}
+              rows={1}
+              disabled={disabled || isStreaming}
+              className="w-full bg-transparent text-text-primary text-[18px] placeholder:text-[#888888] resize-none outline-none max-h-[280px] leading-[1.6]"
+            />
+          </div>
+
+          {/* Mode indicator + dropdown */}
+          <div ref={modelSelectorRef} className="relative flex items-center gap-1.5 flex-shrink-0 no-drag">
             <button
-              onClick={handlePickFiles}
-              disabled={isStreaming}
-              title="Attach file"
-              className={`flex items-center justify-center w-9 h-9 rounded-lg transition-all no-drag ${
-                isStreaming
-                  ? 'text-text-tertiary/35 cursor-default'
-                  : 'text-text-tertiary hover:text-text-secondary hover:bg-white/[0.05] cursor-pointer'
-              }`}
+              onClick={() => {
+                setModelOpen((v) => {
+                  const next = !v;
+                  if (!next) setActiveProviderMenu(null);
+                  return next;
+                });
+              }}
+              className="flex items-center gap-1.5 px-0 py-0 transition-colors hover:text-text-secondary cursor-pointer"
             >
-              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                <path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48" />
+              {claudeMode ? (
+                <span className="text-[12px] font-medium text-white">Claude Code</span>
+              ) : codexMode ? (
+                <span className="text-[12px] font-medium text-white">Codex</span>
+              ) : concurrentMode ? (
+                <span className="text-[12px] font-medium text-white">Concurrent</span>
+              ) : (
+                <span className="text-[12px] font-medium text-white">{currentModel?.label || 'Select model'}</span>
+              )}
+              <svg width="8" height="8" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" className="opacity-40 text-text-muted">
+                <polyline points="6 9 12 15 18 9" />
               </svg>
             </button>
-            <button
-              onClick={() => setScreenshotActive(true)}
-              disabled={isStreaming}
-              title="Screenshot selection"
-              className={`flex items-center justify-center w-9 h-9 rounded-lg transition-all no-drag ${
-                isStreaming
-                  ? 'text-text-tertiary/35 cursor-default'
-                  : screenshotActive
-                    ? 'text-white bg-white/[0.10] cursor-pointer'
-                    : 'text-text-tertiary hover:text-text-secondary hover:bg-white/[0.05] cursor-pointer'
-              }`}
-            >
-              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                <path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z" />
-                <circle cx="12" cy="13" r="4" />
-              </svg>
-            </button>
+
+            {modelOpen && (
+              <div className="absolute right-0 bottom-full mb-2 min-w-[210px] overflow-visible animate-fade-in z-50">
+                <div className="py-1.5 bg-surface-2 border border-white/[0.08] rounded-xl shadow-xl shadow-black/50 max-h-[320px] overflow-y-auto">
+                  {reversedProviders.map((prov) => {
+                    const isExpanded = activeProviderMenu === prov.id;
+                    return (
+                      <div key={prov.id} className="relative">
+                        <button
+                          onClick={() => toggleProviderSection(prov.id)}
+                          className="w-full flex items-center gap-2 px-3.5 pt-2 pb-2 text-left text-[10px] font-semibold uppercase tracking-wider text-text-muted hover:bg-white/[0.04] cursor-pointer"
+                        >
+                          <span className="flex-1">{prov.label}</span>
+                          <span className="text-[10px] text-text-muted">
+                            {isExpanded ? '▾' : '▸'}
+                          </span>
+                        </button>
+                      </div>
+                    );
+                  })}
+                  <div className="mx-2 my-1 h-px bg-white/[0.06]" />
+                  <div>
+                    <div className="px-3.5 pt-2 pb-1 text-[10px] font-semibold uppercase tracking-wider text-text-muted">
+                      Modes
+                    </div>
+                    <button
+                      onClick={() => { void handleClaudeCodeSelect(); }}
+                      disabled={claudeModeDisabled}
+                      className={`w-full flex items-center gap-2.5 px-3.5 py-2 text-left text-[13px] transition-all ${
+                        claudeModeDisabled
+                          ? 'text-text-muted/35 cursor-default'
+                          : claudeMode
+                            ? 'bg-white/[0.08] cursor-pointer'
+                            : 'hover:bg-white/[0.05] cursor-pointer'
+                      }`}
+                    >
+                      <svg className="flex-shrink-0" width="16" height="16" viewBox="0 0 24 24" fill="#f08b73" stroke="none">
+                        <circle cx="12" cy="12" r="10" />
+                      </svg>
+                      <span className="flex-1 text-[#f08b73]">Claude Code</span>
+                      {claudeMode && (
+                        <svg className="text-text-secondary flex-shrink-0" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><polyline points="20 6 9 17 4 12" /></svg>
+                      )}
+                    </button>
+                    <button
+                      onClick={() => { void handleCodexSelect(); }}
+                      disabled={codexModeDisabled}
+                      className={`w-full flex items-center gap-2.5 px-3.5 py-2 text-left text-[13px] transition-all ${
+                        codexModeDisabled
+                          ? 'text-text-muted/35 cursor-default'
+                          : codexMode
+                            ? 'bg-white/[0.08] cursor-pointer'
+                            : 'hover:bg-white/[0.05] cursor-pointer'
+                      }`}
+                    >
+                      <span className="flex-1 font-semibold text-white">Codex</span>
+                      {codexMode && (
+                        <svg className="text-text-secondary flex-shrink-0" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><polyline points="20 6 9 17 4 12" /></svg>
+                      )}
+                    </button>
+                    {!concurrentModeDisabled && (
+                      <button
+                        onClick={() => { void handleConcurrentSelect(); }}
+                        className={`w-full flex items-center gap-2.5 px-3.5 py-2 text-left text-[13px] transition-all ${
+                          concurrentMode
+                            ? 'bg-white/[0.08] cursor-pointer'
+                            : 'hover:bg-white/[0.05] cursor-pointer'
+                        }`}
+                      >
+                        <span className="flex-1 font-medium" style={{ color: '#a78bfa' }}>Concurrent</span>
+                        {concurrentMode && (
+                          <svg className="text-text-secondary flex-shrink-0" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><polyline points="20 6 9 17 4 12" /></svg>
+                        )}
+                      </button>
+                    )}
+                  </div>
+                </div>
+                {activeProviderMenu && (
+                  <div className="absolute right-full bottom-0 mr-2 py-1.5 bg-surface-2 border border-white/[0.08] rounded-xl shadow-xl shadow-black/50 min-w-[240px] max-h-[320px] overflow-y-auto animate-fade-in z-[60]">
+                    <div className="px-3.5 pt-2 pb-1 text-[10px] font-semibold uppercase tracking-wider text-text-muted">
+                      {reversedProviders.find((prov) => prov.id === activeProviderMenu)?.label}
+                    </div>
+                    {MODEL_REGISTRY.filter((model) => model.provider === activeProviderMenu).map((model) => {
+                      const isSelected = model.provider === provider && model.id === models[modelIdx]?.id;
+                      return (
+                        <button
+                          key={model.id}
+                          onClick={() => { void handleModelSelect(model.provider, model.id); }}
+                          className={`w-full flex items-center gap-2.5 px-3.5 py-2 text-left text-[13px] transition-all cursor-pointer ${
+                            isSelected ? 'text-text-primary bg-white/[0.08]' : 'text-text-secondary hover:text-text-primary hover:bg-white/[0.05]'
+                          }`}
+                        >
+                          <span className="flex-1">{model.label}</span>
+                          <span className="text-[10px] text-text-muted uppercase tracking-wide">{model.tier}</span>
+                          {isSelected && (
+                            <svg className="text-text-secondary flex-shrink-0" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><polyline points="20 6 9 17 4 12" /></svg>
+                          )}
+                        </button>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+
+          {/* Streaming controls or send */}
+          <div className="flex items-center gap-2 flex-shrink-0 no-drag">
             {isStreaming ? (
               <>
-                <button
-                  onClick={isPaused ? onResume : onPause}
-                  title={isPaused ? 'Resume' : 'Pause'}
-                  className={`flex items-center justify-center w-9 h-9 rounded-lg transition-all cursor-pointer ${
-                    isPaused ? 'bg-[#8ab4f8]/15 text-[#8ab4f8] hover:bg-[#8ab4f8]/25' : 'bg-amber-500/15 text-amber-400 hover:bg-amber-500/25'
-                  }`}
-                >
-                  {isPaused ? (
-                    <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><polygon points="6,4 20,12 6,20" /></svg>
-                  ) : (
-                    <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><rect x="5" y="4" width="4" height="16" rx="1" /><rect x="15" y="4" width="4" height="16" rx="1" /></svg>
-                  )}
-                </button>
-
-                {canSend && (
-                  <button onClick={handleSend} title="Add context" className="flex items-center justify-center w-9 h-9 rounded-lg bg-[#8ab4f8]/15 text-[#8ab4f8] hover:bg-[#8ab4f8]/25 transition-all cursor-pointer">
-                    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
-                      <line x1="12" y1="5" x2="12" y2="19" /><line x1="5" y1="12" x2="19" y2="12" />
-                    </svg>
+                {isPaused ? (
+                  <>
+                    {/* Paused state: show stop + resume */}
+                    <button
+                      onClick={onStop}
+                      title="Stop (Esc)"
+                      className="flex items-center justify-center w-8 h-8 rounded-lg bg-white/[0.08] text-white/60 hover:bg-white/[0.14] hover:text-white transition-all cursor-pointer"
+                    >
+                      <svg width="10" height="10" viewBox="0 0 24 24" fill="currentColor"><rect x="5" y="5" width="14" height="14" rx="2" /></svg>
+                    </button>
+                    <button
+                      onClick={onResume}
+                      title="Resume"
+                      className="flex items-center justify-center w-8 h-8 rounded-lg bg-white text-black hover:bg-white/90 transition-all cursor-pointer"
+                    >
+                      <svg width="11" height="11" viewBox="0 0 24 24" fill="currentColor"><polygon points="6,4 20,12 6,20" /></svg>
+                    </button>
+                  </>
+                ) : (
+                  /* Running state: show only pause */
+                  <button
+                    onClick={onPause}
+                    title="Pause"
+                    className="flex items-center justify-center w-8 h-8 rounded-lg bg-white/[0.08] text-white/70 hover:bg-white/[0.14] hover:text-white transition-all cursor-pointer"
+                  >
+                    <svg width="11" height="11" viewBox="0 0 24 24" fill="currentColor"><rect x="5" y="4" width="4" height="16" rx="1" /><rect x="15" y="4" width="4" height="16" rx="1" /></svg>
                   </button>
                 )}
-
-                <button onClick={onStop} title="Stop (Esc)" className="flex items-center justify-center w-9 h-9 rounded-lg bg-red-500/12 text-red-400 hover:bg-red-500/20 transition-all cursor-pointer">
-                  <svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="6" width="12" height="12" rx="2" /></svg>
-                </button>
               </>
             ) : (
               <button
                 onClick={handleSend}
                 disabled={!canSend}
                 title="Send (Enter)"
-                className={`
-                  flex items-center justify-center w-10 h-10 rounded-full transition-all cursor-pointer
-                  ${canSend
-                    ? 'bg-white text-[#18181c] hover:bg-white/90 shadow-sm shadow-black/20'
-                    : 'bg-white/[0.10] text-white/30 cursor-default'
-                  }
-                `}
+                className={`flex items-center justify-center w-8 h-8 rounded-lg transition-all cursor-pointer ${
+                  canSend ? 'bg-white text-black hover:bg-white/90 shadow-sm shadow-black/20' : 'bg-white/[0.15] text-white/50 cursor-default'
+                }`}
               >
-                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
-                  <line x1="5" y1="12" x2="19" y2="12" />
-                  <polyline points="12 5 19 12 12 19" />
+                <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                  <line x1="12" y1="19" x2="12" y2="5" />
+                  <polyline points="19 12 12 5 5 12" />
                 </svg>
               </button>
             )}
+          </div>
+        </div>
+
+        {/* ── Divider ── */}
+        <div className="mx-0 h-px bg-white/[0.07]" />
+
+        {/* ── Bottom footer: Compress Chat (left) + panel toggles (center) + settings (right) ── */}
+        <div className="flex items-center px-4 py-2" style={{ background: '#171717', borderTop: '1px solid rgba(255,255,255,0.08)' }}>
+
+          {/* ── Compress Chat button — bottom left, fixed width to balance settings side ── */}
+          <div className="w-[120px] flex items-center">
+          {(() => {
+            const pct = contextPressure?.pct ?? 0;
+            const isWarn = pct >= 0.75 && pct < 0.9;
+            const isCritical = pct >= 0.9;
+            const isBusy = compressState === 'busy';
+            const isDone = compressState === 'done';
+            const isError = compressState === 'error';
+            const available = canCompress && !isBusy;
+
+            let label = 'Compress Chat';
+            if (isBusy) label = 'Compressing…';
+            else if (isDone) label = 'Compressed';
+            else if (isError) label = 'Failed';
+            else if (pct > 0) label = `Compress Chat ${Math.round(pct * 100)}%`;
+
+            let tooltip = '';
+            if (!canCompress) tooltip = 'Send a few messages first';
+            else if (isBusy) tooltip = 'Compressing context…';
+            else if (pct > 0) tooltip = `Context ${Math.round(pct * 100)}% full — click to compress history with AI`;
+            else tooltip = 'Compress conversation history with AI';
+
+            return (
+              <div className="relative group flex-shrink-0">
+                <button
+                  onClick={async () => {
+                    if (!available || !onCompressHistory) return;
+                    if (compressTimerRef.current) clearTimeout(compressTimerRef.current);
+                    setCompressState('busy');
+                    try {
+                      const result = await onCompressHistory();
+                      if (!result || !result.ok) {
+                        setCompressState('error');
+                      } else if (!result.compressed) {
+                        setCompressState('idle');
+                        return;
+                      } else {
+                        setCompressState('done');
+                      }
+                    } catch (e) {
+                      console.warn('[compress] error:', e);
+                      setCompressState('error');
+                    }
+                    compressTimerRef.current = setTimeout(() => setCompressState('idle'), 2500);
+                  }}
+                  disabled={!available}
+                  className={`px-2 py-1 rounded-md text-[12px] font-semibold tracking-wider transition-all select-none ${
+                    !canCompress
+                      ? 'text-white/20 cursor-not-allowed'
+                      : isError
+                        ? 'text-red-400 cursor-pointer'
+                        : isDone
+                          ? 'text-emerald-400 cursor-pointer'
+                          : isBusy
+                            ? 'text-white/40 cursor-default'
+                            : isCritical
+                              ? 'text-red-400 animate-pulse cursor-pointer hover:text-red-300'
+                              : isWarn
+                                ? 'text-yellow-400 cursor-pointer hover:text-yellow-300'
+                                : 'text-white/[0.32] cursor-pointer hover:text-white/60'
+                  }`}
+                >
+                  {label}
+                </button>
+                {/* Custom tooltip — only renders when hoverable */}
+                {canCompress && (
+                  <div className="pointer-events-none absolute bottom-full left-0 mb-2 hidden group-hover:flex">
+                    <div className="whitespace-nowrap rounded-md bg-[#2a2a2a] border border-white/[0.08] px-3 py-1.5 text-[11px] text-text-secondary shadow-lg">
+                      {tooltip}
+                    </div>
+                  </div>
+                )}
+              </div>
+            );
+          })()}
+          </div>
+
+          {/* ── Center: panel toggles ── */}
+          <div className="flex flex-1 items-center justify-center gap-1">
+            <button
+              onClick={onToggleHistory}
+              className={`px-2 py-1 rounded-md text-[10px] font-medium uppercase tracking-[0.08em] transition-all cursor-pointer ${
+                historyOpen ? 'text-text-secondary bg-white/[0.07]' : 'text-white/[0.32] hover:text-text-muted hover:bg-white/[0.04]'
+              }`}
+            >
+              History
+            </button>
+            <button
+              onClick={onToggleTerminal}
+              className={`px-2 py-1 rounded-md text-[10px] font-medium uppercase tracking-[0.08em] transition-all cursor-pointer ${
+                terminalOpen ? 'text-text-secondary bg-white/[0.07]' : 'text-white/[0.32] hover:text-text-muted hover:bg-white/[0.04]'
+              }`}
+            >
+              Terminal
+            </button>
+            <button
+              onClick={onToggleDocs}
+              className={`px-2 py-1 rounded-md text-[10px] font-medium uppercase tracking-[0.08em] transition-all cursor-pointer ${
+                docsOpen ? 'text-text-secondary bg-white/[0.07]' : 'text-white/[0.32] hover:text-text-muted hover:bg-white/[0.04]'
+              }`}
+            >
+              Docs
+            </button>
+            <button
+              onClick={onToggleFiles}
+              className={`px-2 py-1 rounded-md text-[10px] font-medium uppercase tracking-[0.08em] transition-all cursor-pointer ${
+                filesOpen ? 'text-text-secondary bg-white/[0.07]' : 'text-white/[0.32] hover:text-text-muted hover:bg-white/[0.04]'
+              }`}
+            >
+              Files
+            </button>
+            <InputVpnButton />
+          </div>
+
+          {/* ── Right: settings gear — fixed width to match Compress Chat side ── */}
+          <div className="w-[120px] flex items-center justify-end">
+          <button
+            onClick={onOpenSettings}
+            title="Settings"
+            className="flex items-center justify-center w-6 h-6 rounded-md text-text-muted hover:text-text-secondary hover:bg-white/[0.06] transition-all cursor-pointer"
+          >
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+              <circle cx="12" cy="12" r="3" />
+              <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" />
+            </svg>
+          </button>
           </div>
         </div>
       </div>

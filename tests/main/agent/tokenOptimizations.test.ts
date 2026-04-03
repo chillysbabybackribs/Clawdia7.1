@@ -315,7 +315,6 @@ describe('Fix 5: tool schemas cached per profile group', () => {
     expect(names).not.toContain('agent_status');
     expect(names).not.toContain('agent_plan');
     expect(names).not.toContain('gui_interact');
-    expect(names).not.toContain('search_tools');
   });
 
   it('getAnthropicTools browser profile later turns restore the full browser set', () => {
@@ -355,7 +354,6 @@ describe('Fix 5: tool schemas cached per profile group', () => {
     const tools = getAnthropicToolsForTest(profile, [], 1);
     const names = tools.map((tool: any) => tool.name);
     expect(names).toContain('gui_interact');
-    expect(names).not.toContain('search_tools');
   });
 
   it('getOpenAITools returns same array reference for same profile', () => {

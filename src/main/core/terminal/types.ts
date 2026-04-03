@@ -4,6 +4,7 @@ export type TerminalWriteSource = 'user' | 'clawdia_agent' | 'system';
 
 export interface TerminalSessionState {
   sessionId: string;
+  pid: number | null;
   owner: SessionOwner;
   mode: SessionMode;
   connected: boolean;

@@ -2,13 +2,13 @@ import React from 'react';
 import 'xterm/css/xterm.css';
 
 const TERMINAL_THEME = {
-  background: '#0d0d10',
+  background: '#000000',
   foreground: '#e4e4e7',
   cursor: '#e4e4e7',
-  cursorAccent: '#0d0d10',
+  cursorAccent: '#000000',
   selectionBackground: '#ffffff30',
   selectionForeground: undefined,
-  black: '#1a1a2e',
+  black: '#111111',
   red: '#ff6b6b',
   green: '#69db7c',
   yellow: '#ffd43b',
@@ -426,7 +426,7 @@ function TerminalPane({
   return (
     <div className="flex flex-1 flex-col overflow-hidden min-h-0">
       {/* Status bar */}
-      <div className="flex h-7 flex-shrink-0 items-center justify-between border-b border-white/[0.04] bg-[#0d0d10] px-3">
+      <div className="flex h-7 flex-shrink-0 items-center justify-between border-b border-white/[0.04] bg-[#000000] px-3">
         <div className="flex items-center gap-2">
           {isConnected && <span className="h-1.5 w-1.5 rounded-full bg-emerald-400/80" title="Connected" />}
           {isObserving && (
@@ -510,7 +510,7 @@ function TerminalPane({
 
       {/* Input disabled overlay */}
       {(sessionMode === 'agent_owned' || sessionMode === 'handoff_pending' || sessionMode === 'observe_only' || isObserving) && (
-        <div className="pointer-events-none absolute inset-x-0 z-10 border-b border-white/[0.06] bg-[#0d0d10]/90 px-3 py-1.5 text-[11px] text-text-secondary">
+        <div className="pointer-events-none absolute inset-x-0 z-10 border-b border-white/[0.06] bg-[#000000]/90 px-3 py-1.5 text-[11px] text-text-secondary">
           {isObserving
             ? 'Observe only — input disabled.'
             : sessionMode === 'agent_owned'
@@ -541,7 +541,7 @@ function TerminalPane({
 
       {contextMenu && (
         <div
-          className="fixed z-50 min-w-[148px] overflow-hidden rounded border border-white/[0.08] bg-[#111216] py-1 shadow-[0_12px_32px_rgba(0,0,0,0.45)]"
+          className="fixed z-50 min-w-[148px] overflow-hidden rounded border border-white/[0.08] bg-[#0a0a0a] py-1 shadow-[0_12px_32px_rgba(0,0,0,0.45)]"
           style={{ left: contextMenu.x, top: contextMenu.y }}
           onMouseDown={(event) => event.stopPropagation()}
         >
@@ -627,7 +627,7 @@ function TerminalTabBar({
   onToggleObserve,
 }: TerminalTabBarProps) {
   return (
-    <div className="flex h-10 flex-shrink-0 items-center border-b border-white/[0.06] bg-[#0d0d10] px-2 gap-1">
+    <div className="flex h-10 flex-shrink-0 items-center border-b border-white/[0.06] bg-[#000000] px-2 gap-1">
       {/* Tab pills */}
       {tabs.map((tab) => (
         <div
@@ -966,7 +966,7 @@ export default function TerminalPanel({ visible, conversationId }: TerminalPanel
 
   if (isAvailable === false) {
     return (
-      <div className={`flex flex-1 items-center justify-center bg-[#0d0d10] text-text-secondary ${visible ? '' : 'hidden'}`}>
+      <div className={`flex flex-1 items-center justify-center bg-[#000000] text-text-secondary ${visible ? '' : 'hidden'}`}>
         <div className="space-y-2 text-center">
           <div className="text-sm font-medium text-text-primary">Terminal Unavailable</div>
           <div className="max-w-xs text-xs">
@@ -980,7 +980,7 @@ export default function TerminalPanel({ visible, conversationId }: TerminalPanel
   if (!visible) return null;
 
   return (
-    <div className="flex flex-1 flex-col overflow-hidden bg-[#0d0d10]">
+    <div className="flex flex-1 flex-col overflow-hidden bg-[#000000]">
       <TerminalTabBar
         tabs={tabs}
         activeTabId={activeTabId}

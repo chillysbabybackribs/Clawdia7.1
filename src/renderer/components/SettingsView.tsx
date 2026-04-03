@@ -17,7 +17,7 @@ interface ExecutorConfigEntry {
   synthesize?: boolean;
 }
 
-export default function SettingsView({ onBack: _onBack }: SettingsViewProps) {
+export default function SettingsView({ onBack }: SettingsViewProps) {
   const [providerKeys, setProviderKeys] = useState<Record<ProviderId, string>>({ anthropic: '', openai: '', gemini: '' });
   const [keyVisible, setKeyVisible] = useState<Record<ProviderId, boolean>>({ anthropic: false, openai: false, gemini: false });
   const [saved, setSaved] = useState(false);
@@ -112,6 +112,16 @@ export default function SettingsView({ onBack: _onBack }: SettingsViewProps) {
 
   return (
     <div className="flex flex-col h-full bg-surface-0">
+      <div className="flex-shrink-0 flex items-center gap-2 px-4 py-3 border-b border-border-subtle">
+        <button
+          onClick={onBack}
+          className="flex items-center gap-1.5 text-xs text-text-secondary hover:text-text-primary transition-colors cursor-pointer"
+        >
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polyline points="15 18 9 12 15 6" /></svg>
+          Back
+        </button>
+        <span className="text-xs text-text-tertiary">Settings</span>
+      </div>
       <div className="flex-1 overflow-y-auto px-4 py-5">
         <div className="mx-auto grid w-full max-w-[980px] grid-cols-1 gap-6 xl:grid-cols-2">
           {hasKey && (
@@ -296,7 +306,7 @@ export default function SettingsView({ onBack: _onBack }: SettingsViewProps) {
                       {/* Toggle switch */}
                       <button
                         onClick={() => { void handleExecutorToggle(exec.id, 'enabled', !exec.enabled); }}
-                        className={`relative flex-shrink-0 w-9 h-5 rounded-full transition-colors cursor-pointer ${exec.enabled ? 'bg-accent' : 'bg-white/[0.12]'}`}
+                        className={`relative flex-shrink-0 w-9 h-5 rounded-full transition-colors cursor-pointer ${exec.enabled ? 'bg-white/60' : 'bg-white/[0.12]'}`}
                         role="switch"
                         aria-checked={exec.enabled}
                       >
@@ -358,7 +368,7 @@ export default function SettingsView({ onBack: _onBack }: SettingsViewProps) {
         <div className="mx-auto w-full max-w-[980px]">
           <button
             onClick={handleSave}
-            className={`h-[38px] w-full rounded-xl text-sm font-medium transition-all cursor-pointer ${saved ? 'bg-status-success/20 text-status-success' : 'bg-accent/90 hover:bg-accent text-white'}`}
+            className={`h-[38px] w-full rounded-xl text-sm font-medium transition-all cursor-pointer ${saved ? 'bg-status-success/20 text-status-success' : 'bg-accent/90 hover:bg-accent text-surface-0'}`}
           >
             {saved ? 'Saved ✓' : 'Save Settings'}
           </button>

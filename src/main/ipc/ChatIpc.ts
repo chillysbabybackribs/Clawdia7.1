@@ -3,8 +3,7 @@ import Anthropic from '@anthropic-ai/sdk';
 import { IPC, IPC_EVENTS } from '../ipc-channels';
 import { DEFAULT_MODEL_BY_PROVIDER, resolveModelForTier } from '../../shared/model-registry';
 import type { Message, MessageAttachment, PromptDebugSnapshot, FeedItem, ToolCall, ConcurrentFeedSource } from '../../shared/types';
-import { agentLoop } from '../agent/agentLoop';
-import { PipelineOrchestrator } from '../core/PipelineOrchestrator';
+import { agentLoop, compressConversationHistory } from '../agent/agentLoop';
 import { classify, isAppMappingRequest, isContinuationRequest, extractAppMappingTarget } from '../agent/classify';
 import { cancelLoop, pauseLoop, resumeLoop, addContext } from '../agent/loopControl';
 import { loadSettings } from '../settingsStore';
@@ -28,7 +27,7 @@ import type { SessionManager } from '../SessionManager';
 import type { ElectronBrowserService } from '../core/browser/ElectronBrowserService';
 import type { TerminalSessionController } from '../core/terminal/TerminalSessionController';
 import { routeExecutor } from '../core/executors/ExecutorRouter';
-import { runConcurrent } from '../core/executors/ConcurrentExecutor';
+import { runConcurrent, classifyConcurrentIntent } from '../core/executors/ConcurrentExecutor';
 import { getExecutorConfig } from '../core/executors/ExecutorConfigStore';
 import type { ConcurrentConfig } from '../core/executors/ExecutorConfigStore';
 import {
@@ -39,8 +38,96 @@ import {
   cancelTask,
 } from '../taskTracker';
 import { registerRun, completeRun, failRun } from '../runTracker';
+import {
+  formatSessionRecallBlock,
+  recallLatestSessionContinuity,
+  recordAssistantOutcome,
+  recordUserIntent,
+  shouldTriggerSessionRecall,
+} from '../sessionContinuity';
+
+// ── Post-run tool pair collapse ───────────────────────────────────────────────
+// After a turn completes, strip all intermediate tool_use/tool_result pairs
+// that were appended during the run (from runStartIndex onward), leaving only
+// the final assistant text response. This keeps working memory (the answer)
+// without accumulating scaffolding (the how) across turns.
+//
+// The final assistant message is already in sessionMessages at this point
+// (agentLoop appends it before returning). We replace the entire run segment
+// with just that final message.
+//
+// Anthropic protocol note: we remove complete pairs together, so no orphaned
+// tool_use or tool_result blocks remain. The final assistant message is plain
+// text, so no repair is needed.
+function collapseRunToolPairs(sessionMessages: any[], runStartIndex: number): void {
+  if (runStartIndex >= sessionMessages.length) return;
+
+  const runSegment = sessionMessages.slice(runStartIndex);
+
+  // Find the last plain-text assistant message in the segment (the final answer).
+  // A plain-text assistant message has content as a string, or an array with
+  // only text blocks (no tool_use blocks).
+  let finalAssistantIdx = -1;
+  for (let i = runSegment.length - 1; i >= 0; i--) {
+    const msg = runSegment[i];
+    if (msg?.role !== 'assistant') continue;
+    const hasToolUse = Array.isArray(msg.content)
+      ? msg.content.some((b: any) => b?.type === 'tool_use')
+      : false;
+    if (!hasToolUse) {
+      finalAssistantIdx = i;
+      break;
+    }
+  }
+
+  if (finalAssistantIdx === -1) return; // No plain assistant message found — leave untouched.
+
+  const finalMsg = runSegment[finalAssistantIdx];
+  // Replace everything from runStartIndex onward with just the final message.
+  sessionMessages.splice(runStartIndex, sessionMessages.length - runStartIndex, finalMsg);
+}
 
 // ── Formatting helpers ────────────────────────────────────────────────────────
+let registered = false;
+let browserServiceRef: ElectronBrowserService | null = null;
+let terminalControllerRef: TerminalSessionController | undefined;
+
+async function generateAndPushTitle(
+  conversationId: string,
+  userMessage: string,
+  assistantMessage: string,
+  sendEvent: (channel: string, payload: unknown) => void,
+): Promise<void> {
+  const conv = getConversation(conversationId);
+  if (!conv || (conv.title && conv.title !== 'New conversation')) return;
+
+  try {
+    const settings = loadSettings();
+    const apiKey = settings.providerKeys?.anthropic?.trim() || '';
+    if (!apiKey) return;
+
+    const client = new Anthropic({ apiKey });
+    const response = await client.messages.create({
+      model: 'claude-haiku-4-5-20251001',
+      max_tokens: 20,
+      messages: [{
+        role: 'user',
+        content: `Write a short title (4-6 words, no punctuation) for a chat that starts with:\nUser: ${userMessage.slice(0, 300)}\nAssistant: ${assistantMessage.slice(0, 300)}\n\nReply with only the title, nothing else.`,
+      }],
+    });
+
+    const title = response.content[0]?.type === 'text'
+      ? response.content[0].text.trim().replace(/^["']|["']$/g, '').slice(0, 60)
+      : null;
+
+    if (!title) return;
+
+    updateConversation(conversationId, { title });
+    sendEvent(IPC_EVENTS.CHAT_TITLE_UPDATED, { conversationId, title });
+  } catch {
+    // Title generation is best-effort; silently ignore failures.
+  }
+}
 
 function formatPromptBlock(title: string, lines: string[]): string {
   return [
@@ -104,6 +191,18 @@ function upsertFeedTool(feed: FeedItem[], activity: ToolCall): void {
 
 function finalizeFeed(feed: FeedItem[]): FeedItem[] {
   return feed.map((item) => item.kind === 'text' ? { ...item, isStreaming: false } : item);
+}
+
+function applySessionRecallIfNeeded(
+  userText: string,
+  conversationId: string,
+  priorMessageCount: number,
+): string {
+  if (priorMessageCount > 0) return userText;
+  if (!shouldTriggerSessionRecall(userText)) return userText;
+  const recall = recallLatestSessionContinuity(conversationId);
+  if (!recall) return userText;
+  return `${formatSessionRecallBlock(recall)}\n\n[Current request]\n${userText}`;
 }
 
 // ── Message content helpers ───────────────────────────────────────────────────
@@ -187,9 +286,17 @@ export function registerChatIpc(
   browserService: ElectronBrowserService,
   terminalController: TerminalSessionController | undefined,
 ): void {
+  browserServiceRef = browserService;
+  terminalControllerRef = terminalController;
+
   function getMainWindow(): BrowserWindow | undefined {
     return BrowserWindow.getAllWindows()[0];
   }
+
+  const currentBrowserService = (): ElectronBrowserService => {
+    if (!browserServiceRef) throw new Error('Browser service not initialized');
+    return browserServiceRef;
+  };
 
   function send(channel: string, payload: unknown): void {
     const w = getMainWindow();
@@ -197,8 +304,8 @@ export function registerChatIpc(
   }
 
   function findConversationTerminalSessionId(conversationId: string): string | null {
-    if (!terminalController) return null;
-    const sessionsForConversation = terminalController
+    if (!terminalControllerRef) return null;
+    const sessionsForConversation = terminalControllerRef
       .list()
       .filter((s) => s.conversationId === conversationId);
     const live = sessionsForConversation.find((s) => s.connected);
@@ -206,10 +313,10 @@ export function registerChatIpc(
   }
 
   function appendPromptTail(conversationId: string, text: string): void {
-    if (!terminalController || !text.trim()) return;
+    if (!terminalControllerRef || !text.trim()) return;
     const sessionId = findConversationTerminalSessionId(conversationId);
     if (!sessionId) return;
-    terminalController.appendOutput(sessionId, text);
+    terminalControllerRef.appendOutput(sessionId, text);
   }
 
   function ensureConversation(): string {
@@ -224,6 +331,9 @@ export function registerChatIpc(
   function repairSession(sessionMessages: any[], reason: 'user_interrupted' | 'session_recovery', caller: string): void {
     sessionManager.repairAnthropicSessionInPlace(sessionMessages, reason, caller);
   }
+
+  if (registered) return;
+  registered = true;
 
   // ── Window ──────────────────────────────────────────────────────────────────
   ipcMain.handle(IPC.WINDOW_MINIMIZE, () => getMainWindow()?.minimize());
@@ -281,12 +391,18 @@ export function registerChatIpc(
     });
 
     const conv = getConversation(id);
+    const runs = getRuns(id);
+    const lastRun = runs[0];
+    const interruptedRun = lastRun?.status === 'failed' && !lastRun.completed_at
+      ? { goal: lastRun.goal ?? null, runId: lastRun.id }
+      : null;
     return {
       messages,
       mode: conv?.mode ?? ('chat' as const),
       claudeTerminalStatus: 'idle' as const,
       title: conv?.title ?? null,
       isRunning: sessionManager.isConversationRunning(id),
+      interruptedRun,
     };
   });
 
@@ -319,7 +435,7 @@ export function registerChatIpc(
     sessionManager.removeTaskId(id);
     if (sessionManager.activeConversationId === id) sessionManager.activeConversationId = null;
     // Release the conversation-scoped browser tab so it doesn't persist after deletion.
-    browserService.releaseTab(id).catch(() => {});
+    currentBrowserService().releaseTab(id).catch(() => {});
   });
 
   ipcMain.handle(IPC.CHAT_OPEN_ATTACHMENT, (_e, filePath: string) => {
@@ -334,38 +450,59 @@ export function registerChatIpc(
   ipcMain.handle(IPC.CHAT_SEND, async (_event, payload: { text: string; attachments?: MessageAttachment[]; conversationId?: string | null; provider?: string; model?: string }) => {
     const { text, attachments, conversationId, provider: payloadProvider, model: payloadModel } = payload || { text: '' };
 
-    let id: string;
-    if (conversationId) {
-      id = conversationId;
-      sessionManager.hydrateFromDb(id);
-    } else {
-      ensureConversation();
-      id = sessionManager.activeConversationId!;
-    }
-
-    if (!getConversation(id)) {
-      const now = new Date().toISOString();
-      createConversation({ id, title: text.slice(0, 60) || 'New conversation', mode: 'chat', created_at: now, updated_at: now });
-    }
-
-    const userMsgId = `msg-u-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
-    const userMsgTs = new Date().toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
-    const nowTs = new Date().toISOString();
-    const conversationTitle = text.trim().slice(0, 60) || 'New conversation';
-    const userMsg: Message = { id: userMsgId, role: 'user', content: text, timestamp: userMsgTs, attachments };
-    addMessage({ id: userMsgId, conversation_id: id, role: 'user', content: JSON.stringify(userMsg), created_at: nowTs });
-    updateConversation(id, { updated_at: nowTs, title: conversationTitle });
-
+    // Define sendEvent first so it's available for error paths in setup.
     const sendEvent = (channel: string, payload: unknown) => {
       const w = getMainWindow();
       if (w && !w.isDestroyed()) w.webContents.send(channel, payload);
     };
 
+    let id: string;
+    let priorMessageCount = 0;
+    try {
+      if (conversationId) {
+        id = conversationId;
+        sessionManager.hydrateFromDb(id);
+      } else {
+        ensureConversation();
+        id = sessionManager.activeConversationId!;
+      }
+
+      if (!getConversation(id)) {
+        const now = new Date().toISOString();
+        createConversation({ id, title: 'New conversation', mode: 'chat', created_at: now, updated_at: now });
+      }
+
+      priorMessageCount = getMessages(id).length;
+
+      const userMsgId = `msg-u-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+      const userMsgTs = new Date().toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+      const nowTs = new Date().toISOString();
+      const userMsg: Message = { id: userMsgId, role: 'user', content: text, timestamp: userMsgTs, attachments };
+      addMessage({ id: userMsgId, conversation_id: id, role: 'user', content: JSON.stringify(userMsg), created_at: nowTs });
+      updateConversation(id, { updated_at: nowTs });
+      recordUserIntent(id, text);
+    } catch (setupErr: unknown) {
+      const msg = setupErr instanceof Error ? setupErr.message : String(setupErr);
+      console.error('[ChatIpc] setup error before executor start:', msg);
+      // id may be unset; fall back to a placeholder so the renderer can correlate.
+      const errConvId = conversationId ?? 'unknown';
+      sendEvent(IPC_EVENTS.CHAT_STREAM_END, { ok: false, error: msg, conversationId: errConvId });
+      return { response: '', error: msg, conversationId: errConvId };
+    }
+
     // ── Executor routing ────────────────────────────────────────────────────
     const conv = getConversation(id);
-    const { executorId, usedFallback, fallbackReason } = routeExecutor(conv?.mode ?? 'chat');
+    const effectiveText = applySessionRecallIfNeeded(text, id, priorMessageCount);
+    let { executorId, usedFallback, fallbackReason } = routeExecutor(conv?.mode ?? 'chat');
     if (usedFallback && fallbackReason) {
       console.warn(`[ChatIpc] executor routing fallback: ${fallbackReason}`);
+    }
+    // Auto-upgrade to concurrent when: the user hasn't explicitly chosen an
+    // executor (resolved to agentLoop), concurrent is opted-in via config,
+    // and the heuristic detects a genuinely parallel task.
+    if (executorId === 'agentLoop' && getExecutorConfig('concurrent').enabled && classifyConcurrentIntent(text)) {
+      executorId = 'concurrent';
+      console.log('[ChatIpc] auto-routing to concurrent executor via heuristic');
     }
     // startExclusive enforces same-conversation exclusivity: aborts any prior
     // run, creates a fresh AbortController, and initialises runtime state to
@@ -382,7 +519,7 @@ export function registerChatIpc(
     // ── Claude Code path ────────────────────────────────────────────────────
     if (executorId === 'claudeCode') {
       sendEvent(IPC_EVENTS.CHAT_THINKING, { thought: 'Claude Code is thinking…', conversationId: id });
-      appendPromptTail(id, formatExternalPromptForTerminal('Claude Code', text));
+      appendPromptTail(id, formatExternalPromptForTerminal('Claude Code', effectiveText));
 
       // Load persisted session id so resume survives app restarts.
       const persistedSessionId = conv?.claude_code_session_id ?? null;
@@ -397,7 +534,7 @@ export function registerChatIpc(
       try {
         const { finalText, sessionId: newSessionId } = await runClaudeCode({
           conversationId: id,
-          prompt: text,
+          prompt: effectiveText,
           attachments,
           skipPermissions: loadSettings().unrestrictedMode,
           persistedSessionId,
@@ -427,6 +564,8 @@ export function registerChatIpc(
           const nowStr = new Date().toISOString();
           addMessage({ id: assistantMsgId, conversation_id: id, role: 'assistant', content: JSON.stringify(assistantMsg), created_at: nowStr });
           updateConversation(id, { updated_at: nowStr });
+          recordAssistantOutcome(id, finalText);
+          void generateAndPushTitle(id, text, finalText, sendEvent);
         }
         return { response: finalText, conversationId: id };
       } catch (e: unknown) {
@@ -450,7 +589,7 @@ export function registerChatIpc(
     // ── Concurrent path (Planner → Workers → Synthesizer) ─────────────────
     if (executorId === 'concurrent') {
       sendEvent(IPC_EVENTS.CHAT_THINKING, { thought: 'Planning concurrent execution…', conversationId: id });
-      appendPromptTail(id, formatExternalPromptForTerminal('Concurrent', text));
+      appendPromptTail(id, formatExternalPromptForTerminal('Concurrent', effectiveText));
 
       const concurrentConfig = getExecutorConfig('concurrent') as ConcurrentConfig;
       const assistantFeed: FeedItem[] = [];
@@ -478,7 +617,7 @@ export function registerChatIpc(
         const result = await runConcurrent({
           conversationId: id,
           taskId,
-          prompt: text,
+          prompt: effectiveText,
           attachments,
           signal: concurrentSignal,
           strategy: concurrentConfig.strategy,
@@ -524,6 +663,7 @@ export function registerChatIpc(
           const nowStr = new Date().toISOString();
           addMessage({ id: assistantMsgId, conversation_id: id, role: 'assistant', content: JSON.stringify(assistantMsg), created_at: nowStr });
           updateConversation(id, { updated_at: nowStr });
+          recordAssistantOutcome(id, result.finalText);
         }
         return { response: result.finalText, conversationId: id };
       } catch (e: unknown) {
@@ -546,7 +686,7 @@ export function registerChatIpc(
     // ── Codex path ──────────────────────────────────────────────────────────
     if (executorId === 'codex') {
       sendEvent(IPC_EVENTS.CHAT_THINKING, { thought: 'Codex is thinking…', conversationId: id });
-      appendPromptTail(id, formatExternalPromptForTerminal('Codex', text));
+      appendPromptTail(id, formatExternalPromptForTerminal('Codex', effectiveText));
 
       const codexRunId = `run-cdx-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
       registerRun(codexRunId, id, 'openai', 'codex', taskId);
@@ -558,7 +698,8 @@ export function registerChatIpc(
       try {
         const { finalText } = await runCodexCli({
           conversationId: id,
-          prompt: text,
+          prompt: effectiveText,
+          signal: convAgent.abort.signal,
           onText: (delta) => {
             appendFeedText(assistantFeed, delta);
             sendEvent(IPC_EVENTS.CHAT_STREAM_TEXT, { delta, conversationId: id });
@@ -567,6 +708,15 @@ export function registerChatIpc(
             assistantToolCalls.set(activity.id, activity);
             upsertFeedTool(assistantFeed, activity);
             sendEvent(IPC_EVENTS.CHAT_TOOL_ACTIVITY, { ...activity, conversationId: id });
+          },
+          onEvent: (event) => {
+            const thoughtMap: Record<string, string> = {
+              'response.queued': 'Codex is thinking…',
+              'response.in_progress': 'Codex is working…',
+              'item.started': 'Codex is running a tool…',
+            };
+            const thought = thoughtMap[event.type];
+            if (thought) sendEvent(IPC_EVENTS.CHAT_THINKING, { thought, conversationId: id });
           },
         });
         sendEvent(IPC_EVENTS.CHAT_STREAM_END, { ok: true, conversationId: id });
@@ -589,10 +739,18 @@ export function registerChatIpc(
           const nowStr = new Date().toISOString();
           addMessage({ id: assistantMsgId, conversation_id: id, role: 'assistant', content: JSON.stringify(assistantMsg), created_at: nowStr });
           updateConversation(id, { updated_at: nowStr });
+          recordAssistantOutcome(id, finalText);
+          void generateAndPushTitle(id, text, finalText, sendEvent);
         }
         return { response: finalText, conversationId: id };
       } catch (e: unknown) {
         const err = e instanceof Error ? e : new Error(String(e));
+        if (convAgent.abort.signal.aborted) {
+          cancelTask(taskId);
+          sessionManager.updateExecutorState(id, { status: 'idle', runId: null });
+          sendEvent(IPC_EVENTS.CHAT_STREAM_END, { ok: false, cancelled: true, conversationId: id });
+          return { response: '', error: 'Stopped', conversationId: id };
+        }
         failRun(codexRunId, err.message);
         failTask(taskId, err.message);
         sessionManager.updateExecutorState(id, { status: 'failed', runId: null });
@@ -608,10 +766,16 @@ export function registerChatIpc(
       ? payloadProvider
       : settings.provider;
     if (resolvedProvider !== 'anthropic' && resolvedProvider !== 'gemini' && resolvedProvider !== 'openai') {
-      return { response: '', error: 'Select a provider in Settings to use chat.' };
+      const errMsg = 'Select a provider in Settings to use chat.';
+      sendEvent(IPC_EVENTS.CHAT_STREAM_END, { ok: false, error: errMsg, conversationId: id });
+      return { response: '', error: errMsg, conversationId: id };
     }
     const apiKey = settings.providerKeys[resolvedProvider as keyof typeof settings.providerKeys]?.trim();
-    if (!apiKey) return { response: '', error: `Add a ${resolvedProvider} API key in Settings.` };
+    if (!apiKey) {
+      const errMsg = `Add a ${resolvedProvider} API key in Settings.`;
+      sendEvent(IPC_EVENTS.CHAT_STREAM_END, { ok: false, error: errMsg, conversationId: id });
+      return { response: '', error: errMsg, conversationId: id };
+    }
 
     // Model: if the UI sent an explicit model, use it directly (skip tier resolution).
     // Otherwise fall back to the saved model for the provider.
@@ -634,60 +798,16 @@ export function registerChatIpc(
     const model = payloadModel
       ? configuredModel
       : resolveModelForTier(taskProfile.modelTier, settings_provider, configuredModel);
-    const usePipeline = !isAppMappingRequest(text) && !(continuationForcedProfile?.specialMode === 'app_mapping') && PipelineOrchestrator.classifyIntent(text);
-
     let result: { response: string; error?: string } = { response: '', error: 'Unknown failure' };
 
-    if (usePipeline) {
-      const pipelineMsgId = `msg-pipe-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
-      sendEvent(IPC_EVENTS.CHAT_STREAM_END, { ok: true, pipelineMessageId: pipelineMsgId, isPipelineStart: true, conversationId: id });
-      try {
-        const response = await PipelineOrchestrator.run(text, {
-          provider: settings_provider,
-          apiKey,
-          model,
-          conversationId: id,   // already present — also routed to worker loops below
-          signal: convAgent.abort.signal,
-          browserService,
-          unrestrictedMode: settings.unrestrictedMode,
-          onStateChanged: (state) => sendEvent(IPC_EVENTS.SWARM_STATE_CHANGED, { ...state, conversationId: id }),
-          onText: (delta) => sendEvent(IPC_EVENTS.CHAT_STREAM_TEXT, { delta, conversationId: id }),
-        });
-        result = { response };
-        completeTask(taskId);
-        sendEvent(IPC_EVENTS.CHAT_STREAM_END, { ok: true, conversationId: id });
-        if (response) {
-          const assistantMsgId = `msg-a-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
-          const assistantMsgTs = new Date().toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
-          const assistantMsg: Message = { id: assistantMsgId, role: 'assistant', content: response, timestamp: assistantMsgTs };
-          const nowStr = new Date().toISOString();
-          addMessage({ id: assistantMsgId, conversation_id: id, role: 'assistant', content: JSON.stringify(assistantMsg), created_at: nowStr });
-          updateConversation(id, { updated_at: nowStr, title: text.slice(0, 60) || 'New conversation' });
-          const session = sessionManager.getOrCreateSession(id);
-          session.push({ role: 'user', content: text });
-          session.push({ role: 'assistant', content: response });
-        }
-      } catch (e: unknown) {
-        const err = e instanceof Error ? e : new Error(String(e));
-        result = { response: '', error: err.message };
-        if (err.name === 'AbortError' || err.message === 'AbortError') {
-          cancelTask(taskId);
-          sendEvent(IPC_EVENTS.CHAT_STREAM_END, { ok: false, cancelled: true, conversationId: id });
-        } else {
-          failTask(taskId, err.message);
-          sendEvent(IPC_EVENTS.CHAT_STREAM_END, { ok: false, error: err.message, conversationId: id });
-        }
-      } finally {
-        sessionManager.deleteAgent(id);
-        sessionManager.updateExecutorState(id, { status: result?.error ? 'failed' : 'idle', runId: null });
-      }
-    } else {
+    {
       const runId = `run-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
       convAgent.runId = runId;
       // Register the agentLoop run in DB (previously not persisted for Anthropic path).
       registerRun(runId, id, settings_provider, configuredModel, taskId);
       linkRunToTask(taskId, runId);
       sessionManager.updateExecutorState(id, { runId, status: 'running' });
+      const runStartIndex = sessionMessages.length; // capture before agentLoop appends anything
       const assistantFeed: FeedItem[] = [];
       const assistantToolCalls = new Map<string, ToolCall>();
 
@@ -703,7 +823,7 @@ export function registerChatIpc(
       };
 
       try {
-        const response = await agentLoop(text, sessionMessages, {
+        const response = await agentLoop(effectiveText, sessionMessages, {
           provider: settings_provider,
           apiKey,
           model,
@@ -712,7 +832,8 @@ export function registerChatIpc(
           signal: convAgent.abort.signal,
           forcedProfile: continuationForcedProfile,
           unrestrictedMode: settings.unrestrictedMode,
-          browserService,
+          browserService: currentBrowserService(),
+          terminalController: terminalControllerRef,
           attachments,
           onText: (delta) => {
             streamingBuffer += delta;
@@ -738,8 +859,12 @@ export function registerChatIpc(
             appendPromptTail(id, formatSystemPromptForTerminal(settings_provider, model, prompt));
             updateRun(runId, { system_prompt: prompt });
           },
+          onContextPressure: (pressure) => {
+            sendEvent(IPC_EVENTS.CHAT_CONTEXT_PRESSURE, { ...pressure, conversationId: id });
+          },
         });
         result = { response };
+        collapseRunToolPairs(sessionMessages, runStartIndex);
         completeRun(runId, 0, 0);
         completeTask(taskId);
         sendEvent(IPC_EVENTS.CHAT_STREAM_END, { ok: true, conversationId: id });
@@ -749,7 +874,23 @@ export function registerChatIpc(
           if (settings_provider === 'anthropic') {
             repairSession(sessionMessages, 'user_interrupted', 'ChatIpc.agentAbort');
           }
-          result = { response: '', error: 'Stopped' };
+          // After repair, strip any trailing plain user message that was pushed by
+          // the interrupted agentLoop but never received an assistant response.
+          // Without this, the next send pushes another user message producing two
+          // consecutive user turns which breaks the Anthropic protocol.
+          {
+            const last = sessionMessages[sessionMessages.length - 1];
+            if (last?.role === 'user') {
+              const content = last.content;
+              const isToolResults = Array.isArray(content) && content.length > 0 &&
+                content.every((b: any) => b?.type === 'tool_result');
+              if (!isToolResults) {
+                sessionMessages.pop();
+              }
+            }
+          }
+          // Preserve any partial text streamed before the abort so it gets persisted.
+          result = { response: streamingBuffer, error: 'Stopped' };
           failRun(runId, 'Cancelled by user');
           cancelTask(taskId);
           sendEvent(IPC_EVENTS.CHAT_STREAM_END, { ok: false, cancelled: true, conversationId: id });
@@ -761,6 +902,7 @@ export function registerChatIpc(
         }
       } finally {
         if (streamingFlushTimer) { clearTimeout(streamingFlushTimer); streamingFlushTimer = null; }
+        deleteStreamingResponse(streamingId);
         sessionManager.deleteAgent(id);
         sessionManager.updateExecutorState(id, {
           status: result?.error ? 'failed' : 'idle',
@@ -768,22 +910,27 @@ export function registerChatIpc(
         });
       }
 
-      if (result!.response && !result!.error) {
+      // Persist assistant message whenever there is any response content —
+      // including partial responses from aborted runs so conversation history
+      // is not silently lost on stop.
+      const responseContent = result!.response;
+      if (responseContent) {
         const assistantMsgId = `msg-a-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
         const assistantMsgTs = new Date().toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
         const finalizedFeed = finalizeFeed(assistantFeed);
         const assistantMsg: Message = {
           id: assistantMsgId,
           role: 'assistant',
-          content: result!.response,
+          content: responseContent,
           timestamp: assistantMsgTs,
           feed: finalizedFeed,
           toolCalls: Array.from(assistantToolCalls.values()),
         };
         const nowStr = new Date().toISOString();
         addMessage({ id: assistantMsgId, conversation_id: id, role: 'assistant', content: JSON.stringify(assistantMsg), created_at: nowStr });
-        updateConversation(id, { updated_at: nowStr, title: text.slice(0, 60) || 'New conversation' });
-        deleteStreamingResponse(streamingId);
+        updateConversation(id, { updated_at: nowStr });
+        recordAssistantOutcome(id, responseContent);
+        void generateAndPushTitle(id, text, responseContent, sendEvent);
       }
     }
 
@@ -805,7 +952,23 @@ export function registerChatIpc(
     const activeTaskId = sessionManager.getActiveTaskId(targetId);
     if (activeTaskId) cancelTask(activeTaskId);
     const sessionMessages = sessionManager.getSession(targetId);
-    if (sessionMessages) repairSession(sessionMessages, 'user_interrupted', 'ChatIpc.chatStop');
+    if (sessionMessages) {
+      repairSession(sessionMessages, 'user_interrupted', 'ChatIpc.chatStop');
+      // Strip any trailing plain user message left by the interrupted run.
+      // The agentLoop pushes the user message before the first LLM call, so if
+      // the run was stopped before an assistant responded, the session ends with
+      // an orphaned user turn. Removing it prevents consecutive user messages on
+      // the next send.
+      const last = sessionMessages[sessionMessages.length - 1];
+      if (last?.role === 'user') {
+        const content = last.content;
+        const isToolResults = Array.isArray(content) && content.length > 0 &&
+          content.every((b: any) => b?.type === 'tool_result');
+        if (!isToolResults) {
+          sessionMessages.pop();
+        }
+      }
+    }
   });
 
   ipcMain.handle(IPC.CHAT_PAUSE, (_e, conversationId?: string) => {
@@ -830,4 +993,21 @@ export function registerChatIpc(
   });
 
   ipcMain.handle(IPC.CHAT_RATE_TOOL, () => {});
+
+  // ── Manual compression ──────────────────────────────────────────────────────
+  // Works both during an active run (mutates the live messages array the agent
+  // is iterating — it picks up seamlessly on the next iteration) and when idle.
+  // Haiku is always Anthropic, so we always use the Anthropic key regardless
+  // of which provider the user has active for chat.
+  ipcMain.handle(IPC.CHAT_COMPRESS, async (_e, conversationId?: string) => {
+    const targetId = conversationId ?? sessionManager.activeConversationId;
+    if (!targetId) return { ok: false, error: 'No active conversation' };
+    const sessionMessages = sessionManager.getSession(targetId);
+    if (!sessionMessages || sessionMessages.length === 0) return { ok: false, error: 'No session messages to compress' };
+    const settings = loadSettings();
+    const anthropicKey = settings.providerKeys['anthropic']?.trim();
+    if (!anthropicKey) return { ok: false, error: 'Anthropic API key required for compression' };
+    const result = await compressConversationHistory(sessionMessages, anthropicKey);
+    return { ok: true, ...result };
+  });
 }

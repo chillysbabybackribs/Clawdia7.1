@@ -73,6 +73,31 @@ export interface RunEventRow {
   payload_json: string;
 }
 
+export interface SessionIndexRow {
+  session_id: string;
+  conversation_id?: string | null;
+  workspace_id: string;
+  surface: string;
+  title?: string | null;
+  objective?: string | null;
+  last_user_intent?: string | null;
+  last_completed_step?: string | null;
+  next_step?: string | null;
+  confidence: number;
+  needs_confirmation: number;
+  updated_at: string;
+}
+
+export interface SessionEventRow {
+  id?: number;
+  session_id: string;
+  conversation_id?: string | null;
+  ts: string;
+  kind: string;
+  surface?: string | null;
+  payload_json: string;
+}
+
 // ── Database Initialization ───────────────────────────────────────────────
 
 function resolveDbPath(): string {
@@ -263,6 +288,42 @@ export function initDb(): boolean {
         completed_at    TEXT
       );
       CREATE INDEX IF NOT EXISTS idx_tasks_conversation ON tasks(conversation_id, created_at DESC);
+
+      CREATE TABLE IF NOT EXISTS session_index (
+        session_id           TEXT PRIMARY KEY,
+        conversation_id      TEXT REFERENCES conversations(id) ON DELETE SET NULL,
+        workspace_id         TEXT NOT NULL,
+        surface              TEXT NOT NULL DEFAULT 'conversation',
+        title                TEXT,
+        objective            TEXT,
+        last_user_intent     TEXT,
+        last_completed_step  TEXT,
+        next_step            TEXT,
+        confidence           REAL NOT NULL DEFAULT 0,
+        needs_confirmation   INTEGER NOT NULL DEFAULT 0,
+        updated_at           TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_session_index_workspace_updated
+        ON session_index(workspace_id, updated_at DESC);
+
+      CREATE TABLE IF NOT EXISTS session_events (
+        id              INTEGER PRIMARY KEY AUTOINCREMENT,
+        session_id      TEXT NOT NULL REFERENCES session_index(session_id) ON DELETE CASCADE,
+        conversation_id TEXT REFERENCES conversations(id) ON DELETE SET NULL,
+        ts              TEXT NOT NULL,
+        kind            TEXT NOT NULL,
+        surface         TEXT,
+        payload_json    TEXT NOT NULL DEFAULT '{}'
+      );
+      CREATE INDEX IF NOT EXISTS idx_session_events_session_ts
+        ON session_events(session_id, ts DESC);
+
+      CREATE TABLE IF NOT EXISTS session_dismissals (
+        workspace_id   TEXT NOT NULL,
+        session_id     TEXT NOT NULL REFERENCES session_index(session_id) ON DELETE CASCADE,
+        dismissed_at   TEXT NOT NULL,
+        PRIMARY KEY (workspace_id, session_id)
+      );
     `);
 
     // Evolution: Add token tracking to runs if missing
@@ -288,8 +349,9 @@ export function initDb(): boolean {
       db.prepare(`ALTER TABLE runs ADD COLUMN task_id TEXT REFERENCES tasks(id)`).run();
     } catch { }
 
-    // Mark orphaned runs as failed (app was killed mid-run)
+    // Mark orphaned runs/tasks as failed (app was killed mid-run)
     db.prepare(`UPDATE runs SET status = 'failed' WHERE status = 'running'`).run();
+    db.prepare(`UPDATE tasks SET status = 'failed', last_error = 'Orphaned: app restarted while task was running' WHERE status = 'running'`).run();
 
     // Wire extensions
     initMemory(db);
@@ -397,8 +459,8 @@ export function createRun(run: RunRow): void {
   try {
     getDb()
       .prepare(
-        `INSERT INTO runs (id, conversation_id, title, goal, status, started_at, updated_at, completed_at, tool_call_count, error, was_detached, provider, model, workflow_stage, scenario_id, tool_completed_count, tool_failed_count, estimated_cost_usd, total_tokens, parent_run_id, system_prompt)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+        `INSERT INTO runs (id, conversation_id, title, goal, status, started_at, updated_at, completed_at, tool_call_count, error, was_detached, provider, model, workflow_stage, scenario_id, tool_completed_count, tool_failed_count, estimated_cost_usd, total_tokens, parent_run_id, system_prompt, task_id)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
       )
       .run(
         run.id,
@@ -422,6 +484,7 @@ export function createRun(run: RunRow): void {
         run.total_tokens ?? null,
         run.parent_run_id ?? null,
         run.system_prompt ?? null,
+        run.task_id ?? null,
       );
   } catch (err) {
     console.error('[db] createRun failed:', err);

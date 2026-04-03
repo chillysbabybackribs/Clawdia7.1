@@ -16,8 +16,14 @@ import { listExecutors } from './core/executors/ExecutorRegistry';
 import { getExecutorConfig, patchExecutorConfig, loadExecutorConfigs } from './core/executors/ExecutorConfigStore';
 import type { ExecutorId } from './core/executors/ExecutorRegistry';
 import { getTaskState, getLatestTask, getRecentTasks } from './taskTracker';
+import {
+  dismissSessionContinuitySuggestion,
+  peekLatestSessionContinuity,
+  recallLatestSessionContinuity,
+} from './sessionContinuity';
 
 const sessionManager = new SessionManager();
+let registered = false;
 
 // Expose live state to the workspace awareness tools without circular imports.
 registerWorkspaceStateAccessor({
@@ -30,13 +36,13 @@ export function registerIpc(
   browserService: ElectronBrowserService,
   terminalController?: TerminalSessionController,
 ): void {
-  attachClawdiaMcpBridge(browserService);
-
-  // ── Domain handlers ──────────────────────────────────────────────────────────
+  attachClawdiaMcpBridge(browserService, terminalController);
   registerChatIpc(sessionManager, browserService, terminalController);
   registerBrowserIpc(browserService);
   registerAgentIpc(sessionManager, browserService);
   registerRunIpc(terminalController);
+  if (registered) return;
+  registered = true;
 
   // ── Settings ─────────────────────────────────────────────────────────────────
   ipcMain.handle(IPC.SETTINGS_GET, (_e, key: keyof AppSettings) => {
@@ -123,4 +129,17 @@ export function registerIpc(
   ipcMain.handle(IPC.TASK_LIST, (_e, conversationId: string, limit?: number) =>
     getRecentTasks(conversationId, limit ?? 20),
   );
+
+  ipcMain.handle(IPC.SESSION_PEEK_LATEST, (_e, excludeConversationId?: string | null) =>
+    peekLatestSessionContinuity(excludeConversationId ?? null),
+  );
+
+  ipcMain.handle(IPC.SESSION_RECALL, (_e, excludeConversationId?: string | null) =>
+    recallLatestSessionContinuity(excludeConversationId ?? null),
+  );
+
+  ipcMain.handle(IPC.SESSION_DISMISS, (_e, sessionId: string) => {
+    dismissSessionContinuitySuggestion(sessionId);
+    return { ok: true };
+  });
 }

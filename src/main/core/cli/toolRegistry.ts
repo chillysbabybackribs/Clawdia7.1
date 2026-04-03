@@ -3,12 +3,15 @@ import type Anthropic from '@anthropic-ai/sdk';
 import { Type } from '@google/genai';
 import type OpenAI from 'openai';
 import { BROWSER_TOOLS } from './browserTools';
+import { CDP_TOOLS } from './cdpTools';
+import { SYSTEM_TOOLS } from './systemTools';
 import { MEMORY_TOOLS } from './memoryTools';
 import { SHELL_TOOLS_OPENAI } from './shellTools';
 import { DESKTOP_TOOLS } from '../desktop/tools';
 import { WORKSPACE_TOOLS } from './workspaceTools';
 import { SELF_AWARE_TOOLS } from './selfAwareTools';
 import { UI_STATE_TOOLS } from './uiStateTools';
+import { TERMINAL_TOOLS } from './terminalTools';
 
 type OAITool = OpenAI.Chat.Completions.ChatCompletionTool;
 
@@ -25,11 +28,14 @@ const SHELL_TOOLS_CANONICAL: Anthropic.Tool[] = SHELL_TOOLS_OPENAI.map(t => ({
 const ALL_TOOLS: Anthropic.Tool[] = [
   ...SHELL_TOOLS_CANONICAL,
   ...BROWSER_TOOLS,
+  ...CDP_TOOLS,
+  ...SYSTEM_TOOLS,
   ...MEMORY_TOOLS,
   ...DESKTOP_TOOLS,
   ...WORKSPACE_TOOLS,
   ...SELF_AWARE_TOOLS,
   ...UI_STATE_TOOLS,
+  ...TERMINAL_TOOLS,
 ];
 
 const TOOL_INDEX: Map<string, Anthropic.Tool> = new Map(

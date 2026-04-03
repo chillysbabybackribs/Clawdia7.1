@@ -4,6 +4,10 @@ import { IPC, IPC_EVENTS } from './ipc-channels';
 const noop = () => {};
 const preloadStatusKey = '__clawdiaPreload';
 
+// Each mounted ChatPanel registers ~12 listeners. Support up to 50 tabs before
+// the Node EventEmitter warns about a potential memory leak.
+ipcRenderer.setMaxListeners(50);
+
 function onEvent<T>(channel: string, cb: (payload: T) => void): () => void {
   const handler = (_: Electron.IpcRendererEvent, payload: T) => cb(payload);
   ipcRenderer.on(channel, handler);
@@ -62,6 +66,9 @@ try {
     onClaudeStatus: (cb: (payload: any) => void) => onEvent(IPC_EVENTS.CHAT_CLAUDE_STATUS, cb),
     onConcurrentExecutionStart: (cb: (payload: { plan: any; conversationId: string }) => void) => onEvent(IPC_EVENTS.CONCURRENT_EXECUTION_START, cb),
     onConcurrentExecutionEnd: (cb: (payload: { conversationId: string }) => void) => onEvent(IPC_EVENTS.CONCURRENT_EXECUTION_END, cb),
+    onContextPressure: (cb: (payload: { used: number; budget: number; pct: number; conversationId: string }) => void) => onEvent(IPC_EVENTS.CHAT_CONTEXT_PRESSURE, cb),
+    onTitleUpdated: (cb: (payload: { conversationId: string; title: string }) => void) => onEvent(IPC_EVENTS.CHAT_TITLE_UPDATED, cb),
+    compress: (conversationId?: string) => ipcRenderer.invoke(IPC.CHAT_COMPRESS, conversationId),
   },
 
   browser: {
@@ -115,6 +122,15 @@ try {
     setPerformanceStance: (stance: string) => ipcRenderer.invoke('settings:set-performance-stance', stance),
   },
 
+  session: {
+    peekLatest: (excludeConversationId?: string | null) =>
+      ipcRenderer.invoke(IPC.SESSION_PEEK_LATEST, excludeConversationId ?? null),
+    recall: (excludeConversationId?: string | null) =>
+      ipcRenderer.invoke(IPC.SESSION_RECALL, excludeConversationId ?? null),
+    dismiss: (sessionId: string) =>
+      ipcRenderer.invoke(IPC.SESSION_DISMISS, sessionId),
+  },
+
   process: {
     list: () => ipcRenderer.invoke(IPC.PROCESS_LIST),
     detach: () => ipcRenderer.invoke(IPC.PROCESS_DETACH),
@@ -151,11 +167,6 @@ try {
     runOnUrls: (id: string, urls: string[]) => ipcRenderer.invoke(IPC.AGENT_RUN_URLS, id, urls),
     history: (id: string) => ipcRenderer.invoke(IPC.AGENT_HISTORY, id),
     test: (id: string) => ipcRenderer.invoke(IPC.AGENT_TEST, id),
-  },
-
-  calendar: {
-    list: (from?: string, to?: string) => ipcRenderer.invoke(IPC.CALENDAR_LIST, from, to),
-    onEventsChanged: (cb: (events: any[]) => void) => onEvent(IPC_EVENTS.CALENDAR_EVENTS_CHANGED, cb),
   },
 
   swarm: {
@@ -232,6 +243,8 @@ try {
     listApps: () => ipcRenderer.invoke(IPC.DESKTOP_LIST_APPS),
     focusApp: (windowId: string) => ipcRenderer.invoke(IPC.DESKTOP_FOCUS_APP, windowId),
     killApp: (pid: number) => ipcRenderer.invoke(IPC.DESKTOP_KILL_APP, pid),
+    onFocusStealWarning: (cb: (payload: { targetWindow: string }) => void) =>
+      onEvent(IPC.DESKTOP_FOCUS_STEAL_WARNING, cb),
   },
 
   wallet: {
@@ -291,6 +304,10 @@ try {
     getLatest: (conversationId: string) => ipcRenderer.invoke(IPC.TASK_GET_LATEST, conversationId),
     /** Get recent tasks for a conversation */
     list: (conversationId: string, limit?: number) => ipcRenderer.invoke(IPC.TASK_LIST, conversationId, limit),
+  },
+
+  screenshot: {
+    capture: () => ipcRenderer.invoke('screenshot-capture'),
   },
 
     videoExtractor: {

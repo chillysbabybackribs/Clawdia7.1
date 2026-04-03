@@ -150,4 +150,8 @@ export interface BrowserService {
   getOrAssignTab(conversationId: string): Promise<string>;
   releaseTab(conversationId: string): Promise<void>;
   focusConversation(conversationId: string): Promise<void>;
+  getActiveTabOwner(): Promise<string | null>;
+
+  /** Send a Chrome DevTools Protocol command to the active tab's attached debugger. */
+  sendCDP<T = unknown>(method: string, params?: Record<string, unknown>): Promise<T>;
 }

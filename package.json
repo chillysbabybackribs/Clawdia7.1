@@ -10,6 +10,7 @@
     "node": ">=20.0.0"
   },
   "scripts": {
+    "rebuild:test:native": "npm rebuild better-sqlite3 node-pty",
     "rebuild:native": "node ./node_modules/@electron/rebuild/lib/cli.js -f -w better-sqlite3,node-pty -v 39.5.1",
     "postinstall": "npm run rebuild:native",
     "predev": "npm run rebuild:native && tsc -p tsconfig.main.json",
@@ -22,7 +23,7 @@
     "dev:electron:once": "wait-on http://127.0.0.1:5174 dist/main/main.js dist/main/preload.js && cross-env NODE_ENV=development electron --no-sandbox .",
     "safe-dev:refresh": "npm run build",
     "build": "npm run build:main && npm run build:renderer",
-    "build:main": "tsc -p tsconfig.main.json && cp src/pilot/obs/obs-map.json dist/pilot/obs/obs-map.json",
+    "build:main": "tsc -p tsconfig.main.json",
     "build:renderer": "vite build",
     "prestart": "npm run rebuild:native",
     "start": "cross-env NODE_ENV=production electron --no-sandbox .",
@@ -32,7 +33,10 @@
     "obs:harness": "node dist/pilot/run-obs-pilot.js",
     "prepackage": "npm run rebuild:native",
     "package": "npm run build && electron-builder",
+    "pretest": "npm run rebuild:test:native",
     "test": "vitest run",
+    "pretest:coverage": "npm run rebuild:test:native",
+    "test:coverage": "vitest run --coverage",
     "test:watch": "vitest"
   },
   "dependencies": {
@@ -60,6 +64,7 @@
     "@types/react": "^19.1.2",
     "@types/react-dom": "^19.1.2",
     "@vitejs/plugin-react": "^4.4.1",
+    "@vitest/coverage-v8": "^4.1.2",
     "autoprefixer": "^10.4.21",
     "concurrently": "^8.2.0",
     "cross-env": "^10.1.0",

@@ -325,27 +325,35 @@ export async function streamGeminiChat({
                 // ── End policy gate ───────────────────────────────────────────────
 
                 let screenshotInlineData: { mimeType: string; data: string } | null = null;
-                if (fc.name.startsWith('browser_') && browserService) {
-                    const output = await withTimeout(executeBrowserTool(fc.name, fc.args as Record<string, unknown>, browserService, conversationId), TOOL_TIMEOUTS.browser, fc.name);
-                    // Screenshots: extract inlineData so Gemini can actually see the image
-                    if (fc.name === 'browser_screenshot' && (output as any)?.data) {
-                        const shot = output as { type: string; mimeType: string; data: string; width?: number; height?: number };
-                        resultStr = JSON.stringify({ ok: true, width: shot.width, height: shot.height, note: 'Screenshot captured — image provided as vision content.' });
-                        screenshotInlineData = { mimeType: shot.mimeType, data: shot.data };
+                let tcIsError = false;
+                try {
+                    if (fc.name.startsWith('browser_') && browserService) {
+                        const output = await withTimeout(executeBrowserTool(fc.name, fc.args as Record<string, unknown>, browserService, conversationId), TOOL_TIMEOUTS.browser, fc.name);
+                        // Screenshots: extract inlineData so Gemini can actually see the image
+                        if (fc.name === 'browser_screenshot' && (output as any)?.data) {
+                            const shot = output as { type: string; mimeType: string; data: string; width?: number; height?: number };
+                            resultStr = JSON.stringify({ ok: true, width: shot.width, height: shot.height, note: 'Screenshot captured — image provided as vision content.' });
+                            screenshotInlineData = { mimeType: shot.mimeType, data: shot.data };
+                        } else {
+                            resultStr = truncateBrowserResult(JSON.stringify(output));
+                        }
+                    } else if (DESKTOP_TOOL_NAMES.has(fc.name)) {
+                        resultStr = await withTimeout(executeGuiInteract(fc.args as Record<string, unknown>), TOOL_TIMEOUTS.desktop, fc.name);
                     } else {
-                        resultStr = truncateBrowserResult(JSON.stringify(output));
+                        resultStr = await withTimeout(executeShellTool(fc.name, fc.args as Record<string, unknown>), TOOL_TIMEOUTS.shell, fc.name);
                     }
-                } else if (DESKTOP_TOOL_NAMES.has(fc.name)) {
-                    resultStr = await withTimeout(executeGuiInteract(fc.args as Record<string, unknown>), TOOL_TIMEOUTS.desktop, fc.name);
-                } else {
-                    resultStr = await withTimeout(executeShellTool(fc.name, fc.args as Record<string, unknown>), TOOL_TIMEOUTS.shell, fc.name);
+                } catch (err) {
+                    resultStr = JSON.stringify({ ok: false, error: (err as Error).message });
+                    tcIsError = true;
                 }
 
+                const tcEndMs = Date.now();
+                const tcElapsedMs = tcEndMs - tcStartMs;
                 if (runId && eventId) {
-                    trackToolResult(runId, eventId, resultStr.slice(0, 200), Date.now() - tcStartMs);
+                    trackToolResult(runId, eventId, resultStr.slice(0, 200), tcElapsedMs);
                 }
 
-                toolCallHistory.push({ id: tcId, name: fc.name, input: fc.args as Record<string, unknown>, result: resultStr });
+                toolCallHistory.push({ id: tcId, name: fc.name, input: fc.args as Record<string, unknown>, result: resultStr, startMs: tcStartMs, endMs: tcEndMs, elapsed_ms: tcElapsedMs, success: !tcIsError });
                 const successTcObj = { ...tcObj, status: 'success' as const, detail: resultStr.substring(0, 500), output: resultStr };
                 if (!webContents.isDestroyed()) {
                     webContents.send(IPC_EVENTS.CHAT_TOOL_ACTIVITY, successTcObj);

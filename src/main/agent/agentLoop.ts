@@ -477,7 +477,7 @@ export async function agentLoop(
       // Annotate each tool result with measured elapsed_ms so the model can
       // report real numeric values without fabricating or using placeholders.
       const results = dispatchResult.results.map((raw, idx) => {
-        const ms = dispatchResult.elapsedMs[idx];
+        const ms = dispatchResult.elapsedMs?.[idx];
         if (typeof ms !== 'number') return raw;
         try {
           const parsed = JSON.parse(raw);

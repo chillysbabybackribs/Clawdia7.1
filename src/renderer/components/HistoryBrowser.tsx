@@ -11,6 +11,8 @@ interface HistoryBrowserProps {
   currentTabs: ConversationTab[];
   onSelectConversation: (id: string) => void;
   onClose: () => void;
+  extensionsOpen?: boolean;
+  onToggleExtensions?: () => void;
 }
 
 type DateGroup = 'Today' | 'Yesterday' | 'Last 7 days' | 'Older';
@@ -38,7 +40,7 @@ function formatDate(isoDate: string): string {
 
 const GROUP_ORDER: DateGroup[] = ['Today', 'Yesterday', 'Last 7 days', 'Older'];
 
-export default function HistoryBrowser({ currentTabs, onSelectConversation, onClose }: HistoryBrowserProps) {
+export default function HistoryBrowser({ currentTabs, onSelectConversation, onClose, extensionsOpen, onToggleExtensions }: HistoryBrowserProps) {
   const [conversations, setConversations] = useState<ConvItem[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(false);
@@ -76,13 +78,28 @@ export default function HistoryBrowser({ currentTabs, onSelectConversation, onCl
         style={{ borderBottom: '1px solid rgba(255,255,255,0.06)' }}
       >
         <span className="text-[13px] font-semibold text-text-primary tracking-wide">Chat History</span>
-        <button
-          onClick={onClose}
-          className="flex items-center justify-center w-7 h-7 rounded-md text-text-muted hover:text-text-primary hover:bg-white/[0.06] transition-all cursor-pointer text-[16px] leading-none"
-          title="Close history"
-        >
-          ×
-        </button>
+        <div className="flex items-center gap-1">
+          {onToggleExtensions && (
+            <button
+              onClick={onToggleExtensions}
+              title="Extensions"
+              className={`flex items-center justify-center px-2 h-7 rounded-md text-[10px] font-medium uppercase tracking-[0.08em] transition-all cursor-pointer ${
+                extensionsOpen
+                  ? 'text-text-primary bg-white/[0.08]'
+                  : 'text-text-muted hover:text-text-secondary hover:bg-white/[0.06]'
+              }`}
+            >
+              Extensions
+            </button>
+          )}
+          <button
+            onClick={onClose}
+            className="flex items-center justify-center w-7 h-7 rounded-md text-text-muted hover:text-text-primary hover:bg-white/[0.06] transition-all cursor-pointer text-[16px] leading-none"
+            title="Close history"
+          >
+            ×
+          </button>
+        </div>
       </div>
 
       {/* Body */}

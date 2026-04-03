@@ -180,7 +180,7 @@ export default function IdentitySection() {
         <button
           onClick={handleSaveProfile}
           className={`self-start h-[34px] px-4 rounded-lg text-sm font-medium transition-all cursor-pointer ${
-            profileSaved ? 'bg-status-success/20 text-status-success' : 'bg-accent/90 hover:bg-accent text-white'
+            profileSaved ? 'bg-status-success/20 text-status-success' : 'bg-accent/90 hover:bg-accent text-surface-0'
           }`}
         >
           {profileSaved ? 'Saved ✓' : 'Save Profile'}
@@ -235,7 +235,7 @@ export default function IdentitySection() {
               <input className={inputCls} type="password" placeholder="Password" value={newAccountPassword} onChange={e => setNewAccountPassword(e.target.value)} />
             </div>
             <div className="flex gap-2">
-              <button onClick={handleAddAccount} className="h-[30px] px-3 rounded-lg bg-accent/90 hover:bg-accent text-white text-xs font-medium cursor-pointer transition-colors">Add</button>
+              <button onClick={handleAddAccount} className="h-[30px] px-3 rounded-lg bg-accent/90 hover:bg-accent text-surface-0 text-xs font-medium cursor-pointer transition-colors">Add</button>
               <button onClick={() => setShowAddAccount(false)} className="h-[30px] px-3 rounded-lg text-text-muted hover:text-text-secondary text-xs cursor-pointer transition-colors">Cancel</button>
             </div>
           </div>
@@ -299,7 +299,7 @@ export default function IdentitySection() {
               <input className={inputCls} type="password" placeholder="Value" value={newCredValue} onChange={e => setNewCredValue(e.target.value)} />
             </div>
             <div className="flex gap-2">
-              <button onClick={handleAddCredential} className="h-[30px] px-3 rounded-lg bg-accent/90 hover:bg-accent text-white text-xs font-medium cursor-pointer transition-colors">Add</button>
+              <button onClick={handleAddCredential} className="h-[30px] px-3 rounded-lg bg-accent/90 hover:bg-accent text-surface-0 text-xs font-medium cursor-pointer transition-colors">Add</button>
               <button onClick={() => setShowAddCred(false)} className="h-[30px] px-3 rounded-lg text-text-muted hover:text-text-secondary text-xs cursor-pointer transition-colors">Cancel</button>
             </div>
           </div>

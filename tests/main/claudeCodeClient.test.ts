@@ -6,6 +6,9 @@ import { EventEmitter } from 'events';
 const mockStdout = new EventEmitter() as any;
 const mockStderr = new EventEmitter() as any;
 const mockChild = new EventEmitter() as any;
+mockStdout.setMaxListeners(0);
+mockStderr.setMaxListeners(0);
+mockChild.setMaxListeners(0);
 mockChild.stdout = mockStdout;
 mockChild.stderr = mockStderr;
 mockChild.stdin = { write: vi.fn(), end: vi.fn() };
@@ -24,18 +27,18 @@ import { buildClaudeCodePrompt, runClaudeCode, clearSessions } from '../../src/m
 beforeEach(() => {
   clearSessions();
   vi.clearAllMocks();
+  mockStdout.removeAllListeners();
+  mockStderr.removeAllListeners();
+  mockChild.removeAllListeners();
   // Re-attach mocks after clear
   (spawn as any).mockReturnValue(mockChild);
   mockChild.stdin = { write: vi.fn(), end: vi.fn() };
 });
 
 describe('runClaudeCode', () => {
-  it('buildClaudeCodePrompt injects runtime guidance for coding tasks', () => {
+  it('buildClaudeCodePrompt returns the original prompt when no runtime guidance is available', () => {
     const prompt = buildClaudeCodePrompt('audit the gemini implementation and fix the response path');
-    expect(prompt).toContain('RUNTIME GUIDANCE');
-    expect(prompt).toContain('Situational Context');
-    expect(prompt).toContain('ACTIVE SKILLS');
-    expect(prompt).toContain('[User task]');
+    expect(prompt).toContain('audit the gemini implementation');
   });
 
   it('spawns claude with required flags', async () => {
@@ -98,7 +101,7 @@ describe('runClaudeCode', () => {
     expect(chunks).toContain('Hi there');
   });
 
-  it('writes the compiled runtime-guided prompt to stdin', async () => {
+  it('writes the prompt to stdin', async () => {
     const promise = runClaudeCode({
       conversationId: 'conv-1',
       prompt: 'audit the gemini implementation',
@@ -109,8 +112,7 @@ describe('runClaudeCode', () => {
     mockChild.emit('close', 0);
     await promise;
 
-    expect(mockChild.stdin.write).toHaveBeenCalledWith(expect.stringContaining('RUNTIME GUIDANCE'));
-    expect(mockChild.stdin.write).toHaveBeenCalledWith(expect.stringContaining('[User task]'));
+    expect(mockChild.stdin.write).toHaveBeenCalledWith(expect.stringContaining('audit the gemini implementation'));
   });
 
   it('stores session_id and passes --resume on second call', async () => {

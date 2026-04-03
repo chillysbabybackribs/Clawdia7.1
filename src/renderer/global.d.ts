@@ -48,6 +48,11 @@ declare global {
       getPerformanceStance: () => Promise<'conservative' | 'standard' | 'aggressive'>;
       setPerformanceStance: (stance: 'conservative' | 'standard' | 'aggressive') => Promise<any>;
     };
+    session: {
+      peekLatest: (excludeConversationId?: string | null) => Promise<any>;
+      recall: (excludeConversationId?: string | null) => Promise<any>;
+      dismiss: (sessionId: string) => Promise<any>;
+    };
     process: {
       list: () => Promise<any>;
       detach: () => Promise<any>;

@@ -3,15 +3,22 @@ import { promisify } from 'util';
 import * as os from 'os';
 
 export const execAsync = promisify(exec);
-export const TIMEOUT = 30_000;
+// Desktop timeout budget — increased to 45s for realistic GUI wait times
+// (app launches, window detection, screenshot/OCR can be slow on slower hardware)
+export const TIMEOUT = 45_000;
 
-/** Run a shell command with DISPLAY set. Returns merged stdout/stderr or [Error]. */
-export async function run(command: string, timeout = TIMEOUT): Promise<string> {
+/**
+ * Run a shell command with DISPLAY set. Returns merged stdout/stderr or [Error].
+ *
+ * @param display  Override the X11 display (e.g. ':99' for virtual display).
+ *                 Defaults to DISPLAY env var or ':0'.
+ */
+export async function run(command: string, timeout = TIMEOUT, display?: string): Promise<string> {
     try {
         const { stdout, stderr } = await execAsync(command, {
             timeout,
             cwd: os.homedir(),
-            env: { ...process.env, DISPLAY: process.env.DISPLAY || ':0' },
+            env: { ...process.env, DISPLAY: display ?? process.env.DISPLAY ?? ':0' },
             maxBuffer: 1024 * 1024 * 4,
         });
         let result = stdout.trim();

@@ -1,6 +1,5 @@
 import React, { useState, useRef, useEffect, useCallback } from 'react';
 import type { BrowserExecutionMode } from '../../shared/types';
-import ExtensionsPanel from './ExtensionsPanel';
 
 interface TabInfo {
   id: string;
@@ -64,14 +63,60 @@ function TabIconFallback() {
   );
 }
 
-export default function BrowserPanel({ reservedRight = 0 }: { reservedRight?: number }) {
+/* ── Chrome tab SVG geometry ──
+   Based on adamschwartz/chrome-tabs.
+   The path draws the rounded top + inverse-curved bottom corners. */
+const BTAB_LEFT_ID = 'browser-tab-left';
+const BTAB_RIGHT_ID = 'browser-tab-right';
+
+function BrowserTabSvgDefs() {
+  return (
+    <svg width="0" height="0" style={{ position: 'absolute' }}>
+      <defs>
+        <symbol id={BTAB_LEFT_ID} viewBox="0 0 214 36">
+          <path d="M17 0h197v36H0v-2c4.5 0 9-3.5 9-8V8c0-4.5 3.5-8 8-8z" />
+        </symbol>
+        <symbol id={BTAB_RIGHT_ID} viewBox="0 0 214 36">
+          <use xlinkHref={`#${BTAB_LEFT_ID}`} />
+        </symbol>
+      </defs>
+    </svg>
+  );
+}
+
+function BrowserTabBg({ active, hovered }: { active: boolean; hovered: boolean }) {
+  const fill = active
+    ? '#1a1a1a'
+    : hovered
+      ? '#141414'
+      : '#0c0c0c';
+  const stroke = active
+    ? 'rgba(255,255,255,0.16)'
+    : hovered
+      ? 'rgba(255,255,255,0.10)'
+      : 'rgba(255,255,255,0.12)';
+
+  return (
+    <svg className="absolute inset-0 w-full h-full pointer-events-none" preserveAspectRatio="none">
+      <svg width="52%" height="100%">
+        <use xlinkHref={`#${BTAB_LEFT_ID}`} width="214" height="36" fill={fill} stroke={stroke} strokeWidth="0.8" />
+      </svg>
+      <g transform="scale(-1, 1)">
+        <svg width="52%" height="100%" x="-100%" y="0">
+          <use xlinkHref={`#${BTAB_RIGHT_ID}`} width="214" height="36" fill={fill} stroke={stroke} strokeWidth="0.8" />
+        </svg>
+      </g>
+    </svg>
+  );
+}
+
+export default function BrowserPanel({ reservedRight = 0, hideNativeView = false }: { reservedRight?: number; hideNativeView?: boolean }) {
   const [tabs, setTabs] = useState<TabInfo[]>([]);
   const [urlInput, setUrlInput] = useState('');
   const [ghostText, setGhostText] = useState('');
   const [isLoading, setIsLoading] = useState(false);
   const [isFocused, setIsFocused] = useState(false);
   const [executionMode, setExecutionMode] = useState<BrowserExecutionMode>('headed');
-  const [showExtensions, setShowExtensions] = useState(false);
   const viewportRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
   const matchTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -84,6 +129,11 @@ export default function BrowserPanel({ reservedRight = 0 }: { reservedRight?: nu
     const el = viewportRef.current;
     if (!el) return;
     const updateBounds = () => {
+      if (hideNativeView) {
+        // Collapse native BrowserView so it doesn't sit on top of overlays
+        (window as any).clawdia?.browser.setBounds({ x: 0, y: 0, width: 0, height: 0 });
+        return;
+      }
       const rect = el.getBoundingClientRect();
       (window as any).clawdia?.browser.setBounds({
         x: Math.round(rect.x), y: Math.round(rect.y),
@@ -96,7 +146,7 @@ export default function BrowserPanel({ reservedRight = 0 }: { reservedRight?: nu
     observer.observe(el);
     window.addEventListener('resize', updateBounds);
     return () => { observer.disconnect(); window.removeEventListener('resize', updateBounds); };
-  }, [reservedRight]);
+  }, [reservedRight, hideNativeView]);
 
   useEffect(() => {
     const api = (window as any).clawdia?.browser;
@@ -241,42 +291,86 @@ export default function BrowserPanel({ reservedRight = 0 }: { reservedRight?: nu
       ? 'Session-bound'
       : 'Visible';
 
+  const [btabHoveredId, setBtabHoveredId] = useState<string | null>(null);
+
   return (
     <div className="relative flex flex-col h-full bg-surface-0">
-      <div className="drag-region flex items-center h-[46px] bg-surface-1 border-b border-border-subtle px-2 gap-1 flex-shrink-0 overflow-hidden">
-        <div className="flex items-center gap-1 min-w-0 overflow-x-auto no-scrollbar">
-          {tabs.map(tab => (
-            <div
-              key={tab.id}
-              onClick={() => handleSwitchTab(tab.id)}
-              className={`no-drag group flex items-center gap-2 my-[8px] h-[30px] px-[14px] rounded-lg cursor-pointer transition-all duration-100 max-w-[210px] min-w-[120px] flex-shrink-0 text-[13px] border-[1.5px] ${tab.isActive ? 'text-text-primary border-white/[0.12] bg-white/[0.04] shadow-[inset_0_1px_4px_rgba(0,0,0,0.2)]' : 'text-text-tertiary border-white/[0.05] hover:border-white/[0.09] hover:text-text-secondary'}`}
-            >
-              <TabIcon tab={tab} />
-              <span className="text-[12px] font-medium truncate flex-1 min-w-0">{tab.title || 'New Tab'}</span>
-              {tabs.length > 1 && (
-                <button
-                  onClick={(e) => handleCloseTab(tab.id, e)}
-                  className="flex-shrink-0 flex items-center justify-center w-[18px] h-[18px] rounded-md opacity-0 group-hover:opacity-60 hover:!opacity-100 hover:bg-white/[0.1] transition-all cursor-pointer"
+      <BrowserTabSvgDefs />
+      {/* Chrome-style browser tab strip */}
+      <div
+        className="drag-region flex items-end px-1 pt-[6px] flex-shrink-0 overflow-hidden"
+        style={{ background: '#101010', height: 42, position: 'relative' }}
+      >
+        <div className="flex items-end min-w-0 overflow-x-auto no-scrollbar">
+          {tabs.map((tab, index) => {
+            const isHovered = btabHoveredId === tab.id;
+            return (
+              <div
+                key={tab.id}
+                onClick={() => handleSwitchTab(tab.id)}
+                onMouseEnter={() => { if (!tab.isActive) setBtabHoveredId(tab.id); }}
+                onMouseLeave={() => setBtabHoveredId(null)}
+                className="no-drag relative flex items-center select-none min-w-[100px] max-w-[210px] flex-shrink-0 group cursor-pointer"
+                style={{
+                  height: 36,
+                  marginLeft: index === 0 ? 4 : -8,
+                  zIndex: tab.isActive ? 3 : 1,
+                }}
+              >
+                <BrowserTabBg active={tab.isActive} hovered={isHovered} />
+                <div
+                  className="relative flex items-center gap-2 w-full h-full pointer-events-auto"
+                  style={{
+                    padding: '0 16px',
+                    color: tab.isActive ? '#f0f0f0' : isHovered ? 'rgba(255,255,255,0.70)' : 'rgba(255,255,255,0.40)',
+                    transition: 'color 0.15s',
+                  }}
                 >
-                  <svg width="8" height="8" viewBox="0 0 10 10" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round">
-                    <line x1="2" y1="2" x2="8" y2="8" />
-                    <line x1="8" y1="2" x2="2" y2="8" />
-                  </svg>
-                </button>
-              )}
-            </div>
-          ))}
+                  <TabIcon tab={tab} />
+                  <span
+                    className="text-[12px] font-medium truncate flex-1 min-w-0"
+                    style={{
+                      maskImage: 'linear-gradient(90deg, #000 0%, #000 calc(100% - 20px), transparent)',
+                      WebkitMaskImage: 'linear-gradient(90deg, #000 0%, #000 calc(100% - 20px), transparent)',
+                    }}
+                  >
+                    {tab.title || 'New Tab'}
+                  </span>
+                  {tabs.length > 1 && (
+                    <button
+                      onClick={(e) => handleCloseTab(tab.id, e)}
+                      className="flex-shrink-0 flex items-center justify-center w-[16px] h-[16px] rounded-full transition-all cursor-pointer hover:bg-white/[0.10]"
+                      style={{
+                        color: tab.isActive || isHovered ? 'rgba(255,255,255,0.4)' : 'transparent',
+                      }}
+                    >
+                      <svg width="8" height="8" viewBox="0 0 10 10" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round">
+                        <line x1="2" y1="2" x2="8" y2="8" />
+                        <line x1="8" y1="2" x2="2" y2="8" />
+                      </svg>
+                    </button>
+                  )}
+                </div>
+              </div>
+            );
+          })}
         </div>
-        <button onClick={handleNewTab} className="no-drag flex items-center justify-center h-full px-[10px] text-text-muted hover:text-text-secondary hover:bg-white/[0.04] transition-colors cursor-pointer flex-shrink-0" title="New tab">
+        <button
+          onClick={handleNewTab}
+          className="no-drag flex items-center justify-center w-[28px] h-[28px] mb-[2px] ml-1 rounded-full text-text-muted hover:text-text-primary hover:bg-white/[0.06] transition-all cursor-pointer flex-shrink-0"
+          title="New tab"
+        >
           <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round">
             <line x1="12" y1="5" x2="12" y2="19" />
             <line x1="5" y1="12" x2="19" y2="12" />
           </svg>
         </button>
         <div className="flex-1 drag-region" />
+        {/* Bottom line */}
+        <div className="absolute bottom-0 left-0 right-0 h-[1px]" style={{ background: 'rgba(255,255,255,0.08)' }} />
       </div>
 
-      <div className="flex items-center gap-1.5 px-2 h-[40px] bg-surface-1 border-b border-border-subtle flex-shrink-0">
+      <div className="flex items-center gap-1.5 px-2 h-[40px] bg-[#111111] border-b border-border-subtle flex-shrink-0">
         <div className="flex items-center gap-0.5">
           <button onClick={handleBack} className="flex items-center justify-center w-7 h-7 rounded-lg text-text-muted hover:text-text-secondary hover:bg-white/[0.04] transition-colors cursor-pointer">
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
@@ -324,7 +418,7 @@ export default function BrowserPanel({ reservedRight = 0 }: { reservedRight?: nu
               onKeyDown={handleKeyDown}
               onFocus={handleFocus}
               onBlur={handleBlur}
-              className={`w-full h-[30px] bg-surface-0/60 text-text-secondary text-xs px-3 rounded-lg border border-transparent hover:border-border focus:border-accent/30 focus:text-text-primary outline-none transition-all font-mono${isNewTab ? ' shadow-[0_0_0_2px_rgba(99,179,237,0.4)]' : ''}`}
+              className={`w-full h-[30px] bg-[#1a1a1a] text-text-secondary text-xs px-3 rounded-lg border border-white/[0.06] hover:border-white/[0.12] focus:border-white/[0.20] focus:text-text-primary outline-none transition-all font-mono${isNewTab ? ' shadow-[0_0_0_2px_rgba(255,255,255,0.08)]' : ''}`}
               placeholder="Enter URL or search..."
               autoComplete="off"
               spellCheck={false}
@@ -342,17 +436,6 @@ export default function BrowserPanel({ reservedRight = 0 }: { reservedRight?: nu
           <span className="inline-flex items-center h-[22px] px-2 rounded-md border border-white/[0.08] bg-white/[0.04] text-[10px] uppercase tracking-[0.12em] text-text-secondary/80">
             {modeLabel}
           </span>
-          <button
-            onClick={() => setShowExtensions(true)}
-            title="Extensions"
-            className="flex items-center justify-center w-7 h-7 rounded-lg text-text-muted hover:text-text-secondary hover:bg-white/[0.04] transition-colors cursor-pointer"
-          >
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
-              <path d="M20.24 12.24a6 6 0 0 0-8.49-8.49L5 10.5V19h8.5z" />
-              <line x1="16" y1="8" x2="2" y2="22" />
-              <line x1="17.5" y1="15" x2="9" y2="15" />
-            </svg>
-          </button>
         </div>
       </div>
 
@@ -382,12 +465,6 @@ export default function BrowserPanel({ reservedRight = 0 }: { reservedRight?: nu
         )}
       </div>
 
-      {/* Extensions overlay */}
-      {showExtensions && (
-        <div className="absolute inset-0 z-50 bg-surface-0">
-          <ExtensionsPanel onBack={() => setShowExtensions(false)} />
-        </div>
-      )}
     </div>
   );
 }

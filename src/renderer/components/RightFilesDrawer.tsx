@@ -531,7 +531,7 @@ export default function RightFilesDrawer({ open, onClose, conversationId }: Righ
         className="no-drag fixed bottom-0 right-0 top-[36px] z-50 flex flex-col"
         style={{
           width: '280px',
-          background: '#0d0d12',
+          background: '#000000',
           borderLeft: '1px solid rgba(255,255,255,0.08)',
           boxShadow: open ? '-8px 0 32px rgba(0,0,0,0.6), -2px 0 8px rgba(0,0,0,0.4)' : 'none',
           transform: open ? 'translateX(0)' : 'translateX(100%)',

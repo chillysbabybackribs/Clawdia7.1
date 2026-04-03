@@ -3,20 +3,34 @@ import { IPC, IPC_EVENTS } from '../ipc-channels';
 import { DEFAULT_MODEL_BY_PROVIDER } from '../../shared/model-registry';
 import type { AgentDefinition, AgentBuilderCompileInput } from '../../shared/types';
 import { agentLoop } from '../agent/agentLoop';
-import { PipelineOrchestrator } from '../core/PipelineOrchestrator';
+import { runConcurrent } from '../core/executors/ConcurrentExecutor';
 import { loadSettings } from '../settingsStore';
 import { createConversation } from '../db';
 import { createAgent, getAgent, listAgents, updateAgent, deleteAgent } from '../db/agents';
+import { createNewTask, completeTask, failTask, cancelTask } from '../taskTracker';
 import type { SessionManager } from '../SessionManager';
 import type { ElectronBrowserService } from '../core/browser/ElectronBrowserService';
+
+let registered = false;
+let browserServiceRef: ElectronBrowserService | null = null;
 
 export function registerAgentIpc(
   sessionManager: SessionManager,
   browserService: ElectronBrowserService,
 ): void {
+  browserServiceRef = browserService;
+
   function getMainWindow(): BrowserWindow | undefined {
     return BrowserWindow.getAllWindows()[0];
   }
+
+  const service = (): ElectronBrowserService => {
+    if (!browserServiceRef) throw new Error('Browser service not initialized');
+    return browserServiceRef;
+  };
+
+  if (registered) return;
+  registered = true;
 
   function resolveProviderConfig() {
     const settings = loadSettings();
@@ -78,21 +92,28 @@ export function registerAgentIpc(
 
     const abort = new AbortController();
     const convId = `conv-agent-${Date.now()}`;
+    const taskId = createNewTask(convId, agentDef.goal, 'concurrent');
     const now = new Date().toISOString();
     createConversation({ id: convId, title: agentDef.name, mode: 'chat', created_at: now, updated_at: now });
 
     try {
-      await PipelineOrchestrator.run(agentDef.goal, {
-        provider, apiKey, model,
+      await runConcurrent({
         conversationId: convId,
+        taskId,
+        prompt: agentDef.goal,
         signal: abort.signal,
-        browserService,
-        unrestrictedMode: settings.unrestrictedMode,
+        onThinking: () => {},
         onStateChanged: (state) => getMainWindow()?.webContents.send(IPC_EVENTS.SWARM_STATE_CHANGED, state),
         onText: () => {},
       });
+      completeTask(taskId);
       return { ok: true, conversationId: convId };
     } catch (e: any) {
+      if (e?.name === 'AbortError' || e?.message === 'AbortError') {
+        cancelTask(taskId);
+      } else {
+        failTask(taskId, e?.message ?? String(e));
+      }
       return { ok: false, error: e.message };
     }
   });
@@ -107,7 +128,7 @@ export function registerAgentIpc(
     let pageUrl = '';
     let pageTitle = '';
     try {
-      const tabs = await browserService.listTabs();
+      const tabs = await service().listTabs();
       const activeTab = tabs.find((t: any) => t.active);
       if (activeTab) { pageUrl = activeTab.url || ''; pageTitle = activeTab.title || ''; }
     } catch { /* browser may not be available */ }
@@ -128,7 +149,7 @@ export function registerAgentIpc(
         provider, apiKey, model, runId,
         conversationId: convId,
         signal: abort.signal,
-        browserService,
+        browserService: service(),
         unrestrictedMode: settings.unrestrictedMode,
         onText: (delta) => getMainWindow()?.webContents.send(IPC_EVENTS.CHAT_STREAM_TEXT, delta),
         onThinking: (t) => getMainWindow()?.webContents.send(IPC_EVENTS.CHAT_THINKING, t),
@@ -163,7 +184,7 @@ export function registerAgentIpc(
         provider, apiKey, model, runId,
         conversationId: convId,
         signal: abort.signal,
-        browserService,
+        browserService: service(),
         unrestrictedMode: settings.unrestrictedMode,
         onText: (delta) => getMainWindow()?.webContents.send(IPC_EVENTS.CHAT_STREAM_TEXT, delta),
         onThinking: (t) => getMainWindow()?.webContents.send(IPC_EVENTS.CHAT_THINKING, t),
@@ -196,7 +217,7 @@ export function registerAgentIpc(
         provider, apiKey, model, runId,
         conversationId: convId,
         signal: abort.signal,
-        browserService,
+        browserService: service(),
         unrestrictedMode: settings.unrestrictedMode,
         onText: (delta) => getMainWindow()?.webContents.send(IPC_EVENTS.CHAT_STREAM_TEXT, delta),
         onThinking: (t) => getMainWindow()?.webContents.send(IPC_EVENTS.CHAT_THINKING, t),

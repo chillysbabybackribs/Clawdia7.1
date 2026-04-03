@@ -1,6 +1,6 @@
 // src/main/core/cli/browserTools.ts
 import type Anthropic from '@anthropic-ai/sdk';
-import type { BrowserService } from '../browser/BrowserService';
+import type { BrowserService, BrowserServiceResult } from '../browser/BrowserService';
 import { openFileInBrowser, resolveOpenMode, type BrowserOpenMode } from '../browser/fileOpen';
 
 export const BROWSER_TOOLS: Anthropic.Tool[] = [
@@ -205,6 +205,172 @@ export const BROWSER_TOOLS: Anthropic.Tool[] = [
     input_schema: { type: 'object' as const, properties: {} },
   },
   {
+    name: 'browser_stop_loading',
+    description: 'Stop the current page from loading. Use when you have the content you need and don\'t want to wait for remaining resources.',
+    input_schema: { type: 'object' as const, properties: {} },
+  },
+  {
+    name: 'browser_wait_for_network_idle',
+    description: 'Wait until no network requests are in-flight for a specified idle period. More reliable than wait_for when you need to confirm a page is truly done loading (all XHR/fetch requests completed, not just DOM ready). Returns early once idle, or errors on timeout.',
+    input_schema: {
+      type: 'object' as const,
+      properties: {
+        idleMs: { type: 'number', description: 'Milliseconds of network silence to consider idle (default: 500)' },
+        timeoutMs: { type: 'number', description: 'Max wait time in milliseconds (default: 30000)' },
+      },
+    },
+  },
+  {
+    name: 'browser_wait_for_navigation',
+    description: 'Wait for a full page navigation to complete (URL change + loading finished). Use after clicking a link or submitting a form to wait for the new page to load. More precise than wait_for when expecting a navigation event rather than an element.',
+    input_schema: {
+      type: 'object' as const,
+      properties: {
+        timeoutMs: { type: 'number', description: 'Max wait time in milliseconds (default: 15000)' },
+      },
+    },
+  },
+  {
+    name: 'browser_get_network_activity',
+    description: 'Get a snapshot of network/loading activity: document readyState, resource count, transfer sizes, recent resource names, and page timing (domContentLoaded, loadComplete, domInteractive). Use for visibility into what the page is doing.',
+    input_schema: { type: 'object' as const, properties: {} },
+  },
+  {
+    name: 'browser_set_user_agent',
+    description: 'Override the User-Agent string for the current browser tab. Use to present a realistic desktop browser fingerprint and avoid bot detection.',
+    input_schema: {
+      type: 'object' as const,
+      properties: {
+        userAgent: { type: 'string', description: 'User-Agent string to set (e.g. "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36")' },
+      },
+      required: ['userAgent'],
+    },
+  },
+  {
+    name: 'browser_click_at',
+    description: 'Click at exact viewport pixel coordinates (x, y). Use when no CSS selector is available — e.g. canvas elements, WebGL surfaces, game UIs, PDF viewers. Coordinates are viewport-relative (same as getBoundingClientRect). Optional button: "left" (default), "right", or "middle".',
+    input_schema: {
+      type: 'object' as const,
+      properties: {
+        x:      { type: 'number', description: 'Horizontal viewport coordinate in CSS pixels' },
+        y:      { type: 'number', description: 'Vertical viewport coordinate in CSS pixels' },
+        button: { type: 'string', enum: ['left', 'right', 'middle'], description: 'Mouse button (default: left)' },
+      },
+      required: ['x', 'y'],
+    },
+  },
+  {
+    name: 'browser_double_click_at',
+    description: 'Double-click at exact viewport pixel coordinates (x, y). Use for canvas, game, or WebGL targets that require double-click without a DOM selector.',
+    input_schema: {
+      type: 'object' as const,
+      properties: {
+        x: { type: 'number', description: 'Horizontal viewport coordinate in CSS pixels' },
+        y: { type: 'number', description: 'Vertical viewport coordinate in CSS pixels' },
+      },
+      required: ['x', 'y'],
+    },
+  },
+  {
+    name: 'browser_drag_coords',
+    description: 'Drag from one viewport coordinate pair to another. Use for canvas drag targets, sliders, resizers, or any draggable that lacks a clean CSS selector. Generates N intermediate mouseMoved events for smooth motion.',
+    input_schema: {
+      type: 'object' as const,
+      properties: {
+        fromX:  { type: 'number', description: 'Start X in CSS pixels' },
+        fromY:  { type: 'number', description: 'Start Y in CSS pixels' },
+        toX:    { type: 'number', description: 'End X in CSS pixels' },
+        toY:    { type: 'number', description: 'End Y in CSS pixels' },
+        steps:  { type: 'number', description: 'Intermediate move steps (default: 10)' },
+      },
+      required: ['fromX', 'fromY', 'toX', 'toY'],
+    },
+  },
+  {
+    name: 'browser_move_to',
+    description: 'Move the agent mouse pointer to viewport coordinates without clicking. Triggers :hover CSS states and tooltip timers at the target position.',
+    input_schema: {
+      type: 'object' as const,
+      properties: {
+        x: { type: 'number', description: 'Horizontal viewport coordinate in CSS pixels' },
+        y: { type: 'number', description: 'Vertical viewport coordinate in CSS pixels' },
+      },
+      required: ['x', 'y'],
+    },
+  },
+  {
+    name: 'browser_scroll_at',
+    description: 'Scroll at specific viewport coordinates. Use when the scrollable area is not the document root (e.g. a sidebar, modal, or split-panel). deltaY: positive scrolls down, negative scrolls up. deltaX: positive scrolls right.',
+    input_schema: {
+      type: 'object' as const,
+      properties: {
+        x:      { type: 'number', description: 'Horizontal coordinate to deliver the scroll event' },
+        y:      { type: 'number', description: 'Vertical coordinate to deliver the scroll event' },
+        deltaY: { type: 'number', description: 'Vertical scroll delta in pixels (default: 500, positive = down)' },
+        deltaX: { type: 'number', description: 'Horizontal scroll delta in pixels (default: 0)' },
+      },
+      required: ['x', 'y'],
+    },
+  },
+  {
+    name: 'browser_right_click',
+    description: 'Right-click an element identified by a CSS selector. Triggers contextmenu event handlers and browser context menus.',
+    input_schema: {
+      type: 'object' as const,
+      properties: {
+        selector: { type: 'string', description: 'CSS selector of the element to right-click' },
+      },
+      required: ['selector'],
+    },
+  },
+  {
+    name: 'browser_double_click',
+    description: 'Double-click an element identified by a CSS selector. Selects words in text fields, triggers dblclick event handlers, and activates items that require double-click (e.g. file manager entries, tree nodes).',
+    input_schema: {
+      type: 'object' as const,
+      properties: {
+        selector: { type: 'string', description: 'CSS selector of the element to double-click' },
+      },
+      required: ['selector'],
+    },
+  },
+  {
+    name: 'browser_drag',
+    description: 'Drag from one element to another on the page. Uses a CDP mouse-event sequence (mousePressed → mouseMoved steps → mouseReleased) so it works correctly on sortable lists, sliders, canvas elements, and other drag targets. No OS cursor movement occurs.',
+    input_schema: {
+      type: 'object' as const,
+      properties: {
+        fromSelector: { type: 'string', description: 'CSS selector of the element to drag from' },
+        toSelector:   { type: 'string', description: 'CSS selector of the element to drag to' },
+        steps:        { type: 'number', description: 'Number of intermediate mouseMoved events (default: 10, increase for smoother drags on sensitive targets)' },
+      },
+      required: ['fromSelector', 'toSelector'],
+    },
+  },
+  {
+    name: 'browser_verify_action',
+    description: `Execute a browser input action and verify it visibly changed the page.
+
+Captures a screenshot before and after the action, computes a pixel-diff ratio, and returns { ok, changed, diffRatio } alongside the inner action result.
+
+Use this when you need confidence that a click, type, or drag actually took effect — e.g. after clicking a button that should open a modal, submitting a form, or interacting with a canvas element.
+
+changed = true when at least 0.2% of viewport pixels differ (configurable via minDiffRatio).
+diffRatio is in [0, 1]: 0 = no change, 1 = every pixel changed.
+
+The inner "tool" must be a browser input tool name (browser_click, browser_type, browser_click_at, browser_drag, etc.).`,
+    input_schema: {
+      type: 'object' as const,
+      properties: {
+        tool:        { type: 'string', description: 'Name of the browser input tool to execute (e.g. "browser_click")' },
+        input:       { type: 'object', description: 'Input parameters for the inner tool (same schema as calling it directly)', additionalProperties: true },
+        settleMs:    { type: 'number', description: 'Milliseconds to wait after the action before diffing (default: 300)' },
+        minDiffRatio:{ type: 'number', description: 'Minimum pixel change fraction to count as "changed" (default: 0.002)' },
+      },
+      required: ['tool', 'input'],
+    },
+  },
+  {
     name: 'browser_open_file',
     description: `Open a local file in the browser. Supports three modes:
 - review (default for most files): raw file content in a clean read-only surface with line numbers and a copy button. Use for .txt, .md, .json, .log, .csv, .yaml, source code, etc.
@@ -319,6 +485,57 @@ async function executeOnTab(
       return browser.selectOnTab(tabId, input.selector as string, input.value as string);
     case 'browser_hover':
       return browser.hoverOnTab(tabId, input.selector as string);
+    case 'browser_right_click':
+      return browser.rightClickOnTab(tabId, input.selector as string);
+    case 'browser_double_click':
+      return browser.doubleClickOnTab(tabId, input.selector as string);
+    case 'browser_click_at':
+      return browser.clickAtOnTab(
+        tabId,
+        input.x as number,
+        input.y as number,
+        (input.button as 'left' | 'right' | 'middle' | undefined) ?? 'left',
+      );
+    case 'browser_double_click_at':
+      return browser.doubleClickAtOnTab(tabId, input.x as number, input.y as number);
+    case 'browser_drag_coords':
+      return browser.dragCoordsOnTab(
+        tabId,
+        input.fromX as number,
+        input.fromY as number,
+        input.toX as number,
+        input.toY as number,
+        (input.steps as number | undefined) ?? 10,
+      );
+    case 'browser_move_to':
+      return browser.moveToOnTab(tabId, input.x as number, input.y as number);
+    case 'browser_scroll_at':
+      return browser.scrollAtOnTab(
+        tabId,
+        input.x as number,
+        input.y as number,
+        (input.deltaX as number | undefined) ?? 0,
+        (input.deltaY as number | undefined) ?? 500,
+      );
+    case 'browser_verify_action': {
+      const innerTool = input.tool as string;
+      const innerInput = (input.input ?? {}) as BrowserToolInput;
+      const settleMs = (input.settleMs as number | undefined) ?? 300;
+      const minDiffRatio = (input.minDiffRatio as number | undefined) ?? 0.002;
+      return browser.verifyActionOnTab(
+        tabId,
+        () => executeOnTab(innerTool, innerInput, browser, tabId) as Promise<BrowserServiceResult>,
+        minDiffRatio,
+        settleMs,
+      );
+    }
+    case 'browser_drag':
+      return browser.dragOnTab(
+        tabId,
+        input.fromSelector as string,
+        input.toSelector as string,
+        (input.steps as number | undefined) ?? 10,
+      );
     case 'browser_key_press':
       return browser.keyPressOnTab(tabId, input.key as string);
     case 'browser_close_tab':
@@ -332,6 +549,16 @@ async function executeOnTab(
     case 'browser_forward':
       await browser.forwardOnTab(tabId);
       return { ok: true };
+    case 'browser_stop_loading':
+      return browser.stopLoadingOnTab(tabId);
+    case 'browser_wait_for_network_idle':
+      return browser.waitForNetworkIdleOnTab(tabId, input.idleMs as number | undefined, input.timeoutMs as number | undefined);
+    case 'browser_wait_for_navigation':
+      return browser.waitForNavigationOnTab(tabId, input.timeoutMs as number | undefined);
+    case 'browser_get_network_activity':
+      return browser.getNetworkActivityOnTab(tabId);
+    case 'browser_set_user_agent':
+      return browser.setUserAgentOnTab(tabId, input.userAgent as string);
     case 'browser_open_file': {
       const conversationId = (input._conversationId as string | undefined);
       return openFileInBrowser(
@@ -412,6 +639,16 @@ async function executeOnActiveTab(
     case 'browser_forward':
       await browser.forward();
       return { ok: true };
+    case 'browser_stop_loading':
+      return (browser as ElectronBrowserService).stopLoading();
+    case 'browser_wait_for_network_idle':
+      return (browser as ElectronBrowserService).waitForNetworkIdle(input.idleMs as number | undefined, input.timeoutMs as number | undefined);
+    case 'browser_wait_for_navigation':
+      return (browser as ElectronBrowserService).waitForNavigation(input.timeoutMs as number | undefined);
+    case 'browser_get_network_activity':
+      return (browser as ElectronBrowserService).getNetworkActivity();
+    case 'browser_set_user_agent':
+      return (browser as ElectronBrowserService).setUserAgent(input.userAgent as string);
     case 'browser_open_file':
       return openFileInBrowser(
         input.filePath as string,

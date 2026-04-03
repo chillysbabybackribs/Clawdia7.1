@@ -56,7 +56,7 @@ textarea { field-sizing: content; }
 .markdown-prose {
   font-size: 1rem;
   line-height: 1.72;
-  color: #e0e0e4;
+  color: #e8e8e8;
   word-wrap: break-word;
   overflow-wrap: break-word;
 }
@@ -64,7 +64,7 @@ textarea { field-sizing: content; }
 .markdown-prose p:last-child { margin-bottom: 0; }
 
 .markdown-prose h1, .markdown-prose h2, .markdown-prose h3, .markdown-prose h4 {
-  color: #ededf0; font-weight: 600; line-height: 1.3; margin-top: 1.4em; margin-bottom: 0.5em;
+  color: #ffffff; font-weight: 600; line-height: 1.3; margin-top: 1.4em; margin-bottom: 0.5em;
 }
 .markdown-prose h1:first-child, .markdown-prose h2:first-child, .markdown-prose h3:first-child { margin-top: 0; }
 .markdown-prose h1 { font-size: 1.25em; }
@@ -72,14 +72,16 @@ textarea { field-sizing: content; }
 .markdown-prose h3 { font-size: 1em; }
 .markdown-prose h4 { font-size: 0.95em; color: #bcbcc6; }
 
-.markdown-prose strong { color: #ededf0; font-weight: 600; }
+.markdown-prose strong { color: #ffffff; font-weight: 600; }
 .markdown-prose em { font-style: italic; color: #ccccd4; }
 
 .markdown-prose a {
-  color: #1A73E8; text-decoration: none;
+  color: #a0a0a0; text-decoration: underline;
+  text-decoration-color: rgba(255,255,255,0.25);
+  text-underline-offset: 2px;
   transition: color 0.15s;
 }
-.markdown-prose a:hover { color: #4d96f0; }
+.markdown-prose a:hover { color: #ffffff; }
 
 .markdown-prose code:not(pre code) {
   font-family: 'JetBrains Mono', 'Fira Code', Consolas, monospace;
@@ -90,7 +92,7 @@ textarea { field-sizing: content; }
 
 .markdown-prose pre {
   margin: 0.8em 0; padding: 0; border-radius: 10px; overflow: hidden;
-  background: #0f0f13; border: 1px solid rgba(255, 255, 255, 0.05);
+  background: #0a0a0a; border: 1px solid rgba(255, 255, 255, 0.08);
 }
 .markdown-prose pre code {
   display: block; padding: 1em 1.2em;
@@ -124,8 +126,8 @@ textarea { field-sizing: content; }
 
 .markdown-prose blockquote {
   margin: 0.8em 0; padding: 0.6em 1em;
-  border-left: 3px solid rgba(26, 115, 232, 0.4);
-  background: rgba(26, 115, 232, 0.05); border-radius: 0 6px 6px 0; color: #bcbcc8;
+  border-left: 3px solid rgba(255, 255, 255, 0.20);
+  background: rgba(255, 255, 255, 0.03); border-radius: 0 6px 6px 0; color: #b0b0b0;
 }
 .markdown-prose blockquote p { margin-bottom: 0.3em; }
 .markdown-prose hr { border: none; height: 1px; background: rgba(255, 255, 255, 0.06); margin: 1.2em 0; }
@@ -139,6 +141,46 @@ textarea { field-sizing: content; }
 .chat-file-ref:hover,
 .chat-link-preview:hover {
   border-color: rgba(255, 255, 255, 0.14);
+}
+
+/* ══════════════════════════════════════════════════
+   STREAMING RESPONSE CONTAINER
+   ══════════════════════════════════════════════════ */
+
+/* Structured container for streaming responses */
+.stream-response-container {
+  position: relative;
+  border-left: 2px solid transparent;
+  padding-left: 12px;
+  margin-left: 2px;
+}
+
+.stream-response-container.is-streaming {
+  border-left-color: rgba(255, 255, 255, 0.06);
+}
+
+.stream-response-container.is-streaming::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: -1px;
+  width: 2px;
+  height: 100%;
+  background: linear-gradient(180deg,
+    rgba(255, 255, 255, 0.15) 0%,
+    rgba(255, 255, 255, 0.04) 60%,
+    transparent 100%);
+  border-radius: 1px;
+  animation: stream-bar-pulse 2.4s ease-in-out infinite;
+}
+
+@keyframes stream-bar-pulse {
+  0%, 100% { opacity: 0.6; }
+  50% { opacity: 1; }
+}
+
+.stream-response-container.is-complete {
+  border-left-color: transparent;
 }
 
 /* ── Streaming cursor ── */
@@ -161,7 +203,7 @@ textarea { field-sizing: content; }
   content: '▋';
   display: inline-block;
   margin-left: 1px;
-  color: rgba(255, 255, 255, 0.55);
+  color: rgba(255, 255, 255, 0.45);
   animation: cursor-blink 0.9s step-start infinite;
   font-size: 0.85em;
   vertical-align: baseline;
@@ -173,17 +215,47 @@ textarea { field-sizing: content; }
 }
 
 /* ══════════════════════════════════════════════════
+   TOOL ACTIVITY — Monochrome + Shimmer
+   ══════════════════════════════════════════════════ */
+
+.tool-activity-live {
+  border-left: 1px solid rgba(255, 255, 255, 0.05);
+  padding-left: 10px;
+  margin-left: 1px;
+}
+
+.tool-row {
+  position: relative;
+}
+
+/* Pulsing dot for running tool status */
+@keyframes tool-dot-pulse {
+  0%, 100% { opacity: 0.3; transform: scale(0.9); }
+  50% { opacity: 0.8; transform: scale(1.1); }
+}
+.tool-status-dot {
+  animation: tool-dot-pulse 1.6s ease-in-out infinite;
+}
+
+/* Tool summary (collapsed state) gets a subtle left accent */
+.tool-summary {
+  border-left: 1px solid rgba(255, 255, 255, 0.05);
+  padding-left: 10px;
+  margin-left: 1px;
+}
+
+/* ══════════════════════════════════════════════════
    STATUS LINE — Shimmer + crossfade
    ══════════════════════════════════════════════════ */
 
 .status-line-container { min-height: 28px; max-height: 28px; }
 
 @keyframes status-dot-pulse {
-  0%, 100% { opacity: 0.4; box-shadow: 0 0 0 0 rgba(26, 115, 232, 0); }
-  50% { opacity: 1; box-shadow: 0 0 8px 2px rgba(26, 115, 232, 0.34); }
+  0%, 100% { opacity: 0.4; box-shadow: 0 0 0 0 rgba(255, 255, 255, 0); }
+  50% { opacity: 1; box-shadow: 0 0 8px 2px rgba(255, 255, 255, 0.25); }
 }
 .status-shimmer-dot {
-  width: 6px; height: 6px; border-radius: 50%; background: #1A73E8; flex-shrink: 0;
+  width: 6px; height: 6px; border-radius: 50%; background: #ffffff; flex-shrink: 0;
   animation: status-dot-pulse 2s ease-in-out infinite;
 }
 
@@ -218,6 +290,26 @@ textarea { field-sizing: content; }
   color: transparent;
   animation: status-shimmer 2.8s linear infinite reverse;
   display: inline-block;
+}
+
+/* Active tool label shimmer — monochrome sweep while running */
+.tool-label-shimmer {
+  color: transparent;
+  background: linear-gradient(90deg,
+    rgba(255, 255, 255, 0.30) 0%,
+    rgba(255, 255, 255, 0.30) 35%,
+    rgba(255, 255, 255, 0.72) 50%,
+    rgba(255, 255, 255, 0.30) 65%,
+    rgba(255, 255, 255, 0.30) 100%);
+  background-size: 280% 100%;
+  background-clip: text;
+  -webkit-background-clip: text;
+  animation: tool-label-sweep 2.2s ease-in-out infinite;
+}
+
+@keyframes tool-label-sweep {
+  0%   { background-position: 100% center; }
+  100% { background-position: -100% center; }
 }
 
 /* Sweeping line above thinking / pre-stream shimmer */

@@ -9,7 +9,7 @@ function agentStatusDot(status: SwarmAgent['status']): ReactElement {
     width: 6, height: 6, borderRadius: '50%', flexShrink: 0,
   };
   if (status === 'running') {
-    return <span style={{ ...style, background: '#1A73E8', animation: 'pb-pulse 1.5s infinite' }} />;
+    return <span style={{ ...style, background: '#ffffff', animation: 'pb-pulse 1.5s infinite' }} />;
   }
   if (status === 'done') {
     return <span style={{ ...style, background: 'rgba(255,255,255,0.2)' }} />;
@@ -42,7 +42,7 @@ function AgentRow({ agent }: { agent: SwarmAgent }) {
   };
 
   const labelColor = isActive ? '#e0e0e4' : isDone ? '#6a6a7a' : isFailed ? '#b05050' : '#3a3a4a';
-  const metaColor = isActive ? '#4d96f0' : isDone ? '#6a6a7a' : isFailed ? '#b05050' : '#3a3a4a';
+  const metaColor = isActive ? '#a0a0a0' : isDone ? '#6a6a7a' : isFailed ? '#b05050' : '#3a3a4a';
 
   const meta = isFailed
     ? `failed${agent.error ? ` · ${agent.error.slice(0, 40)}` : ''}`
@@ -105,7 +105,7 @@ export default function PipelineBlock() {
             border: '1px solid rgba(255,255,255,0.06)',
             borderRadius: 8,
             overflow: 'hidden',
-            background: '#0f0f13',
+            background: '#0a0a0a',
             margin: '4px 0',
             cursor: 'pointer',
           }}
@@ -137,7 +137,7 @@ export default function PipelineBlock() {
           border: '1px solid rgba(26,115,232,0.25)',
           borderRadius: 8,
           overflow: 'hidden',
-          background: '#0f0f13',
+          background: '#0a0a0a',
           margin: '4px 0',
         }}
       >
@@ -147,7 +147,7 @@ export default function PipelineBlock() {
           onClick={() => setExpanded(e => !e)}
         >
           <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-            <span style={{ width: 7, height: 7, borderRadius: '50%', background: '#1A73E8', display: 'inline-block', animation: 'pb-pulse 1.5s infinite' }} />
+            <span style={{ width: 7, height: 7, borderRadius: '50%', background: '#ffffff', display: 'inline-block', animation: 'pb-pulse 1.5s infinite' }} />
             <span style={{ color: '#e0e0e4', fontSize: 12, fontWeight: 500 }}>Running pipeline</span>
             <span style={{ color: '#5a5a68', fontSize: 11 }}>· {state.agents.length} agents</span>
           </div>

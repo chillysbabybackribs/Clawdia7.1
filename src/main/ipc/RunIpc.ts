@@ -2,13 +2,18 @@ import { ipcMain } from 'electron';
 import * as fs from 'fs';
 import * as path from 'path';
 import { IPC } from '../ipc-channels';
-import { getRuns, getRunEvents, updateRun, getDb } from '../db';
+import { getRunEvents, getDb } from '../db';
 import { listActiveBudgets } from '../db/spending';
 import { cancelLoop } from '../agent/loopControl';
 import { runClaudeCode } from '../claudeCodeClient';
 import type { TerminalSessionController } from '../core/terminal/TerminalSessionController';
 
-export function registerRunIpc(terminalController?: TerminalSessionController): void {
+let registered = false;
+
+export function registerRunIpc(_terminalController?: TerminalSessionController): void {
+  if (registered) return;
+  registered = true;
+
   // ── Run queries ─────────────────────────────────────────────────────────────
   ipcMain.handle(IPC.RUN_GET, (_e, runId: string) => {
     try { return getDb().prepare('SELECT * FROM runs WHERE id = ?').get(runId) ?? null; }
@@ -16,12 +21,12 @@ export function registerRunIpc(terminalController?: TerminalSessionController): 
   });
 
   ipcMain.handle(IPC.RUN_ARTIFACTS, (_e, runId: string) => {
-    try { return getRunEvents(runId).filter((e: any) => e.event_type === 'artifact'); }
+    try { return getRunEvents(runId).filter((e: any) => e.kind === 'artifact'); }
     catch { return []; }
   });
 
   ipcMain.handle(IPC.RUN_CHANGES, (_e, runId: string) => {
-    try { return getRunEvents(runId).filter((e: any) => e.event_type === 'file_change'); }
+    try { return getRunEvents(runId).filter((e: any) => e.kind === 'file_change'); }
     catch { return []; }
   });
 
@@ -45,12 +50,25 @@ export function registerRunIpc(terminalController?: TerminalSessionController): 
 
   // ── Process management ──────────────────────────────────────────────────────
   ipcMain.handle(IPC.PROCESS_LIST, () => {
-    const runs = getRuns('');
-    return runs.filter((r) => r.status === 'running').map((r) => ({
+    const runs = getDb()
+      .prepare(`SELECT * FROM runs ORDER BY started_at DESC LIMIT 200`)
+      .all() as Array<any>;
+    return runs.map((r) => ({
       id: r.id,
-      title: r.title,
+      conversationId: r.conversation_id,
       status: r.status,
-      startedAt: r.started_at,
+      summary: r.title || r.goal || 'Assistant Task',
+      startedAt: Date.parse(r.started_at),
+      completedAt: r.completed_at ? Date.parse(r.completed_at) : undefined,
+      toolCallCount: r.tool_call_count ?? 0,
+      toolCompletedCount: r.tool_completed_count ?? 0,
+      toolFailedCount: r.tool_failed_count ?? 0,
+      error: r.error ?? undefined,
+      isAttached: false,
+      wasDetached: Boolean(r.was_detached),
+      provider: r.provider ?? undefined,
+      model: r.model ?? undefined,
+      workflowStage: r.workflow_stage ?? undefined,
     }));
   });
 
@@ -60,7 +78,6 @@ export function registerRunIpc(terminalController?: TerminalSessionController): 
   });
 
   ipcMain.handle(IPC.PROCESS_DISMISS, (_e, processId: string) => {
-    updateRun(processId, { status: 'dismissed' });
     return { ok: true };
   });
 
@@ -223,9 +240,6 @@ export function registerRunIpc(terminalController?: TerminalSessionController): 
     id.credentials = (id.credentials || []).filter((c: any) => !(c.label === label && c.service === service));
     await saveIdentity(id);
   });
-
-  // ── Calendar (stub) ──────────────────────────────────────────────────────────
-  ipcMain.handle(IPC.CALENDAR_LIST, (_e: any, _from?: string, _to?: string) => []);
 
   // ── Filesystem ───────────────────────────────────────────────────────────────
   ipcMain.handle(IPC.FS_READ_DIR, async (_e, dirPath: string) => {

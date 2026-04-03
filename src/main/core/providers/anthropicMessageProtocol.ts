@@ -132,11 +132,20 @@ export function normalizeAnthropicMessages(
 
     if (message.role === 'user' && content) {
       const toolResults = content.filter((block) => block?.type === 'tool_result' && typeof block.tool_use_id === 'string');
-      const nonToolResults = content.filter((block) => block?.type !== 'tool_result');
+      const nonToolResults = content.filter((block) => block?.type !== 'tool_result' && !(block?.type === 'text' && !(block as any).text));
 
       if (toolResults.length === 0) {
         flushPendingToolUses('a non-tool user message');
-        normalized.push(message);
+        if (Array.isArray(message.content)) {
+          const filtered = message.content.filter((b: any) => !(b?.type === 'text' && !b.text));
+          normalized.push({ ...message, content: filtered.length > 0 ? filtered : message.content });
+        } else if (typeof message.content === 'string' && !message.content) {
+          // Empty-string content is rejected by Anthropic. Use a zero-width space placeholder.
+          normalized.push({ ...message, content: '\u200b' });
+          issues.push('Replaced empty string user message content with placeholder.');
+        } else {
+          normalized.push(message);
+        }
         continue;
       }
 

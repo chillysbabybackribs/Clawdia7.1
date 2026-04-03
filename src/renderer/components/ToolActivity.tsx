@@ -38,6 +38,9 @@ const TOOL_DISPLAY_NAMES: Record<string, string> = {
   gui_interact: 'GUI',
   dbus_control: 'DBus',
   search_tools: 'Search Tools',
+  codex_command_execution: 'Shell',
+  codex_function_call: 'Tool Call',
+  codex_mcp_tool_call: 'MCP',
 };
 
 function getDisplayName(name: string): string {
@@ -56,11 +59,15 @@ function getCleanLabel(tool: ToolCall): string {
 
   switch (tool.name) {
     case 'shell_exec':
-    case 'bash': {
+    case 'bash':
+    case 'codex_command_execution': {
       const cmd = typeof args.command === 'string' ? args.command : typeof args.cmd === 'string' ? args.cmd : '';
       if (!cmd) return displayName;
-      const tokens = cmd.trim().split(/\s+/).filter(w => !w.startsWith('-') && w.length > 1).slice(0, 4);
-      return tokens.join(' ') || cmd.slice(0, 60);
+      // Strip shell wrapper (e.g. /bin/bash -lc "...") to show just the inner command
+      const inner = cmd.match(/^\/bin\/(?:bash|sh)\s+.*?"([^"]+)"$/) ?? cmd.match(/^\/bin\/(?:bash|sh)\s+.*?'([^']+)'$/);
+      const effective = inner ? inner[1] : cmd;
+      const tokens = effective.trim().split(/\s+/).filter(w => !w.startsWith('-') && w.length > 1).slice(0, 4);
+      return tokens.join(' ') || effective.slice(0, 60);
     }
     case 'file_read':
     case 'file_write':

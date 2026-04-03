@@ -1,6 +1,7 @@
 // src/renderer/components/TabStrip.tsx
 import React from 'react';
 import type { ConversationTab } from '../tabLogic';
+import ExecutorIdentity from './ExecutorIdentity';
 
 interface TabStripProps {
   tabs: ConversationTab[];
@@ -10,46 +11,6 @@ interface TabStripProps {
   onNew: () => void;
   onReorder: (fromIndex: number, toIndex: number) => void;
 }
-
-const STRIP_BG = '#131316';
-
-const activeTabStyle: React.CSSProperties = {
-  background: '#1e1e22',
-  border: '1.5px solid rgba(255,255,255,0.22)',
-  boxShadow: '0 2px 8px rgba(0,0,0,0.5), inset 0 1px 0 rgba(255,255,255,0.10), inset 0 -1px 0 rgba(0,0,0,0.3)',
-};
-
-const inactiveTabStyle: React.CSSProperties = {
-  background: '#141419',
-  border: '1.5px solid rgba(255,255,255,0.08)',
-  boxShadow: [
-    '0 7px 16px rgba(0,0,0,0.48)',
-    '0 2px 5px rgba(0,0,0,0.34)',
-    'inset 0 1px 0 rgba(255,255,255,0.04)',
-    'inset 0 2px 5px rgba(255,255,255,0.025)',
-    'inset 0 -4px 10px rgba(0,0,0,0.72)',
-    'inset 0 0 0 1px rgba(0,0,0,0.22)',
-  ].join(', '),
-};
-
-const inactiveTabHoverStyle: React.CSSProperties = {
-  background: '#1a1a20',
-  border: '1.5px solid rgba(255,255,255,0.13)',
-  boxShadow: [
-    '0 9px 20px rgba(0,0,0,0.52)',
-    '0 3px 8px rgba(0,0,0,0.38)',
-    'inset 0 1px 0 rgba(255,255,255,0.06)',
-    'inset 0 2px 6px rgba(255,255,255,0.03)',
-    'inset 0 -4px 10px rgba(0,0,0,0.68)',
-    'inset 0 0 0 1px rgba(0,0,0,0.18)',
-  ].join(', '),
-};
-
-const draggingTabStyle: React.CSSProperties = {
-  background: '#24242a',
-  border: '1.5px solid rgba(255,255,255,0.35)',
-  boxShadow: '0 4px 16px rgba(0,0,0,0.6), inset 0 1px 0 rgba(255,255,255,0.12)',
-};
 
 function TabStatusIcon({ status, title }: { status?: ConversationTab['status']; title?: string }) {
   if (status === 'running') {
@@ -102,30 +63,11 @@ function TabStatusIcon({ status, title }: { status?: ConversationTab['status']; 
   return null;
 }
 
-function ModeBadge({ mode }: { mode?: ConversationTab['mode'] }) {
-  if (mode !== 'claude_terminal' && mode !== 'codex_terminal') return null;
-
-  const label = mode === 'claude_terminal' ? 'Claude Code' : 'Codex';
-  const color = mode === 'claude_terminal' ? '#f2c18d' : '#a9d2ff';
-
-  return (
-    <span
-      className="max-w-[84px] truncate text-[9px] font-semibold uppercase tracking-[0.08em] flex-shrink-0"
-      style={{ color }}
-      title={label}
-    >
-      {label}
-    </span>
-  );
-}
-
 export default function TabStrip({ tabs, activeTabId, onSwitch, onClose, onNew, onReorder }: TabStripProps) {
   const [hoveredId, setHoveredId] = React.useState<string | null>(null);
-
   const [draggingIndex, setDraggingIndex] = React.useState<number | null>(null);
   const stripRef = React.useRef<HTMLDivElement>(null);
   const tabRefs = React.useRef<(HTMLDivElement | null)[]>([]);
-  // Track current index during drag so swaps chain correctly
   const currentIndexRef = React.useRef<number | null>(null);
   const startXRef = React.useRef<number>(0);
   const didSwapRef = React.useRef(false);
@@ -143,7 +85,6 @@ export default function TabStrip({ tabs, activeTabId, onSwitch, onClose, onNew, 
     if (currentIndexRef.current === null) return;
     const cur = currentIndexRef.current;
 
-    // Check left neighbour
     if (cur > 0) {
       const leftEl = tabRefs.current[cur - 1];
       if (leftEl) {
@@ -158,7 +99,6 @@ export default function TabStrip({ tabs, activeTabId, onSwitch, onClose, onNew, 
       }
     }
 
-    // Check right neighbour
     if (cur < tabs.length - 1) {
       const rightEl = tabRefs.current[cur + 1];
       if (rightEl) {
@@ -177,7 +117,6 @@ export default function TabStrip({ tabs, activeTabId, onSwitch, onClose, onNew, 
   const handlePointerUp = (e: React.PointerEvent<HTMLDivElement>, index: number) => {
     e.currentTarget.releasePointerCapture(e.pointerId);
     if (!didSwapRef.current) {
-      // treat as click — use the tab at the current index (may differ after swaps)
       const finalIndex = currentIndexRef.current ?? index;
       const tab = tabs[finalIndex];
       if (tab && tab.id !== activeTabId) onSwitch(tab.id);
@@ -190,19 +129,14 @@ export default function TabStrip({ tabs, activeTabId, onSwitch, onClose, onNew, 
   return (
     <div
       ref={stripRef}
-      className="flex items-center px-2 h-[46px] flex-shrink-0"
+      className="flex items-end px-2 flex-shrink-0 gap-[3px]"
       style={{
-        background: STRIP_BG,
-        borderTop: '1px solid rgba(255,255,255,0.05)',
-        borderBottom: '1px solid rgba(255,255,255,0.12)',
-        boxShadow: [
-          '0 6px 20px rgba(0,0,0,0.7)',
-          '0 2px 6px rgba(0,0,0,0.5)',
-          'inset 0 1px 0 rgba(255,255,255,0.07)',
-          'inset 0 -2px 4px rgba(0,0,0,0.5)',
-        ].join(', '),
+        background: 'transparent',
+        height: 48,
         position: 'relative',
         zIndex: 10,
+        borderTop: 'none',
+        borderBottom: '1px solid rgba(255,255,255,0.12)',
       }}
     >
       {tabs.map((tab, index) => {
@@ -212,43 +146,83 @@ export default function TabStrip({ tabs, activeTabId, onSwitch, onClose, onNew, 
         const isDragging = draggingIndex === index;
         const title = tab.title?.trim() || 'New conversation';
 
-        const tabStyle = isDragging
-          ? draggingTabStyle
-          : isActive
-            ? activeTabStyle
-            : isHovered
-              ? inactiveTabHoverStyle
-              : inactiveTabStyle;
-
         return (
-          <React.Fragment key={tab.id}>
+          <div
+            key={tab.id}
+            ref={el => { tabRefs.current[index] = el; }}
+            onPointerDown={(e) => handlePointerDown(e, index)}
+            onPointerMove={handlePointerMove}
+            onPointerUp={(e) => handlePointerUp(e, index)}
+            onMouseEnter={() => { if (!isActive && draggingIndex === null) setHoveredId(tab.id); }}
+            onMouseLeave={() => setHoveredId(null)}
+            title={title}
+            className="relative flex items-center select-none min-w-0 flex-1 max-w-[200px]"
+            style={{
+              height: isActive ? 36 : 28,
+              alignSelf: 'flex-end',
+              cursor: isDragging ? 'grabbing' : 'pointer',
+              zIndex: isDragging ? 5 : isActive ? 3 : 1,
+              transition: 'height 0.18s ease-out',
+              borderRadius: '6px 6px 0 0',
+              background: isActive
+                ? 'linear-gradient(180deg, #2e2e2e 0%, #232323 100%)'
+                : isDragging
+                  ? 'rgba(255,255,255,0.07)'
+                  : isHovered
+                    ? 'rgba(255,255,255,0.05)'
+                    : 'rgba(255,255,255,0.03)',
+              borderTop: isActive ? '1px solid rgba(255,255,255,0.16)' : `1px solid ${isHovered ? 'rgba(255,255,255,0.13)' : 'rgba(255,255,255,0.07)'}`,
+              borderLeft: isActive ? '1px solid rgba(255,255,255,0.10)' : '1px solid rgba(255,255,255,0.05)',
+              borderRight: isActive ? '1px solid rgba(255,255,255,0.10)' : '1px solid rgba(255,255,255,0.05)',
+              borderBottom: 'none',
+              boxShadow: isActive
+                ? '0 -2px 14px rgba(0,0,0,0.5), inset 0 1px 0 rgba(255,255,255,0.08)'
+                : 'none',
+            }}
+          >
+            {/* Top accent highlight on active */}
+            {isActive && (
+              <div
+                className="absolute left-0 right-0 pointer-events-none"
+                style={{
+                  top: 0,
+                  height: 1,
+                  borderRadius: '6px 6px 0 0',
+                  background: 'linear-gradient(90deg, transparent 0%, rgba(255,255,255,0.3) 25%, rgba(255,255,255,0.6) 50%, rgba(255,255,255,0.3) 75%, transparent 100%)',
+                }}
+              />
+            )}
+
             <div
-              ref={el => { tabRefs.current[index] = el; }}
-              onPointerDown={(e) => handlePointerDown(e, index)}
-              onPointerMove={handlePointerMove}
-              onPointerUp={(e) => handlePointerUp(e, index)}
-              onMouseEnter={() => { if (!isActive && draggingIndex === null) setHoveredId(tab.id); }}
-              onMouseLeave={() => setHoveredId(null)}
-              title={title}
-              className="relative flex items-center gap-[6px] px-[10px] my-[8px] h-[30px] rounded-lg select-none text-[13px] font-medium min-w-0 flex-1 max-w-[180px] group mr-[3px]"
+              className="relative flex items-center gap-[6px] w-full h-full pointer-events-auto"
               style={{
-                ...tabStyle,
-                color: isDragging ? '#e4e4e8' : isActive ? '#e4e4e8' : isHovered ? 'rgba(255,255,255,0.7)' : 'rgba(255,255,255,0.45)',
-                cursor: isDragging ? 'grabbing' : 'grab',
-                transition: 'background 0.12s, border-color 0.12s, box-shadow 0.12s',
-                zIndex: isDragging ? 2 : 1,
+                padding: '0 12px',
+                color: isActive
+                  ? 'rgba(255,255,255,0.95)'
+                  : isHovered
+                    ? 'rgba(255,255,255,0.65)'
+                    : 'rgba(255,255,255,0.38)',
+                transition: 'color 0.15s',
               }}
             >
               <TabStatusIcon status={tab.status} />
-              <span className="truncate min-w-0 flex-1">{title}</span>
-              <ModeBadge mode={tab.mode} />
+              <ExecutorIdentity mode={tab.mode} isActive={isActive} />
+              <span
+                className={`truncate min-w-0 flex-1 ${isActive ? 'text-[12px] font-semibold tracking-[0.01em]' : 'text-[11.5px] font-medium'}`}
+                style={{
+                  maskImage: 'linear-gradient(90deg, #000 0%, #000 calc(100% - 18px), transparent)',
+                  WebkitMaskImage: 'linear-gradient(90deg, #000 0%, #000 calc(100% - 18px), transparent)',
+                }}
+              >
+                {title}
+              </span>
               {!isOnly && (
                 <span
                   onPointerDown={(e) => e.stopPropagation()}
                   onClick={(e) => { e.stopPropagation(); onClose(tab.id); }}
-                  className="text-[15px] leading-none transition-colors cursor-pointer flex-shrink-0"
+                  className="flex items-center justify-center w-[15px] h-[15px] rounded-full text-[13px] leading-none transition-all cursor-pointer flex-shrink-0 hover:bg-white/[0.12]"
                   style={{
-                    color: isActive ? 'rgba(255,255,255,0.3)' : isHovered ? 'rgba(255,255,255,0.3)' : 'transparent',
+                    color: isActive ? 'rgba(255,255,255,0.45)' : isHovered ? 'rgba(255,255,255,0.35)' : 'transparent',
                   }}
                   title="Close tab"
                 >
@@ -256,14 +230,13 @@ export default function TabStrip({ tabs, activeTabId, onSwitch, onClose, onNew, 
                 </span>
               )}
             </div>
-            <span style={{ width: 1, height: 14, background: 'rgba(255,255,255,0.08)', flexShrink: 0 }} />
-          </React.Fragment>
+          </div>
         );
       })}
 
       <button
         onClick={onNew}
-        className="flex items-center justify-center h-full px-[10px] text-[20px] text-text-muted hover:text-text-primary leading-none cursor-pointer transition-colors"
+        className="flex items-center justify-center w-[26px] h-[26px] mb-[2px] ml-1 rounded-full text-[18px] text-text-muted hover:text-text-primary hover:bg-white/[0.06] leading-none cursor-pointer transition-all flex-shrink-0"
         title="New conversation"
       >
         +

@@ -78,7 +78,10 @@ function getAnthropicTools(
   // 'full' means no specific tool group was detected — treat as conversational.
   // The LLM can call search_tools if it decides it needs something.
   if (profile.toolGroup === 'full') {
-    return [SEARCH_TOOL_ANTHROPIC, ...SELF_AWARE_TOOLS];
+    const selfAware = profile.linearExecution
+      ? SELF_AWARE_TOOLS.filter(t => t.name !== 'agent_plan' && t.name !== 'agent_status')
+      : SELF_AWARE_TOOLS;
+    return [SEARCH_TOOL_ANTHROPIC, ...selfAware];
   }
 
   const isBrowserProfile = profile.toolGroup === 'browser';
@@ -89,7 +92,13 @@ function getAnthropicTools(
   ];
 
   if (!isBrowserProfile) {
-    base.push(...SELF_AWARE_TOOLS);
+    // For linear/direct-execution tasks, strip agent_plan (scratchpad) and agent_status
+    // (used by the LLM as a pre-task "orient myself" call). Keep tool_call_history and
+    // agent_checkpoint (lightweight telemetry reads that do not encourage planning loops).
+    const selfAware = profile.linearExecution
+      ? SELF_AWARE_TOOLS.filter(t => t.name !== 'agent_plan' && t.name !== 'agent_status')
+      : SELF_AWARE_TOOLS;
+    base.push(...selfAware);
   }
 
   if (isBrowserProfile) {
@@ -97,15 +106,21 @@ function getAnthropicTools(
     // Electron browser tools follow for tasks needing real rendering/interaction.
     base.push(WEB_SEARCH_TOOL, WEB_FETCH_TOOL);
     base.push(...(isFirstBrowserTurn ? FIRST_TURN_BROWSER_TOOLS : BROWSER_TOOLS));
+    // CDP and system tools are discoverable via search_tools — not eagerly loaded
+    // to avoid bloating the tool list with 39 extra schemas per request.
   }
 
   if (profile.toolGroup === 'desktop') {
     base.push(...DESKTOP_TOOLS);
+    // System tools (safeStorage, net.fetch, globalShortcut, RemoteDesktop portal)
+    // are discoverable via search_tools — not eagerly loaded.
   }
 
-  if (profile.toolGroup !== 'browser' && profile.toolGroup !== 'desktop') {
-    base.unshift(SEARCH_TOOL_ANTHROPIC);
-  }
+  // search_tools is the gateway to CDP/system tools not eagerly loaded.
+  // Skip it for linearExecution on core/coding profiles — all needed tools
+  // are already in base (shell + selfAware), so discovery overhead is wasted.
+  const needsDiscovery = !profile.linearExecution || isBrowserProfile || profile.toolGroup === 'desktop';
+  if (needsDiscovery) base.unshift(SEARCH_TOOL_ANTHROPIC);
 
   // Merge in any tools discovered via search_tools in prior iterations
   for (const tool of accumulated) {
@@ -128,15 +143,24 @@ function buildOpenAITools(
     }).map(toOpenAITool);
   }
   if (profile.toolGroup === 'full') {
-    return [SEARCH_TOOL_OPENAI, ...SELF_AWARE_TOOLS.map(toOpenAITool)];
+    const selfAware = profile.linearExecution
+      ? SELF_AWARE_TOOLS.filter(t => t.name !== 'agent_plan' && t.name !== 'agent_status')
+      : SELF_AWARE_TOOLS;
+    return [SEARCH_TOOL_OPENAI, ...selfAware.map(toOpenAITool)];
   }
 
   const shell = searchTools({ names: SHELL_TOOL_NAMES });
   const isBrowserProfile = profile.toolGroup === 'browser';
   const isFirstBrowserTurn = isBrowserProfile && currentIteration <= 1;
+  const selfAware = isBrowserProfile ? [] :
+    (profile.linearExecution
+      ? SELF_AWARE_TOOLS.filter(t => t.name !== 'agent_plan' && t.name !== 'agent_status')
+      : SELF_AWARE_TOOLS);
+  const needsDiscovery = !profile.linearExecution || isBrowserProfile || profile.toolGroup === 'desktop';
   const tools = [
+    ...(needsDiscovery ? [SEARCH_TOOL_OPENAI] : []),
     ...shell.map(toOpenAITool),
-    ...(isBrowserProfile ? [] : SELF_AWARE_TOOLS.map(toOpenAITool)),
+    ...selfAware.map(toOpenAITool),
   ];
   if (profile.toolGroup === 'desktop') {
     tools.push(...searchTools({ names: ['gui_interact', 'dbus_control'] }).map(toOpenAITool));
@@ -166,7 +190,7 @@ function getOpenAITools(
   // search_tools has run, each iteration may have a different tool set.
   if (accumulated.length === 0) {
     const iterationBucket = profile.toolGroup === 'browser' && currentIteration <= 1 ? 'first' : 'default';
-    const key = `${profile.specialMode ?? ''}:${profile.toolGroup}:${iterationBucket}`;
+    const key = `${profile.specialMode ?? ''}:${profile.toolGroup}:${iterationBucket}:${profile.linearExecution ? 'linear' : 'full'}`;
     if (!_openAIToolCache.has(key)) {
       _openAIToolCache.set(key, buildOpenAITools(profile, currentIteration));
     }
@@ -184,17 +208,24 @@ function buildGeminiTools(profile: AgentProfile, currentIteration = 0, accumulat
     }];
   }
   if (profile.toolGroup === 'full') {
-    return [{ functionDeclarations: [getSearchToolGemini(), ...SELF_AWARE_TOOLS.map(toGeminiDeclaration)] }];
+    const selfAware = profile.linearExecution
+      ? SELF_AWARE_TOOLS.filter(t => t.name !== 'agent_plan' && t.name !== 'agent_status')
+      : SELF_AWARE_TOOLS;
+    return [{ functionDeclarations: [getSearchToolGemini(), ...selfAware.map(toGeminiDeclaration)] }];
   }
 
   const shellDecls = searchTools({ names: SHELL_TOOL_NAMES }).map(toGeminiDeclaration);
   const isBrowserProfile = profile.toolGroup === 'browser';
   const isFirstBrowserTurn = isBrowserProfile && currentIteration <= 1;
-  const selfAwareDecls = isBrowserProfile ? [] : SELF_AWARE_TOOLS.map(toGeminiDeclaration);
+  const selfAwareDecls = isBrowserProfile ? [] :
+    (profile.linearExecution
+      ? SELF_AWARE_TOOLS.filter(t => t.name !== 'agent_plan' && t.name !== 'agent_status').map(toGeminiDeclaration)
+      : SELF_AWARE_TOOLS.map(toGeminiDeclaration));
   const desktopDecls = profile.toolGroup === 'desktop'
     ? searchTools({ names: ['gui_interact', 'dbus_control'] }).map(toGeminiDeclaration)
     : [];
-  const decls = [getSearchToolGemini(), ...shellDecls, ...selfAwareDecls, ...desktopDecls];
+  const needsDiscovery = !profile.linearExecution || isBrowserProfile || profile.toolGroup === 'desktop';
+  const decls = [...(needsDiscovery ? [getSearchToolGemini()] : []), ...shellDecls, ...selfAwareDecls, ...desktopDecls];
   if (isBrowserProfile) {
     decls.push(...(isFirstBrowserTurn ? FIRST_TURN_BROWSER_TOOLS : BROWSER_TOOLS).map(toGeminiDeclaration));
   }

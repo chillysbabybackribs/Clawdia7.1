@@ -14,6 +14,7 @@ export interface RunCodexCliOptions {
   onText: (delta: string) => void;
   onToolActivity?: (activity: ToolCall) => void;
   onEvent?: (event: { type: string; threadId?: string | null }) => void;
+  signal?: AbortSignal;
 }
 
 export interface RunCodexCliResult {
@@ -63,6 +64,16 @@ function codexItemDetail(item: Record<string, unknown>): string {
   return String(item.type ?? 'activity');
 }
 
+/** Strip noisy/internal fields from a Codex item record to produce clean input args for display. */
+function codexItemInput(item: Record<string, unknown>): Record<string, unknown> {
+  const SKIP = new Set(['id', 'status', 'aggregated_output', 'exit_code', 'type']);
+  const out: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(item)) {
+    if (!SKIP.has(k)) out[k] = v;
+  }
+  return out;
+}
+
 function codexItemOutput(item: Record<string, unknown>): string {
   const candidates = [item.output, item.result, item.summary, item.text, item.error];
   for (const candidate of candidates) {
@@ -84,7 +95,7 @@ function codexItemText(item: Record<string, unknown>): string | null {
 }
 
 export function runCodexCli(options: RunCodexCliOptions): Promise<RunCodexCliResult> {
-  const { conversationId, prompt, onText, onToolActivity, onEvent } = options;
+  const { conversationId, prompt, onText, onToolActivity, onEvent, signal } = options;
   const compiledPrompt = buildCodexPrompt(prompt);
   const codexBin = process.env.CODEX_BIN || 'codex';
   const inMemorySessionId = sessions.get(conversationId);
@@ -102,6 +113,16 @@ export function runCodexCli(options: RunCodexCliOptions): Promise<RunCodexCliRes
       env: { ...process.env, ...(openaiKey ? { OPENAI_API_KEY: openaiKey } : {}) },
       stdio: ['pipe', 'pipe', 'pipe'],
     });
+
+    if (signal) {
+      if (signal.aborted) {
+        child.kill('SIGTERM');
+      } else {
+        signal.addEventListener('abort', () => {
+          child.kill('SIGTERM');
+        }, { once: true });
+      }
+    }
 
     child.stdin.write(compiledPrompt);
     child.stdin.end();
@@ -182,7 +203,7 @@ export function runCodexCli(options: RunCodexCliOptions): Promise<RunCodexCliRes
 
         if (msg.type === 'item.started' && !isTextualItem && onToolActivity) {
           const detail = codexItemDetail(itemRecord);
-          const input = JSON.stringify(itemRecord, null, 2);
+          const input = JSON.stringify(codexItemInput(itemRecord), null, 2);
           pendingActivities.set(itemId, {
             name: codexItemToolName(itemType),
             detail,
@@ -204,6 +225,11 @@ export function runCodexCli(options: RunCodexCliOptions): Promise<RunCodexCliRes
             const text = itemRecord.text.trim();
             if (!text) continue;
             finalText = finalText ? `${finalText}\n\n${text}` : text;
+            // If this item was never streamed via item.updated, emit the full text now.
+            const alreadyStreamed = streamedTextByItemId.get(itemId) ?? '';
+            const remainder = text.startsWith(alreadyStreamed) ? text.slice(alreadyStreamed.length) : text;
+            if (remainder) onText(remainder);
+            streamedTextByItemId.set(itemId, text);
             continue;
           }
 
@@ -217,7 +243,7 @@ export function runCodexCli(options: RunCodexCliOptions): Promise<RunCodexCliRes
               name: pending?.name ?? codexItemToolName(itemType),
               status: 'success',
               detail: pending?.detail ?? codexItemDetail(itemRecord),
-              input: pending?.input ?? JSON.stringify(itemRecord, null, 2),
+              input: pending?.input ?? JSON.stringify(codexItemInput(itemRecord), null, 2),
               output: codexItemOutput(itemRecord),
               durationMs: pending ? Date.now() - pending.startedAt : undefined,
             });
@@ -233,7 +259,7 @@ export function runCodexCli(options: RunCodexCliOptions): Promise<RunCodexCliRes
             name: pending?.name ?? codexItemToolName(itemType),
             status: 'error',
             detail: pending?.detail ?? codexItemDetail(itemRecord),
-            input: pending?.input ?? JSON.stringify(itemRecord, null, 2),
+            input: pending?.input ?? JSON.stringify(codexItemInput(itemRecord), null, 2),
             output: codexItemOutput(itemRecord),
             durationMs: pending ? Date.now() - pending.startedAt : undefined,
           });

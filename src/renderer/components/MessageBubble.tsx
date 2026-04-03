@@ -37,7 +37,7 @@ export default function MessageBubble({ message }: MessageBubbleProps) {
 
         {message.content && (
           <div
-            className="message-prose text-[0.9rem] leading-relaxed"
+            className="message-prose text-[0.9rem] leading-relaxed px-3 py-0.5"
             dangerouslySetInnerHTML={{ __html: `<p>${renderContent(message.content)}</p>` }}
           />
         )}

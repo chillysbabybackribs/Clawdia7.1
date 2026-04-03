@@ -1,0 +1,95 @@
+{
+  "_comment": "Service registry — maps known services to their native API tools. Used by serviceResolver.ts to inject API-first guidance into the system prompt only when the user's message matches a known service. Add new services here; no code changes required.",
+  "services": {
+    "twitch": {
+      "keywords": ["twitch", "twitch.tv", "stream title", "stream category", "channel description", "going live", "start streaming", "twitch stream", "twitch chat", "twitch tags"],
+      "domains": ["twitch.tv", "dashboard.twitch.tv"],
+      "description": "Twitch streaming platform — channel and stream management",
+      "tools": ["twitch_get_channel", "twitch_update_channel", "twitch_search_categories", "twitch_get_stream"],
+      "auth": "oauth_browser_session",
+      "authNote": "Reuse existing Twitch browser session via system_fetch (cookie-aware). No separate auth needed if user is logged in to Twitch in the Clawdia browser.",
+      "apiNote": "Use PATCH /helix/channels for title/category/tags. Use GET /helix/channels for current state. Requires broadcaster_id param."
+    },
+    "obs": {
+      "keywords": ["obs", "obs studio", "scene", "source", "stream layout", "webcam position", "capture", "obs scene", "obs source", "streaming setup", "stream overlay", "canvas size"],
+      "domains": [],
+      "description": "OBS Studio — scene, source, and stream configuration via WebSocket",
+      "tools": ["obs_get_scene_list", "obs_set_current_scene", "obs_get_scene_items", "obs_set_scene_item_transform", "obs_set_stream_settings", "obs_start_stream", "obs_stop_stream"],
+      "auth": "websocket_local",
+      "authNote": "OBS WebSocket runs locally at port 4455. Password stored in ~/.config/obs-studio/global.ini under [OBSWebSocket] > ServerPassword.",
+      "apiNote": "Use obs-websocket protocol v5. Call GetSceneItemList to enumerate sources, SetSceneItemTransform to reposition/resize. Always read current transform before writing."
+    },
+    "github": {
+      "keywords": ["github", "pull request", "pr", "issue", "repo", "repository", "branch", "commit", "github actions", "workflow", "gist", "fork", "release"],
+      "domains": ["github.com", "api.github.com"],
+      "description": "GitHub — repository, PR, issue, and Actions management",
+      "tools": ["shell_exec"],
+      "auth": "gh_cli",
+      "authNote": "Use the `gh` CLI (already authenticated). Prefer `gh pr`, `gh issue`, `gh repo`, `gh run` over browser automation or raw API calls.",
+      "apiNote": "gh CLI covers 95% of GitHub tasks. Fall back to `gh api` for endpoints not covered by subcommands."
+    },
+    "vscode": {
+      "keywords": ["vscode", "vs code", "visual studio code", "extension", "workspace settings", "code editor", "launch.json", "settings.json", "keybindings"],
+      "domains": [],
+      "description": "VS Code — editor configuration and extension management",
+      "tools": ["shell_exec"],
+      "auth": "none",
+      "authNote": "Use `code` CLI for most operations. Config files live in ~/.config/Code/User/.",
+      "apiNote": "Prefer editing settings.json / keybindings.json directly over GUI automation."
+    },
+    "npm": {
+      "keywords": ["npm", "package.json", "node_modules", "yarn", "pnpm", "install package", "publish package", "npm run", "npm install"],
+      "domains": ["npmjs.com", "registry.npmjs.org"],
+      "description": "npm — package installation, publishing, and script execution",
+      "tools": ["shell_exec"],
+      "auth": "none",
+      "authNote": "Use shell_exec with npm/yarn/pnpm commands directly.",
+      "apiNote": "npm CLI is always preferred over browser automation of npmjs.com."
+    },
+    "spotify": {
+      "keywords": ["spotify", "play music", "pause music", "skip track", "now playing", "playlist", "spotify track", "volume"],
+      "domains": ["spotify.com", "api.spotify.com"],
+      "description": "Spotify — playback control and playlist management",
+      "tools": ["dbus_control"],
+      "auth": "dbus_mpris",
+      "authNote": "Use dbus_control with MPRIS2 interface (org.mpris.MediaPlayer2.spotify) for local playback control. For playlist/library ops, use Spotify Web API with OAuth token.",
+      "apiNote": "MPRIS via DBus handles play/pause/skip/volume without any API key. Web API needed for search, playlists, library."
+    },
+    "linear": {
+      "keywords": ["linear", "linear issue", "linear ticket", "sprint", "backlog", "linear project"],
+      "domains": ["linear.app"],
+      "description": "Linear — issue tracking and project management",
+      "tools": ["system_fetch"],
+      "auth": "api_key_settings",
+      "authNote": "Linear GraphQL API at https://api.linear.app/graphql. API key stored in clawdia settings or secret store.",
+      "apiNote": "Use system_fetch with Authorization header. All data ops (create/update/list issues) go through the GraphQL API, not browser automation."
+    },
+    "figma": {
+      "keywords": ["figma", "design file", "figma component", "figma frame", "export from figma", "figma plugin"],
+      "domains": ["figma.com", "api.figma.com"],
+      "description": "Figma — design file access and export",
+      "tools": ["system_fetch"],
+      "auth": "api_key_settings",
+      "authNote": "Figma REST API at https://api.figma.com/v1. Personal access token stored in settings or secret store.",
+      "apiNote": "Use GET /files/:key for structure, GET /images/:key for exports. Browser automation of figma.com is a last resort."
+    },
+    "slack": {
+      "keywords": ["slack", "slack message", "send to slack", "slack channel", "slack dm", "slack notification"],
+      "domains": ["slack.com", "api.slack.com"],
+      "description": "Slack — messaging and notifications",
+      "tools": ["system_fetch"],
+      "auth": "webhook_or_token",
+      "authNote": "Prefer Incoming Webhooks for one-way notifications (URL in settings). Use Bot token + Web API for reading/posting to channels.",
+      "apiNote": "POST to webhook URL via system_fetch for simple notifications. Use chat.postMessage for full control."
+    },
+    "discord": {
+      "keywords": ["discord", "discord message", "send to discord", "discord channel", "discord webhook", "discord bot"],
+      "domains": ["discord.com", "discord.gg"],
+      "description": "Discord — messaging via webhook or bot",
+      "tools": ["system_fetch"],
+      "auth": "webhook_or_token",
+      "authNote": "Use webhook URL for simple channel messages. Bot token for full API access.",
+      "apiNote": "POST JSON to webhook URL via system_fetch. No browser automation needed."
+    }
+  }
+}
