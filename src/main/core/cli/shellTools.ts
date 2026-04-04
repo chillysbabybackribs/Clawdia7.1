@@ -1,5 +1,6 @@
 import { exec } from 'child_process';
 import * as fs from 'fs';
+import * as path from 'path';
 import { truncateToolResult, SHELL_MAX, FILE_MAX } from './truncate';
 
 // Timeout passed to exec so the OS process is killed when it overruns.
@@ -65,15 +66,40 @@ export async function executeShellTool(name: string, args: Record<string, unknow
     if (name === 'file_search') {
       const pattern = args.pattern as string;
       const searchPath = (args.path as string) || '.';
-      const glob = (args.glob as string) || '*';
-      const { stdout } = await execAsync(
-        `grep -rn --include=${JSON.stringify(glob)} -m 5 ${JSON.stringify(pattern)} ${JSON.stringify(searchPath)} 2>/dev/null || true`
-      );
-      const lines = stdout.trim().split('\n').filter(Boolean).slice(0, 20);
-      const matches = lines.map(line => {
-        const m = line.match(/^(.+?):(\d+):(.*)$/);
-        return m ? { file: m[1], line: parseInt(m[2]), text: m[3].trim() } : { raw: line };
-      });
+      const globPattern = (args.glob as string) || '*';
+      const regex = new RegExp(pattern);
+      const matches: Array<{ file: string; line: number; text: string }> = [];
+
+      function matchesGlob(filename: string, glob: string): boolean {
+        if (glob === '*') return true;
+        const escaped = glob.replace(/[.+^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '.*').replace(/\?/g, '.');
+        return new RegExp(`^${escaped}$`).test(filename);
+      }
+
+      function walk(dir: string): void {
+        if (matches.length >= 20) return;
+        let entries: fs.Dirent[];
+        try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch { return; }
+        for (const entry of entries) {
+          if (matches.length >= 20) return;
+          const fullPath = path.join(dir, entry.name);
+          if (entry.isDirectory()) {
+            if (entry.name === 'node_modules' || entry.name === '.git') continue;
+            walk(fullPath);
+          } else if (entry.isFile() && matchesGlob(entry.name, globPattern)) {
+            let content: string;
+            try { content = fs.readFileSync(fullPath, 'utf-8'); } catch { continue; }
+            const lines = content.split('\n');
+            for (let i = 0; i < lines.length && matches.length < 20; i++) {
+              if (regex.test(lines[i])) {
+                matches.push({ file: fullPath, line: i + 1, text: lines[i].trim() });
+              }
+            }
+          }
+        }
+      }
+
+      walk(searchPath);
       return truncateToolResult(JSON.stringify(matches), SHELL_MAX);
     }
     if (name === 'file_edit' || name === 'str_replace_based_edit_tool') {

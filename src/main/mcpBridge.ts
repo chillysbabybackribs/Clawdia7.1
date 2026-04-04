@@ -650,6 +650,65 @@ function createConversationServer(conversationId: string): McpServer {
     );
   }
 
+  // ── Filesystem Tools ────────────────────────────────────────────────────────
+  server.registerTool(
+    'clawdia_fs_read_file',
+    {
+      description: 'Read the contents of a local file. Returns the text content of the file.',
+      inputSchema: {
+        path: z.string().describe('Absolute path to the file to read'),
+        maxBytes: z.number().optional().describe('Maximum bytes to read (default: 1048576 = 1MB)'),
+      },
+    },
+    async ({ path: filePath, maxBytes }) => {
+      try {
+        const result = await executeShellTool('file_edit', { command: 'view', path: filePath });
+        const limit = maxBytes ?? 1_048_576;
+        const truncated = result.length > limit ? result.slice(0, limit) + '\n[truncated]' : result;
+        return jsonToolResult({ conversationId, ok: true, path: filePath, content: truncated });
+      } catch (error) {
+        return errorToolResult((error as Error).message);
+      }
+    },
+  );
+
+  server.registerTool(
+    'clawdia_fs_write_file',
+    {
+      description: 'Write content to a local file. Creates the file if it does not exist, overwrites if it does.',
+      inputSchema: {
+        path: z.string().describe('Absolute path to the file to write'),
+        content: z.string().describe('Content to write to the file'),
+      },
+    },
+    async ({ path: filePath, content }) => {
+      try {
+        const result = await executeShellTool('file_edit', { command: 'create', path: filePath, file_text: content });
+        return jsonToolResult({ conversationId, ok: true, path: filePath, result });
+      } catch (error) {
+        return errorToolResult((error as Error).message);
+      }
+    },
+  );
+
+  server.registerTool(
+    'clawdia_fs_list_dir',
+    {
+      description: 'List the contents of a directory. Returns structured JSON with name, type, and size for each entry.',
+      inputSchema: {
+        path: z.string().describe('Absolute path to the directory to list'),
+      },
+    },
+    async ({ path: dirPath }) => {
+      try {
+        const result = await executeShellTool('file_list_directory', { path: dirPath });
+        return jsonToolResult({ conversationId, ok: true, path: dirPath, entries: JSON.parse(result) });
+      } catch (error) {
+        return errorToolResult((error as Error).message);
+      }
+    },
+  );
+
   // ── Shell Exec ──────────────────────────────────────────────────────────────
   server.registerTool(
     'shell_exec',

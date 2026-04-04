@@ -93,6 +93,8 @@ function toolSummary(name: string, input: Record<string, unknown>): string {
       return `Write file: ${input.path ?? '?'}`;
     case 'clawdia_fs_list_dir':
       return `List dir: ${input.path ?? '?'}`;
+    case 'shell_exec':
+      return `Shell: ${String(input.command ?? '').slice(0, 80) || '?'}`;
     case 'clawdia_terminal_spawn':
       return `Terminal: ${String(input.command ?? '?').slice(0, 80)}`;
     case 'clawdia_terminal_write':

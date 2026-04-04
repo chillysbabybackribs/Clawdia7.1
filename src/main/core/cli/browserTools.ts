@@ -649,6 +649,24 @@ async function executeOnActiveTab(
       return (browser as ElectronBrowserService).getNetworkActivity();
     case 'browser_set_user_agent':
       return (browser as ElectronBrowserService).setUserAgent(input.userAgent as string);
+    case 'browser_right_click':
+    case 'browser_double_click':
+    case 'browser_click_at':
+    case 'browser_double_click_at':
+    case 'browser_drag_coords':
+    case 'browser_move_to':
+    case 'browser_scroll_at':
+    case 'browser_drag':
+    case 'browser_verify_action': {
+      // These tools only exist as OnTab variants — resolve the active tab and delegate.
+      if (!(browser instanceof ElectronBrowserService)) {
+        return { ok: false, error: `Tool ${name} requires ElectronBrowserService` };
+      }
+      const tabs = await browser.listTabs();
+      const activeTab = tabs.find(t => t.active);
+      if (!activeTab) return { ok: false, error: 'No active browser tab' };
+      return executeOnTab(name, input, browser, activeTab.id);
+    }
     case 'browser_open_file':
       return openFileInBrowser(
         input.filePath as string,
